@@ -1,0 +1,296 @@
+# LLM Router WAF Configuration Example
+# Copy this file to config.yaml and customize for your environment
+
+# =============================================================================
+# SERVER CONFIGURATION
+# =============================================================================
+
+server:
+  port: "8080"                    # Port to listen on
+  read_timeout: 30s               # Maximum duration for reading request
+  write_timeout: 30s              # Maximum duration for writing response
+  max_header_bytes: 1048576       # Maximum size of request headers (1MB)
+
+# =============================================================================
+# ROUTER CONFIGURATION
+# =============================================================================
+
+router:
+  default_strategy: "cost_optimized"  # Default routing strategy
+                                      # Options: cost_optimized, performance, round_robin, specific
+  health_check_interval: 30s          # How often to check provider health
+  max_cost_threshold: 1.0             # Maximum cost per request (in USD)
+  enable_fallback_chaining: true      # Enable fallback to other providers on failure
+  request_timeout: 120s               # Maximum time for provider requests
+
+# =============================================================================
+# PROVIDER CONFIGURATION
+# =============================================================================
+
+providers:
+  # OpenAI Configuration
+  openai:
+    enabled: true
+    api_key_env: "OPENAI_API_KEY"     # Environment variable for API key
+    organization_env: "OPENAI_ORG_ID" # Environment variable for organization ID (optional)
+    timeout: 60s                      # Request timeout for OpenAI API
+    max_retries: 3                    # Maximum number of retries on failure
+    retry_delay: 1s                   # Initial delay between retries
+    base_url: "https://api.openai.com/v1"  # Base URL for OpenAI API
+    
+    # Model Configuration
+    models:
+      - name: "gpt-3.5-turbo"
+        enabled: true
+        cost_per_token: 0.000002      # Cost per token (input + output averaged)
+        max_context_window: 16385     # Maximum context window size
+        supports_functions: true      # Supports function calling
+        supports_vision: false        # Supports vision/image inputs
+        
+      - name: "gpt-4"
+        enabled: true
+        cost_per_token: 0.00003
+        max_context_window: 8192
+        supports_functions: true
+        supports_vision: false
+        
+      - name: "gpt-4-turbo"
+        enabled: true
+        cost_per_token: 0.00001
+        max_context_window: 128000
+        supports_functions: true
+        supports_vision: false
+        
+      - name: "gpt-4-vision-preview"
+        enabled: false                # Disabled by default
+        cost_per_token: 0.00003
+        max_context_window: 128000
+        supports_functions: true
+        supports_vision: true
+
+  # Anthropic Configuration  
+  anthropic:
+    enabled: true
+    api_key_env: "ANTHROPIC_API_KEY"  # Environment variable for API key
+    timeout: 60s                      # Request timeout for Anthropic API
+    max_retries: 3                    # Maximum number of retries on failure
+    retry_delay: 1s                   # Initial delay between retries
+    base_url: "https://api.anthropic.com"  # Base URL for Anthropic API
+    
+    # Model Configuration
+    models:
+      - name: "claude-3-haiku-20240307"
+        enabled: true
+        cost_per_token: 0.00000025    # Very low cost
+        max_context_window: 200000    # Large context window
+        supports_functions: false     # No function calling yet
+        supports_vision: true         # Supports vision inputs
+        
+      - name: "claude-3-sonnet-20240229"
+        enabled: true
+        cost_per_token: 0.000003      # Medium cost
+        max_context_window: 200000
+        supports_functions: false
+        supports_vision: true
+        
+      - name: "claude-3-opus-20240229"
+        enabled: false                # High cost, disabled by default
+        cost_per_token: 0.000015      # High cost but best quality
+        max_context_window: 200000
+        supports_functions: false
+        supports_vision: true
+
+# =============================================================================
+# SECURITY CONFIGURATION  
+# =============================================================================
+
+security:
+  # API Key Authentication
+  api_keys:
+    - "your-production-api-key-here"
+    - "your-staging-api-key-here"
+    # Add more API keys as needed
+    # Generate with: openssl rand -base64 32
+  
+  # JWT Configuration (optional)
+  jwt:
+    secret: "your-256-bit-jwt-secret-key-here"  # Change this!
+    expiry: "24h"                               # Token expiration time
+    issuer: "llm-router-waf"                    # JWT issuer
+  
+  # Rate Limiting Configuration
+  rate_limiting:
+    enabled: true                     # Enable rate limiting
+    requests_per_minute: 60           # Requests per minute per API key
+    burst_size: 10                    # Maximum burst size
+    window_duration: "1m"             # Rate limiting window
+    cleanup_interval: "5m"            # How often to cleanup old rate limit data
+    
+    # IP-based rate limiting (fallback for unauthenticated requests)
+    ip_based:
+      enabled: true
+      requests_per_minute: 100
+      burst_size: 20
+  
+  # CORS Configuration
+  cors:
+    allowed_origins:
+      - "*"                           # Allow all origins (change for production)
+      # - "https://yourdomain.com"
+      # - "https://*.yourdomain.com"
+    allowed_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"  
+      - "OPTIONS"
+    allowed_headers:
+      - "Content-Type"
+      - "Authorization"
+      - "X-API-Key"
+      - "X-Requested-With"
+    max_age: 86400                    # Preflight cache time (24 hours)
+  
+  # Request Validation Configuration
+  request_validation:
+    max_request_size: 10485760        # 10MB maximum request size
+    max_json_depth: 20                # Maximum JSON nesting depth
+    max_field_length: 1024            # Maximum length for individual fields
+    
+    # Allowed HTTP methods
+    allowed_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"
+      - "OPTIONS"
+    
+    # Allowed content types
+    allowed_content_types:
+      - "application/json"
+      - "text/plain"
+      - "multipart/form-data"
+    
+    # Blocked patterns (regex)
+    blocked_patterns:
+      - "(?i)<script[^>]*>.*?</script>"  # Block script tags
+      - "(?i)javascript:"                # Block javascript URLs
+      - "(?i)data:text/html"             # Block HTML data URLs
+      - "(?i)vbscript:"                  # Block VBScript
+    
+    # IP filtering (optional)
+    ip_whitelist: []                    # Allow specific IPs only
+    # ip_whitelist:
+    #   - "192.168.1.0/24"             # Internal network
+    #   - "10.0.0.0/8"                 # Corporate network
+    
+    ip_blacklist: []                    # Block specific IPs
+    # ip_blacklist:
+    #   - "203.0.113.0/24"             # Known bad network
+    
+    # User-Agent validation
+    user_agent_patterns: []             # Allowed user agent patterns
+    # user_agent_patterns:
+    #   - "^MyApp/.*"                   # Only allow MyApp user agents
+  
+  # Audit Logging Configuration
+  audit:
+    enabled: true                       # Enable security audit logging
+    log_file: "logs/security-audit.log" # Audit log file path
+    max_file_size: 104857600            # 100MB per log file
+    max_files: 10                       # Keep 10 log files (1GB total)
+    buffer_size: 1000                   # Internal buffer size
+    flush_interval: "10s"               # How often to flush logs
+    
+    # What to include in audit logs
+    include_request_headers: false       # Include request headers (may contain sensitive data)
+    include_response_headers: false      # Include response headers
+    
+    # Sensitive fields to redact from logs
+    sensitive_fields:
+      - "password"
+      - "token"
+      - "secret"
+      - "key"
+      - "authorization"
+      - "x-api-key"
+    
+    # Remote logging (optional)
+    # remote_endpoint: "https://siem.yourdomain.com/api/events"
+    # remote_token: "your-siem-auth-token"
+
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+
+logging:
+  level: "info"                       # Log level: debug, info, warn, error
+  format: "json"                      # Log format: json, text
+  output: "stdout"                    # Output: stdout, file
+  file: "logs/llm-router.log"         # Log file path (when output=file)
+  
+  # Log rotation (when output=file)
+  max_size: 104857600                 # 100MB per log file
+  max_files: 5                        # Keep 5 log files
+  max_age: 720                        # Keep logs for 30 days (720 hours)
+
+# =============================================================================
+# FEATURE FLAGS (Day 2+ Features)
+# =============================================================================
+
+features:
+  # Advanced routing features
+  advanced_routing: false             # Enable advanced routing algorithms
+  circuit_breaker: false              # Enable circuit breaker pattern
+  request_deduplication: false        # Enable request deduplication
+  
+  # Performance features  
+  response_caching: false             # Enable response caching
+  request_batching: false             # Enable request batching
+  connection_pooling: true            # Enable connection pooling
+  
+  # Analytics features
+  metrics_collection: false           # Enable metrics collection
+  usage_analytics: false             # Enable usage analytics
+  cost_tracking: true                # Enable cost tracking
+  
+  # Provider-specific features
+  openai_assistants: false           # Enable OpenAI Assistants API
+  anthropic_computer_use: false      # Enable Anthropic Computer Use
+  multimodal_optimization: false     # Enable multimodal request optimization
+
+# =============================================================================
+# ENVIRONMENT-SPECIFIC OVERRIDES
+# =============================================================================
+
+# Development environment overrides
+# Uncomment and customize for development
+# development:
+#   server:
+#     port: "8081"
+#   logging:
+#     level: "debug"
+#     format: "text"
+#   security:
+#     rate_limiting:
+#       enabled: false
+#     cors:
+#       allowed_origins: ["*"]
+
+# Production environment overrides  
+# Uncomment and customize for production
+# production:
+#   logging:
+#     level: "warn"
+#     output: "file"
+#   security:
+#     rate_limiting:
+#       requests_per_minute: 1000
+#     cors:
+#       allowed_origins: 
+#         - "https://yourapp.com"
+#         - "https://*.yourapp.com"
+#   features:
+#     response_caching: true
+#     metrics_collection: true
+#     usage_analytics: true

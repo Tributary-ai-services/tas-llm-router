@@ -1,0 +1,154 @@
+version: '3.8'
+
+services:
+  # Redis for caching and rate limiting
+  redis:
+    image: redis:7-alpine
+    container_name: llm-router-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - llm-router-network
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: llm-router-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - llm-router-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: llm-router-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - llm-router-network
+    depends_on:
+      - prometheus
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: llm-router-jaeger
+    ports:
+      - "14268:14268"  # jaeger.thrift over HTTP
+      - "16686:16686"  # Web UI
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - llm-router-network
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: llm-router-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "1888:1888"   # pprof extension
+      - "8888:8888"   # Prometheus metrics exposed by the collector
+      - "8889:8889"   # Prometheus exporter metrics
+      - "13133:13133" # health_check extension
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    depends_on:
+      - jaeger
+      - prometheus
+    networks:
+      - llm-router-network
+
+  # PostgreSQL for analytics data (optional)
+  postgres:
+    image: postgres:15-alpine
+    container_name: llm-router-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=llm_router_analytics
+      - POSTGRES_USER=llm_router
+      - POSTGRES_PASSWORD=dev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    networks:
+      - llm-router-network
+
+  # Vault for secrets management (optional)
+  vault:
+    image: vault:latest
+    container_name: llm-router-vault
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=dev-root-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    command: vault server -dev -dev-listen-address="0.0.0.0:8200"
+    networks:
+      - llm-router-network
+
+  # LLM Router application (for development)
+  llm-router:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    container_name: llm-router-app
+    ports:
+      - "8080:8080"
+    environment:
+      - LLM_ROUTER_LOG_LEVEL=debug
+      - LLM_ROUTER_LOG_FORMAT=text
+      - REDIS_URL=redis://redis:6379
+      - PROMETHEUS_URL=http://prometheus:9090
+      - JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - DATABASE_URL=postgres://llm_router:dev_password@postgres:5432/llm_router_analytics
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=dev-root-token
+    volumes:
+      - ../configs:/app/configs
+      - ../logs:/app/logs
+    depends_on:
+      - redis
+      - postgres
+      - otel-collector
+    networks:
+      - llm-router-network
+    profiles:
+      - full-stack  # Only start with: docker-compose --profile full-stack up
+
+volumes:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  postgres_data:
+
+networks:
+  llm-router-network:
+    driver: bridge

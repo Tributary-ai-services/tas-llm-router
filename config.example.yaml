@@ -1,0 +1,76 @@
+server:
+  port: "8080"
+  read_timeout: 30s
+  write_timeout: 30s
+  max_header_bytes: 1048576
+
+router:
+  default_strategy: "cost_optimized"
+  health_check_interval: 30s
+  max_cost_threshold: 1.0
+  enable_fallback_chaining: true
+  request_timeout: 120s
+
+providers:
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    timeout: 120s
+    models:
+      - name: "gpt-4o"
+        provider_model_id: "gpt-4o"
+        input_cost_per_1k: 0.005
+        output_cost_per_1k: 0.015
+        context_window: 128000
+        max_output_tokens: 4096
+      - name: "gpt-4o-mini"
+        provider_model_id: "gpt-4o-mini"
+        input_cost_per_1k: 0.00015
+        output_cost_per_1k: 0.0006
+        context_window: 128000
+        max_output_tokens: 16384
+      - name: "gpt-3.5-turbo"
+        provider_model_id: "gpt-3.5-turbo"
+        input_cost_per_1k: 0.0015
+        output_cost_per_1k: 0.002
+        context_window: 16385
+        max_output_tokens: 4096
+
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "https://api.anthropic.com"
+    timeout: 120s
+    models:
+      - name: "claude-3-5-sonnet-20241022"
+        provider_model_id: "claude-3-5-sonnet-20241022"
+        input_cost_per_1k: 0.003
+        output_cost_per_1k: 0.015
+        context_window: 200000
+        max_output_tokens: 8192
+      - name: "claude-3-haiku-20240307"
+        provider_model_id: "claude-3-haiku-20240307"
+        input_cost_per_1k: 0.00025
+        output_cost_per_1k: 0.00125
+        context_window: 200000
+        max_output_tokens: 4096
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+security:
+  api_keys: []
+  rate_limiting:
+    enabled: false
+    requests_per_minute: 60
+    burst_size: 10
+    window_duration: 1m
+  cors:
+    allowed_origins: ["*"]
+    allowed_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allowed_headers: ["Content-Type", "Authorization", "X-API-Key"]
+  request_validation:
+    max_request_size: 10485760
+    max_message_length: 100000
+    max_messages: 50

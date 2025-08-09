@@ -1,0 +1,46 @@
+# Development Dockerfile for LLM Router WAF
+# Optimized for development with hot reload and debugging
+
+FROM golang:1.23-alpine AS base
+
+# Install development tools
+RUN apk add --no-cache \
+    git \
+    ca-certificates \
+    tzdata \
+    curl \
+    bash
+
+# Install Air for hot reload
+RUN go install github.com/cosmtrek/air@latest
+
+# Install Delve for debugging
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
+WORKDIR /app
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN go build -gcflags="all=-N -l" -o llm-router cmd/llm-router/main.go
+
+# Create non-root user
+RUN addgroup -g 1001 -S appuser && \
+    adduser -u 1001 -S appuser -G appuser
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/configs /app/data && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
+# Expose ports
+EXPOSE 8080 2345
+
+# Default development command (can be overridden)
+CMD ["./llm-router", "--config", "configs/config.yaml"]

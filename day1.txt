@@ -1,0 +1,465 @@
+## **Implementation Tasks**
+
+### **Task 1: Project Setup & Dependencies** (30 min)
+
+**Claude Code Prompt:**
+```
+Create a new Go project with the following structure and dependencies:
+
+go.mod requirements:
+- Go 1.21+
+- github.com/gin-gonic/gin (HTTP router)
+- github.com/sashabaranov/go-openai (OpenAI SDK)
+- github.com/anthropics/anthropic-sdk-go (Anthropic SDK)
+- github.com/spf13/viper (configuration)
+- github.com/sirupsen/logrus (logging)
+- go.opentelemetry.io/otel (observability)
+- github.com/prometheus/client_golang (metrics)
+
+Create the directory structure as outlined above with empty files.
+```
+
+### **Task 2: Core Interfaces & Types** (90 min)
+
+**Claude Code Prompt:**
+```go
+// Define these interfaces and types in internal/providers/interfaces.go
+
+// Core provider interface - all providers must implement
+type LLMProvider interface {
+    GetCapabilities() ProviderCapabilities
+    GetProviderName() string
+    ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error)
+    StreamCompletion(ctx context.Context, req *ChatRequest) (<-chan *ChatChunk, error)
+    EstimateCost(req *ChatRequest) (*CostEstimate, error)
+    HealthCheck(ctx context.Context) error
+}
+
+// Advanced feature interfaces
+type FunctionCallingProvider interface {
+    LLMProvider
+    SupportsFunctionCalling() bool
+    SupportsParallelFunctions() bool
+}
+
+type VisionProvider interface {
+    LLMProvider
+    SupportsVision() bool
+    GetSupportedImageFormats() []string
+}
+
+type StructuredOutputProvider interface {
+    LLMProvider
+    SupportsStructuredOutput() bool
+    SupportsStrictMode() bool // OpenAI's strict JSON schema mode
+}
+
+type BatchProvider interface {
+    LLMProvider
+    SupportsBatch() bool
+    CreateBatch(ctx context.Context, req *BatchRequest) (*BatchResponse, error)
+}
+
+type AssistantProvider interface {
+    LLMProvider
+    SupportsAssistants() bool
+    CreateAssistant(ctx context.Context, req *AssistantRequest) (*AssistantResponse, error)
+}
+```
+
+**Also create types in internal/types/:**
+
+```go
+// internal/types/requests.go
+type ChatRequest struct {
+    ID            string                 `json:"id"`
+    Model         string                 `json:"model"`
+    Messages      []Message              `json:"messages"`
+    Temperature   *float32               `json:"temperature,omitempty"`
+    MaxTokens     *int                   `json:"max_tokens,omitempty"`
+    Stream        bool                   `json:"stream"`
+    Functions     []Function             `json:"functions,omitempty"`
+    FunctionCall  interface{}            `json:"function_call,omitempty"`
+    Tools         []Tool                 `json:"tools,omitempty"`
+    ToolChoice    interface{}            `json:"tool_choice,omitempty"`
+    ResponseFormat *ResponseFormat       `json:"response_format,omitempty"`
+
+    // Routing hints
+    OptimizeFor   OptimizationType      `json:"optimize_for,omitempty"`
+    RequiredFeatures []string           `json:"required_features,omitempty"`
+    MaxCost       *float64              `json:"max_cost,omitempty"`
+
+    // Metadata
+    UserID        string                `json:"user_id"`
+    ApplicationID string                `json:"application_id"`
+    Timestamp     time.Time             `json:"timestamp"`
+}
+
+type Message struct {
+    Role     string      `json:"role"`
+    Content  interface{} `json:"content"` // string or []ContentPart for multimodal
+    Name     string      `json:"name,omitempty"`
+    ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+}
+
+type ContentPart struct {
+    Type     string               `json:"type"` // "text" or "image_url"
+    Text     string               `json:"text,omitempty"`
+    ImageURL *ImageURL            `json:"image_url,omitempty"`
+}
+
+type ResponseFormat struct {
+    Type       string      `json:"type"` // "text", "json_object", "json_schema"
+    JSONSchema *JSONSchema `json:"json_schema,omitempty"`
+}
+
+type JSONSchema struct {
+    Name        string                 `json:"name"`
+    Description string                 `json:"description,omitempty"`
+    Schema      map[string]interface{} `json:"schema"`
+    Strict      bool                   `json:"strict,omitempty"` // OpenAI specific
+}
+```
+
+```go
+// internal/types/capabilities.go
+type ProviderCapabilities struct {
+    ProviderName          string            `json:"provider_name"`
+    SupportedModels       []ModelInfo       `json:"supported_models"`
+    SupportsFunctions     bool              `json:"supports_functions"`
+    SupportsParallelFunctions bool          `json:"supports_parallel_functions"`
+    SupportsVision        bool              `json:"supports_vision"`
+    SupportsStructuredOutput bool           `json:"supports_structured_output"`
+    SupportsStreaming     bool              `json:"supports_streaming"`
+    SupportsAssistants    bool              `json:"supports_assistants"`
+    SupportsBatch         bool              `json:"supports_batch"`
+    MaxContextWindow      int               `json:"max_context_window"`
+    SupportedImageFormats []string          `json:"supported_image_formats"`
+    CostPer1KTokens       CostStructure     `json:"cost_per_1k_tokens"`
+
+    // Provider-specific capabilities
+    OpenAISpecific    *OpenAICapabilities    `json:"openai_specific,omitempty"`
+    AnthropicSpecific *AnthropicCapabilities `json:"anthropic_specific,omitempty"`
+}
+
+type ModelInfo struct {
+    Name                string   `json:"name"`
+    DisplayName         string   `json:"display_name"`
+    MaxContextWindow    int      `json:"max_context_window"`
+    MaxOutputTokens     int      `json:"max_output_tokens"`
+    SupportsFunctions   bool     `json:"supports_functions"`
+    SupportsVision      bool     `json:"supports_vision"`
+    InputCostPer1K      float64  `json:"input_cost_per_1k"`
+    OutputCostPer1K     float64  `json:"output_cost_per_1k"`
+}
+
+type OpenAICapabilities struct {
+    SupportsJSONSchema   bool     `json:"supports_json_schema"`
+    SupportsStrictMode   bool     `json:"supports_strict_mode"`
+    SupportsLogProbs     bool     `json:"supports_log_probs"`
+    SupportsSeed         bool     `json:"supports_seed"`
+    SupportsSystemFingerprint bool `json:"supports_system_fingerprint"`
+}
+
+type AnthropicCapabilities struct {
+    SupportsSystemMessages bool   `json:"supports_system_messages"`
+    MaxSystemMessageLength int    `json:"max_system_message_length"`
+    SupportsStopSequences  bool   `json:"supports_stop_sequences"`
+}
+```
+
+### **Task 3: OpenAI Provider Implementation** (90 min)
+
+**Claude Code Prompt:**
+```go
+// Implement internal/providers/openai/provider.go
+
+type OpenAIProvider struct {
+    client   *openai.Client
+    config   *OpenAIConfig
+    logger   *logrus.Logger
+}
+
+type OpenAIConfig struct {
+    APIKey      string            `yaml:"api_key"`
+    BaseURL     string            `yaml:"base_url"`
+    OrgID       string            `yaml:"org_id"`
+    Models      []ModelInfo       `yaml:"models"`
+    Timeout     time.Duration     `yaml:"timeout"`
+}
+
+func NewOpenAIProvider(config *OpenAIConfig, logger *logrus.Logger) *OpenAIProvider {
+    clientConfig := openai.DefaultConfig(config.APIKey)
+    if config.BaseURL != "" {
+        clientConfig.BaseURL = config.BaseURL
+    }
+    if config.OrgID != "" {
+        clientConfig.OrgID = config.OrgID
+    }
+
+    client := openai.NewClientWithConfig(clientConfig)
+
+    return &OpenAIProvider{
+        client: client,
+        config: config,
+        logger: logger,
+    }
+}
+
+// Implement all interface methods with FULL OpenAI API support:
+// - ChatCompletion: Support all parameters including function calling, structured outputs, vision
+// - StreamCompletion: Full streaming support
+// - GetCapabilities: Return complete OpenAI capabilities
+// - EstimateCost: Accurate cost calculation based on model pricing
+// - HealthCheck: Test API connectivity
+
+// Key: Don't abstract away OpenAI features - support them natively
+// Include support for:
+// - Functions and parallel function calling
+// - Vision with image_url content
+// - Structured outputs with strict JSON schema mode
+// - All OpenAI-specific parameters (seed, system_fingerprint, etc.)
+```
+
+### **Task 4: Anthropic Provider Implementation** (90 min)
+
+**Claude Code Prompt:**
+```go
+// Implement internal/providers/anthropic/provider.go
+
+type AnthropicProvider struct {
+    client *anthropic.Client
+    config *AnthropicConfig
+    logger *logrus.Logger
+}
+
+type AnthropicConfig struct {
+    APIKey  string        `yaml:"api_key"`
+    BaseURL string        `yaml:"base_url"`
+    Models  []ModelInfo   `yaml:"models"`
+    Timeout time.Duration `yaml:"timeout"`
+}
+
+// Implement all interface methods with FULL Anthropic API support:
+// - ChatCompletion: Support system messages, stop sequences, Claude-specific features
+// - StreamCompletion: Full streaming support
+// - GetCapabilities: Return complete Anthropic capabilities
+// - EstimateCost: Accurate cost calculation
+// - HealthCheck: Test API connectivity
+
+// Key: Handle Anthropic's different API structure while maintaining interface compatibility
+// Support Anthropic-specific features:
+// - System message handling (separate from messages array)
+// - Stop sequences
+// - Constitutional AI controls
+// - Tool use (Anthropic's function calling equivalent)
+
+// Transform between unified interface and Anthropic's native format
+```
+
+### **Task 5: Basic Routing Engine** (60 min)
+
+**Claude Code Prompt:**
+```go
+// Implement internal/routing/router.go
+
+type Router struct {
+    providers map[string]LLMProvider
+    logger    *logrus.Logger
+}
+
+type RoutingDecision struct {
+    SelectedProvider string
+    Reasoning       []string
+    EstimatedCost   float64
+    EstimatedLatency time.Duration
+}
+
+func NewRouter(logger *logrus.Logger) *Router {
+    return &Router{
+        providers: make(map[string]LLMProvider),
+        logger:    logger,
+    }
+}
+
+func (r *Router) RegisterProvider(name string, provider LLMProvider) {
+    r.providers[name] = provider
+}
+
+// Simple routing logic for Day 1:
+// 1. Check if specific model/provider requested
+// 2. Cost-based routing (cheapest first)
+// 3. Round-robin as fallback
+// 4. Health check before routing
+
+func (r *Router) Route(ctx context.Context, req *ChatRequest) (*RoutingDecision, LLMProvider, error) {
+    // Implementation for basic routing
+    // Day 1: Keep it simple but functional
+}
+```
+
+### **Task 6: HTTP Server & Handlers** (90 min)
+
+**Claude Code Prompt:**
+```go
+// Implement internal/server/handlers.go
+
+type Server struct {
+    router   *routing.Router
+    logger   *logrus.Logger
+    config   *config.Config
+}
+
+func NewServer(router *routing.Router, config *config.Config, logger *logrus.Logger) *Server {
+    return &Server{
+        router: router,
+        logger: logger,
+        config: config,
+    }
+}
+
+// Implement HTTP handlers:
+// POST /v1/chat/completions - Main chat completion endpoint
+// POST /v1/chat/completions (with stream=true) - Streaming endpoint
+// GET /v1/models - List available models
+// GET /health - Health check
+// GET /capabilities - Provider capabilities
+
+// Key: Maintain OpenAI API compatibility for easy drop-in replacement
+// Support all OpenAI request/response formats
+// Add routing metadata to responses (which provider was used, cost, etc.)
+
+func (s *Server) chatCompletionHandler(c *gin.Context) {
+    // Parse request
+    // Route to appropriate provider
+    // Call provider with full feature support
+    // Return response with routing metadata
+}
+
+func (s *Server) streamingHandler(c *gin.Context) {
+    // Handle Server-Sent Events streaming
+    // Maintain OpenAI streaming format
+}
+```
+
+### **Task 7: Configuration Management** (30 min)
+
+**Claude Code Prompt:**
+```yaml
+# Create configs/config.yaml
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  timeout: "30s"
+
+providers:
+  openai:
+    enabled: true
+    api_key: "${OPENAI_API_KEY}"
+    models:
+      - name: "gpt-4o"
+        display_name: "GPT-4 Omni"
+        input_cost_per_1k: 0.005
+        output_cost_per_1k: 0.015
+      - name: "gpt-4o-mini"
+        display_name: "GPT-4 Omni Mini"
+        input_cost_per_1k: 0.00015
+        output_cost_per_1k: 0.0006
+
+  anthropic:
+    enabled: true
+    api_key: "${ANTHROPIC_API_KEY}"
+    models:
+      - name: "claude-3-5-sonnet-20241022"
+        display_name: "Claude 3.5 Sonnet"
+        input_cost_per_1k: 0.003
+        output_cost_per_1k: 0.015
+      - name: "claude-3-haiku-20240307"
+        display_name: "Claude 3 Haiku"
+        input_cost_per_1k: 0.00025
+        output_cost_per_1k: 0.00125
+
+routing:
+  default_strategy: "cost_optimized" # cost_optimized, performance, round_robin
+  health_check_interval: "30s"
+
+logging:
+  level: "info"
+  format: "json"
+```
+
+```go
+// Implement internal/config/config.go with Viper for configuration management
+```
+
+### **Task 8: Main Application & Testing** (60 min)
+
+**Claude Code Prompt:**
+```go
+// Implement cmd/server/main.go
+
+func main() {
+    // Load configuration
+    // Initialize providers
+    // Set up router
+    // Start HTTP server
+    // Graceful shutdown handling
+}
+
+// Create basic tests:
+// - Provider interface compliance tests
+// - Basic routing tests
+// - HTTP handler tests
+// - Configuration loading tests
+
+// Create example client usage in pkg/client/client.go
+```
+
+## **End of Day 1 Success Criteria**
+
+1. ✅ **Working HTTP server** listening on :8080
+2. ✅ **OpenAI provider** with full API support (functions, vision, structured output)
+3. ✅ **Anthropic provider** with full API support (system messages, tools)
+4. ✅ **Basic routing** (cost-based selection)
+5. ✅ **OpenAI API compatibility** (drop-in replacement)
+6. ✅ **Configuration management** (YAML config, env vars)
+7. ✅ **Health checks** and basic observability
+8. ✅ **Example client** and documentation
+
+## **Testing Day 1 Results**
+
+```bash
+# Test basic functionality
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "optimize_for": "cost"
+  }'
+
+# Test provider capabilities
+curl http://localhost:8080/capabilities
+
+# Test health
+curl http://localhost:8080/health
+
+# Test function calling (should route to OpenAI)
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "What's the weather?"}],
+    "functions": [{"name": "get_weather", "parameters": {"type": "object"}}]
+  }'
+```
+
+**Expected Results:**
+- All requests route to appropriate providers
+- Full feature support (no limitations vs direct API calls)
+- Response includes routing metadata
+- Cost estimation works
+- No performance degradation vs direct calls
+
+This gives you a solid foundation to build on for Day 2 (security integration)!
