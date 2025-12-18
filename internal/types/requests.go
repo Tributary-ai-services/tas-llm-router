@@ -28,6 +28,10 @@ type ChatRequest struct {
 	RequiredFeatures []string               `json:"required_features,omitempty"`
 	MaxCost          *float64               `json:"max_cost,omitempty"`
 	
+	// Retry and fallback controls
+	RetryConfig      *RetryConfig           `json:"retry_config,omitempty"`
+	FallbackConfig   *FallbackConfig        `json:"fallback_config,omitempty"`
+	
 	// Metadata
 	UserID           string                 `json:"user_id"`
 	ApplicationID    string                 `json:"application_id"`
@@ -154,4 +158,20 @@ type AssistantResponse struct {
 	Tools        []Tool                 `json:"tools"`
 	FileIDs      []string               `json:"file_ids"`
 	Metadata     map[string]interface{} `json:"metadata"`
+}
+
+// Retry and fallback control structures
+type RetryConfig struct {
+	MaxAttempts     int           `json:"max_attempts"`               // 0 = no retry, 1-5 allowed  
+	BackoffType     string        `json:"backoff_type"`               // "linear", "exponential"
+	BaseDelay       time.Duration `json:"base_delay"`                 // Starting delay (e.g., 1s)
+	MaxDelay        time.Duration `json:"max_delay"`                  // Cap on delay (e.g., 30s)
+	RetryableErrors []string      `json:"retryable_errors,omitempty"` // Which errors to retry
+}
+
+type FallbackConfig struct {
+	Enabled             bool     `json:"enabled"`                          // Enable fallback to healthy providers
+	PreferredChain      []string `json:"preferred_chain,omitempty"`        // Custom fallback order
+	MaxCostIncrease     *float64 `json:"max_cost_increase,omitempty"`      // Max % cost increase allowed (e.g., 0.5 = 50%)
+	RequireSameFeatures bool     `json:"require_same_features"`            // Must support same capabilities
 }

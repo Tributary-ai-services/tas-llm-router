@@ -231,29 +231,35 @@ func (c *Config) loadFromEnv() {
 	if port := os.Getenv("LLM_ROUTER_PORT"); port != "" {
 		c.Server.Port = port
 	}
-	
+
 	// Provider API keys
 	if openaiKey := os.Getenv("OPENAI_API_KEY"); openaiKey != "" {
 		if c.Providers.OpenAI != nil {
 			c.Providers.OpenAI.APIKey = openaiKey
 		}
+	} else if c.Providers.OpenAI != nil && c.Providers.OpenAI.APIKey == "" {
+		// Disable OpenAI provider if no API key is provided
+		c.Providers.OpenAI = nil
 	}
-	
+
 	if anthropicKey := os.Getenv("ANTHROPIC_API_KEY"); anthropicKey != "" {
 		if c.Providers.Anthropic != nil {
 			c.Providers.Anthropic.APIKey = anthropicKey
 		}
+	} else if c.Providers.Anthropic != nil && c.Providers.Anthropic.APIKey == "" {
+		// Disable Anthropic provider if no API key is provided
+		c.Providers.Anthropic = nil
 	}
-	
+
 	// Logging configuration
 	if level := os.Getenv("LLM_ROUTER_LOG_LEVEL"); level != "" {
 		c.Logging.Level = level
 	}
-	
+
 	if format := os.Getenv("LLM_ROUTER_LOG_FORMAT"); format != "" {
 		c.Logging.Format = format
 	}
-	
+
 	// Router configuration
 	if strategy := os.Getenv("LLM_ROUTER_DEFAULT_STRATEGY"); strategy != "" {
 		c.Router.DefaultStrategy = strategy

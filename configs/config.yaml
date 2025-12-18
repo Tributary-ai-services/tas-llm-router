@@ -3,6 +3,12 @@ server:
   read_timeout: 30s
   write_timeout: 30s
   max_header_bytes: 1048576
+  
+  # API validation configuration
+  validation:
+    enabled: true
+    spec_path: "docs/openapi.yaml"
+    strict_mode: false
 
 router:
   default_strategy: "cost_optimized"
@@ -10,40 +16,55 @@ router:
   max_cost_threshold: 1.0
   enable_fallback_chaining: true
   request_timeout: 120s
+  
+  # Default retry configuration (can be overridden per request)
+  default_retry:
+    max_attempts: 3
+    backoff_type: "exponential"
+    base_delay: 1s
+    max_delay: 30s
+    retryable_errors: ["timeout", "connection", "unavailable", "rate limit"]
+  
+  # Default fallback configuration (can be overridden per request)
+  default_fallback:
+    enabled: true
+    max_cost_increase: 0.5  # Allow up to 50% cost increase for fallback
+    require_same_features: true
 
 providers:
-  openai:
-    api_key: "${OPENAI_API_KEY}"
-    base_url: "https://api.openai.com/v1"
-    timeout: 120s
-    models:
-      - name: "gpt-4o"
-        provider_model_id: "gpt-4o"
-        input_cost_per_1k: 0.005
-        output_cost_per_1k: 0.015
-        max_context_window: 128000
-        max_output_tokens: 4096
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
-      - name: "gpt-4o-mini"
-        provider_model_id: "gpt-4o-mini"
-        input_cost_per_1k: 0.00015
-        output_cost_per_1k: 0.0006
-        max_context_window: 128000
-        max_output_tokens: 16384
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
-      - name: "gpt-3.5-turbo"
-        provider_model_id: "gpt-3.5-turbo"
-        input_cost_per_1k: 0.0015
-        output_cost_per_1k: 0.002
-        max_context_window: 16385
-        max_output_tokens: 4096
-        supports_functions: true
-        supports_vision: false
-        supports_structured_output: false
+  # OpenAI provider disabled - uncomment and add API key to enable
+  # openai:
+  #   api_key: "${OPENAI_API_KEY}"
+  #   base_url: "https://api.openai.com/v1"
+  #   timeout: 120s
+  #   models:
+  #     - name: "gpt-4o"
+  #       provider_model_id: "gpt-4o"
+  #       input_cost_per_1k: 0.005
+  #       output_cost_per_1k: 0.015
+  #       max_context_window: 128000
+  #       max_output_tokens: 4096
+  #       supports_functions: true
+  #       supports_vision: true
+  #       supports_structured_output: true
+  #     - name: "gpt-4o-mini"
+  #       provider_model_id: "gpt-4o-mini"
+  #       input_cost_per_1k: 0.00015
+  #       output_cost_per_1k: 0.0006
+  #       max_context_window: 128000
+  #       max_output_tokens: 16384
+  #       supports_functions: true
+  #       supports_vision: true
+  #       supports_structured_output: true
+  #     - name: "gpt-3.5-turbo"
+  #       provider_model_id: "gpt-3.5-turbo"
+  #       input_cost_per_1k: 0.0015
+  #       output_cost_per_1k: 0.002
+  #       max_context_window: 16385
+  #       max_output_tokens: 4096
+  #       supports_functions: true
+  #       supports_vision: false
+  #       supports_structured_output: false
 
   anthropic:
     api_key: "${ANTHROPIC_API_KEY}"

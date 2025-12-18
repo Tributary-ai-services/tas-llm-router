@@ -65,6 +65,15 @@ POST /v1/chat/completions
 | `user` | string | No | User identifier |
 | `functions` | array | No | Available functions for calling |
 | `function_call` | string/object | No | Control function calling |
+| `tools` | array | No | Available tools for calling |
+| `tool_choice` | string/object | No | Control tool usage |
+| `response_format` | object | No | Response format specification |
+| `seed` | integer | No | Random seed for deterministic generation |
+| `optimize_for` | string | No | Optimization preference: `cost`, `performance`, `quality` |
+| `required_features` | array | No | Required provider features (e.g., `["functions", "vision"]`) |
+| `max_cost` | number | No | Maximum cost threshold |
+| **`retry_config`** | **object** | **No** | **Retry configuration for failed requests** |
+| **`fallback_config`** | **object** | **No** | **Fallback configuration for provider failures** |
 
 #### Message Object
 
@@ -75,7 +84,30 @@ POST /v1/chat/completions
 | `name` | string | No | Name of function (for function role) |
 | `function_call` | object | No | Function call details (for assistant role) |
 
-#### Example Request
+#### Retry Config Object
+
+Configure retry behavior for failed requests with exponential or linear backoff.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `max_attempts` | integer | Yes | Maximum retry attempts (1-5) |
+| `backoff_type` | string | No | Backoff strategy: `"exponential"`, `"linear"` (default: `"exponential"`) |
+| `base_delay` | string | No | Base delay between retries (e.g., `"1s"`, `"500ms"`) |
+| `max_delay` | string | No | Maximum delay cap (e.g., `"30s"`) |
+| `retryable_errors` | array | No | Error patterns that trigger retries (default: `["timeout", "connection", "unavailable", "rate limit"]`) |
+
+#### Fallback Config Object
+
+Configure automatic fallback to alternative providers when primary provider fails.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `enabled` | boolean | Yes | Enable fallback to healthy providers |
+| `preferred_chain` | array | No | Custom fallback order (provider names, e.g., `["anthropic", "openai"]`) |
+| `max_cost_increase` | number | No | Max cost increase allowed for fallback (0.5 = 50% increase) |
+| `require_same_features` | boolean | No | Whether fallback providers must support same features (default: `true`) |
+
+#### Basic Example Request
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -134,6 +166,127 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288
 data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"content":" capital"},"finish_reason":null}]}
 
 data: [DONE]
+```
+
+#### Example with Retry Configuration
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "model": "gpt-3.5-turbo",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello with retry support!"
+      }
+    ],
+    "max_tokens": 100,
+    "retry_config": {
+      "max_attempts": 3,
+      "backoff_type": "exponential",
+      "base_delay": "1s",
+      "max_delay": "30s",
+      "retryable_errors": ["timeout", "connection", "unavailable"]
+    }
+  }'
+```
+
+#### Example with Fallback Configuration
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "model": "claude-3-haiku-20240307",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello with fallback support!"
+      }
+    ],
+    "max_tokens": 100,
+    "fallback_config": {
+      "enabled": true,
+      "max_cost_increase": 0.5,
+      "require_same_features": false
+    }
+  }'
+```
+
+#### Example with Both Retry and Fallback
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello with full resilience!"
+      }
+    ],
+    "max_tokens": 100,
+    "retry_config": {
+      "max_attempts": 2,
+      "backoff_type": "linear",
+      "base_delay": "500ms",
+      "max_delay": "5s"
+    },
+    "fallback_config": {
+      "enabled": true,
+      "preferred_chain": ["anthropic", "openai"],
+      "max_cost_increase": 0.3,
+      "require_same_features": false
+    }
+  }'
+```
+
+#### Enhanced Response with Router Metadata
+
+When using retry and fallback features, responses include additional metadata:
+
+```json
+{
+  "id": "chatcmpl-123",
+  "object": "chat.completion",
+  "created": 1677652288,
+  "model": "gpt-3.5-turbo",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I assist you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 10,
+    "total_tokens": 22
+  },
+  "router_metadata": {
+    "provider": "openai",
+    "model": "gpt-3.5-turbo",
+    "routing_reason": ["Specific model requested: gpt-3.5-turbo"],
+    "estimated_cost": 0.000033,
+    "actual_cost": 0.000033,
+    "processing_time": "250ms",
+    "request_id": "chatcmpl-123",
+    "provider_latency": "180ms",
+    "attempt_count": 1,
+    "failed_providers": [],
+    "fallback_used": false,
+    "retry_delays": [],
+    "total_retry_time": 0
+  }
+}
 ```
 
 ### Text Completions

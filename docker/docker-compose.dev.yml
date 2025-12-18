@@ -6,7 +6,7 @@ services:
     image: redis:7-alpine
     container_name: llm-router-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -18,7 +18,7 @@ services:
     image: prom/prometheus:latest
     container_name: llm-router-prometheus
     ports:
-      - "9090:9090"
+      - "9091:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
@@ -37,7 +37,7 @@ services:
     image: grafana/grafana:latest
     container_name: llm-router-grafana
     ports:
-      - "3000:3000"
+      - "3002:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
@@ -87,7 +87,7 @@ services:
     image: postgres:15-alpine
     container_name: llm-router-postgres
     ports:
-      - "5432:5432"
+      - "5434:5432"
     environment:
       - POSTGRES_DB=llm_router_analytics
       - POSTGRES_USER=llm_router
@@ -120,7 +120,7 @@ services:
       dockerfile: docker/Dockerfile.dev
     container_name: llm-router-app
     ports:
-      - "8080:8080"
+      - "8085:8080"
     environment:
       - LLM_ROUTER_LOG_LEVEL=debug
       - LLM_ROUTER_LOG_FORMAT=text

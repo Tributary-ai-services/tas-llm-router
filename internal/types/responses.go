@@ -80,6 +80,13 @@ type RouterMetadata struct {
 	ProcessingTime   time.Duration `json:"processing_time"`
 	RequestID        string        `json:"request_id"`
 	ProviderLatency  time.Duration `json:"provider_latency"`
+	
+	// Retry and fallback metadata
+	AttemptCount     int      `json:"attempt_count"`                    // How many attempts made (1 = no retries)
+	FailedProviders  []string `json:"failed_providers,omitempty"`      // Providers that failed before success
+	FallbackUsed     bool     `json:"fallback_used"`                   // Whether fallback was triggered
+	RetryDelays      []int64  `json:"retry_delays,omitempty"`          // Delay between attempts (ms)
+	TotalRetryTime   int64    `json:"total_retry_time,omitempty"`      // Total time spent on retries (ms)
 }
 
 type CostEstimate struct {

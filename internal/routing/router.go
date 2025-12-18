@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -73,7 +74,7 @@ func (r *Router) ListProviders() []string {
 	return names
 }
 
-// Route selects the best provider for a request
+// Route selects the best provider for a request with retry and fallback support
 func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.RouterMetadata, providers.LLMProvider, error) {
 	start := time.Now()
 	
@@ -86,13 +87,13 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 	// Determine routing strategy
 	strategy := r.determineStrategy(req)
 	
-	// Route based on strategy
+	// Route based on strategy to get initial decision
 	decision, provider, err := r.routeByStrategy(ctx, req, strategy)
 	if err != nil {
 		return nil, nil, err
 	}
 	
-	// Create router metadata
+	// Initialize metadata tracking
 	metadata := &types.RouterMetadata{
 		Provider:        decision.SelectedProvider,
 		Model:          req.Model,
@@ -100,17 +101,235 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 		EstimatedCost:   decision.EstimatedCost,
 		ProcessingTime:  time.Since(start),
 		RequestID:       req.ID,
+		AttemptCount:    1,
+		FallbackUsed:    false,
 	}
 	
+	// Check if retry is configured  
+	if req.RetryConfig != nil && req.RetryConfig.MaxAttempts > 1 {
+		// Perform routing with retry
+		metadata, provider, err = r.routeWithRetry(ctx, req, decision, metadata)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	
+	// Check if fallback is configured and we have failures
+	if req.FallbackConfig != nil && req.FallbackConfig.Enabled && len(metadata.FailedProviders) > 0 {
+		// Attempt fallback if primary provider failed
+		metadata, provider, err = r.routeWithFallback(ctx, req, decision, metadata)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	
+	// Update final processing time
+	metadata.ProcessingTime = time.Since(start)
+	
 	r.logger.WithFields(logrus.Fields{
-		"provider":     decision.SelectedProvider,
-		"strategy":     strategy,
-		"cost":         decision.EstimatedCost,
-		"reasons":      strings.Join(decision.Reasoning, ", "),
-		"duration_ms":  time.Since(start).Milliseconds(),
+		"provider":       metadata.Provider,
+		"strategy":       strategy,
+		"cost":          metadata.EstimatedCost,
+		"attempts":      metadata.AttemptCount,
+		"fallback_used": metadata.FallbackUsed,
+		"duration_ms":   metadata.ProcessingTime.Milliseconds(),
 	}).Info("Request routed")
 	
 	return metadata, provider, nil
+}
+
+// routeWithRetry attempts to route with retry logic
+func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, decision *RoutingDecision, metadata *types.RouterMetadata) (*types.RouterMetadata, providers.LLMProvider, error) {
+	provider := r.providers[decision.SelectedProvider]
+	maxAttempts := req.RetryConfig.MaxAttempts
+	var lastError error
+	
+	// Track retry attempts
+	var retryDelays []int64
+	totalRetryStart := time.Now()
+	
+	// Attempt up to maxAttempts times
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		metadata.AttemptCount = attempt
+		
+		// For attempts beyond the first, apply backoff delay
+		if attempt > 1 {
+			delay := r.calculateBackoffDelay(req.RetryConfig, attempt-1)
+			retryDelays = append(retryDelays, delay.Milliseconds())
+			
+			r.logger.WithFields(logrus.Fields{
+				"provider": decision.SelectedProvider,
+				"attempt":  attempt,
+				"delay_ms": delay.Milliseconds(),
+			}).Debug("Retrying request after backoff delay")
+			
+			select {
+			case <-time.After(delay):
+				// Continue with retry
+			case <-ctx.Done():
+				return nil, nil, fmt.Errorf("request cancelled during retry backoff: %w", ctx.Err())
+			}
+		}
+		
+		// Check provider health before retry
+		if !r.isProviderHealthy(decision.SelectedProvider) {
+			lastError = fmt.Errorf("provider %s is not healthy", decision.SelectedProvider)
+			r.logger.WithField("provider", decision.SelectedProvider).Warn("Provider unhealthy during retry")
+			continue
+		}
+		
+		// Attempt would succeed - return provider for actual request
+		metadata.RetryDelays = retryDelays
+		metadata.TotalRetryTime = time.Since(totalRetryStart).Milliseconds()
+		
+		r.logger.WithFields(logrus.Fields{
+			"provider":     decision.SelectedProvider,
+			"attempt":      attempt,
+			"retry_delays": retryDelays,
+		}).Info("Retry attempt ready")
+		
+		return metadata, provider, nil
+	}
+	
+	// All retry attempts exhausted
+	metadata.FailedProviders = append(metadata.FailedProviders, decision.SelectedProvider)
+	return metadata, nil, fmt.Errorf("all retry attempts failed for provider %s: %w", decision.SelectedProvider, lastError)
+}
+
+// routeWithFallback attempts fallback to alternative providers
+func (r *Router) routeWithFallback(ctx context.Context, req *types.ChatRequest, originalDecision *RoutingDecision, metadata *types.RouterMetadata) (*types.RouterMetadata, providers.LLMProvider, error) {
+	// Build fallback chain based on configuration
+	var fallbackChain []string
+	
+	if len(req.FallbackConfig.PreferredChain) > 0 {
+		// Use client-specified fallback chain
+		fallbackChain = req.FallbackConfig.PreferredChain
+	} else {
+		// Use automatically built fallback chain
+		fallbackChain = originalDecision.FallbackChain
+	}
+	
+	// Filter fallback chain based on configuration
+	fallbackChain = r.filterFallbackChain(fallbackChain, req, originalDecision)
+	
+	if len(fallbackChain) == 0 {
+		return metadata, nil, fmt.Errorf("no suitable fallback providers available")
+	}
+	
+	r.logger.WithFields(logrus.Fields{
+		"original_provider": originalDecision.SelectedProvider,
+		"fallback_chain":   fallbackChain,
+	}).Info("Attempting fallback routing")
+	
+	// Try each fallback provider
+	for _, providerName := range fallbackChain {
+		// Skip if provider already failed
+		if contains(metadata.FailedProviders, providerName) {
+			continue
+		}
+		
+		// Check health
+		if !r.isProviderHealthy(providerName) {
+			r.logger.WithField("provider", providerName).Debug("Skipping unhealthy fallback provider")
+			metadata.FailedProviders = append(metadata.FailedProviders, providerName)
+			continue
+		}
+		
+		provider := r.providers[providerName]
+		
+		// Check feature compatibility
+		if req.FallbackConfig.RequireSameFeatures && !r.supportsRequiredFeatures(provider, req) {
+			r.logger.WithField("provider", providerName).Debug("Fallback provider doesn't support required features")
+			continue
+		}
+		
+		// Check cost constraints
+		if req.FallbackConfig.MaxCostIncrease != nil {
+			costEst, err := provider.EstimateCost(req)
+			if err == nil {
+				costIncrease := (costEst.TotalCost - originalDecision.EstimatedCost) / originalDecision.EstimatedCost
+				if costIncrease > *req.FallbackConfig.MaxCostIncrease {
+					r.logger.WithFields(logrus.Fields{
+						"provider":       providerName,
+						"cost_increase":  costIncrease,
+						"max_allowed":    *req.FallbackConfig.MaxCostIncrease,
+					}).Debug("Fallback provider exceeds cost threshold")
+					continue
+				}
+			}
+		}
+		
+		// Fallback provider is suitable
+		metadata.Provider = providerName
+		metadata.FallbackUsed = true
+		metadata.RoutingReason = append(metadata.RoutingReason, fmt.Sprintf("Fallback to %s", providerName))
+		
+		r.logger.WithFields(logrus.Fields{
+			"original_provider": originalDecision.SelectedProvider,
+			"fallback_provider": providerName,
+		}).Info("Fallback routing successful")
+		
+		return metadata, provider, nil
+	}
+	
+	return metadata, nil, fmt.Errorf("all fallback providers failed or unavailable")
+}
+
+// calculateBackoffDelay calculates retry delay based on backoff strategy
+func (r *Router) calculateBackoffDelay(config *types.RetryConfig, attempt int) time.Duration {
+	var delay time.Duration
+	
+	switch config.BackoffType {
+	case "exponential":
+		// Exponential backoff: baseDelay * 2^attempt  
+		multiplier := math.Pow(2, float64(attempt))
+		delay = time.Duration(float64(config.BaseDelay) * multiplier)
+	case "linear":
+		// Linear backoff: baseDelay * attempt
+		delay = time.Duration(int64(config.BaseDelay) * int64(attempt))
+	default:
+		// Default to exponential
+		multiplier := math.Pow(2, float64(attempt))
+		delay = time.Duration(float64(config.BaseDelay) * multiplier)
+	}
+	
+	// Cap delay at MaxDelay
+	if config.MaxDelay > 0 && delay > config.MaxDelay {
+		delay = config.MaxDelay
+	}
+	
+	return delay
+}
+
+// filterFallbackChain filters fallback providers based on configuration
+func (r *Router) filterFallbackChain(chain []string, req *types.ChatRequest, originalDecision *RoutingDecision) []string {
+	var filtered []string
+	
+	for _, providerName := range chain {
+		// Skip if provider doesn't exist
+		if _, exists := r.providers[providerName]; !exists {
+			continue
+		}
+		
+		// Skip original provider
+		if providerName == originalDecision.SelectedProvider {
+			continue
+		}
+		
+		filtered = append(filtered, providerName)
+	}
+	
+	return filtered
+}
+
+// contains checks if a string slice contains a value
+func contains(slice []string, value string) bool {
+	for _, item := range slice {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 // determineStrategy decides which routing strategy to use

@@ -11,8 +11,8 @@ RUN apk add --no-cache \
     curl \
     bash
 
-# Install Air for hot reload
-RUN go install github.com/cosmtrek/air@latest
+# Install Air for hot reload (using air-verse which is the current namespace)
+RUN go install github.com/air-verse/air@latest || echo "Air installation failed, continuing without hot reload"
 
 # Install Delve for debugging
 RUN go install github.com/go-delve/delve/cmd/dlv@latest

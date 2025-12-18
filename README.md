@@ -239,6 +239,57 @@ Routes to a specific provider based on model prefix.
 go build -o llm-router cmd/llm-router/main.go
 ```
 
+### Docker Development
+
+#### Standalone Mode
+To run the full development stack with observability:
+
+```bash
+cd docker
+docker-compose -f docker-compose.dev.yml up -d
+```
+
+This starts:
+- Redis for caching and rate limiting
+- Prometheus for metrics collection  
+- Grafana for dashboards (admin/admin)
+- Jaeger for distributed tracing
+- OpenTelemetry Collector
+- PostgreSQL for analytics
+- Vault for secrets management
+- LLM Router application (optional, with `--profile full-stack`)
+
+Access the services:
+- LLM Router: http://localhost:8085
+- Grafana: http://localhost:3002
+- Prometheus: http://localhost:9091
+- Jaeger: http://localhost:16686
+
+#### Aether Shared Infrastructure Integration
+To run LLM Router integrated with shared TAS infrastructure:
+
+```bash
+cd docker
+./start-aether-shared.sh start
+```
+
+This mode uses shared infrastructure services from aether-shared:
+- Shared Redis, PostgreSQL, Prometheus, Grafana
+- Shared Keycloak for authentication
+- Shared Kafka for messaging  
+- Shared MinIO for object storage
+
+Access the services:
+- LLM Router: http://localhost:8086
+- Shared Grafana: http://localhost:3000
+- Shared Prometheus: http://localhost:9090
+
+**Prerequisites:** Ensure aether-shared infrastructure is running:
+```bash
+cd ../aether-shared
+docker-compose -f docker-compose.shared-infrastructure.yml up -d
+```
+
 ### Docker Deployment
 
 ```dockerfile

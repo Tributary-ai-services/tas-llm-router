@@ -2,6 +2,20 @@
 
 Welcome to the LLM Router WAF (Web Application Firewall) - a production-ready routing and security layer for Large Language Model APIs.
 
+## 🆕 New Features: Client-Controlled Retry & Fallback
+
+The LLM Router now supports powerful client-configurable retry and fallback behavior with comprehensive OpenAPI documentation and validation!
+
+### 🌐 Interactive API Documentation
+- **[Swagger UI](http://localhost:8086/docs)** - Interactive API explorer with live examples
+- **[OpenAPI Spec](http://localhost:8086/docs/openapi.yaml)** - Complete API specification
+- **✅ Schema Validation** - Automatic request/response validation
+
+### 🔄 Enhanced Reliability Features
+- **Client-Controlled Retry** - Exponential/linear backoff with configurable error patterns
+- **Smart Fallback** - Automatic failover with cost and feature constraints  
+- **Detailed Metadata** - Full visibility into retry attempts and routing decisions
+
 ## Quick Links
 
 - **[User Guide](user-guide.md)** - How to use the LLM Router WAF API
