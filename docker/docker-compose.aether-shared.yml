@@ -35,7 +35,7 @@ services:
       - DATABASE_URL=postgres://tasuser:taspassword@tas-postgres-shared:5432/tas_shared
       # Use shared Keycloak for auth
       - KEYCLOAK_URL=http://tas-keycloak-shared:8080
-      - KEYCLOAK_REALM=master
+      - KEYCLOAK_REALM=aether
       # Use shared Kafka for messaging
       - KAFKA_BROKERS=tas-kafka-shared:29092
       # Use shared MinIO for object storage
