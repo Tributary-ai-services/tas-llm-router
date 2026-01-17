@@ -1,0 +1,1323 @@
+openapi: 3.0.3
+info:
+  title: LLM Router WAF API
+  description: |
+    LLM Router Web Application Firewall (WAF) provides intelligent routing, security, and observability for Large Language Model APIs.
+    
+    ## Features
+    - **Intelligent Routing**: Cost-optimized, performance-based, and round-robin strategies
+    - **Client-Controlled Retry**: Configurable retry logic with exponential/linear backoff
+    - **Smart Fallback**: Automatic failover to healthy providers with cost/feature constraints
+    - **Security**: Rate limiting, authentication, and request validation
+    - **Observability**: Comprehensive metrics and routing metadata
+    
+  version: 1.0.0
+  contact:
+    name: LLM Router WAF
+    url: https://github.com/tributary-ai/llm-router-waf
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8086
+    description: Aether Backend - LLM Router Service (Shared Infrastructure Mode)
+  - url: http://localhost:8085  
+    description: LLM Router Standalone Mode (Development)
+  - url: https://api.example.com
+    description: Production server
+
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+
+paths:
+  /v1/chat/completions:
+    post:
+      summary: Create chat completion
+      description: |
+        Creates a chat completion response for the provided messages with optional retry and fallback configuration.
+        
+        **New Features:**
+        - `retry_config`: Configure retry attempts with backoff strategies
+        - `fallback_config`: Enable fallback to alternative providers
+        
+      tags:
+        - Chat Completions
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+            examples:
+              basic_request:
+                summary: Basic chat completion
+                value:
+                  model: "gpt-3.5-turbo"
+                  messages:
+                    - role: "user"
+                      content: "Hello, how are you?"
+                  max_tokens: 100
+              retry_request:
+                summary: Request with retry configuration
+                value:
+                  model: "gpt-3.5-turbo"
+                  messages:
+                    - role: "user"  
+                      content: "Hello with retry support!"
+                  max_tokens: 100
+                  retry_config:
+                    max_attempts: 3
+                    backoff_type: "exponential"
+                    base_delay: "1s"
+                    max_delay: "30s"
+                    retryable_errors: ["timeout", "connection", "unavailable"]
+              fallback_request:
+                summary: Request with fallback configuration
+                value:
+                  model: "claude-3-haiku-20240307"
+                  messages:
+                    - role: "user"
+                      content: "Hello with fallback support!"
+                  max_tokens: 100
+                  fallback_config:
+                    enabled: true
+                    max_cost_increase: 0.5
+                    require_same_features: true
+              retry_and_fallback:
+                summary: Request with both retry and fallback
+                value:
+                  model: "gpt-4o"
+                  messages:
+                    - role: "user"
+                      content: "Hello with full resilience!"
+                  max_tokens: 100
+                  retry_config:
+                    max_attempts: 2
+                    backoff_type: "linear"
+                    base_delay: "500ms"
+                    max_delay: "5s"
+                  fallback_config:
+                    enabled: true
+                    preferred_chain: ["anthropic", "openai"]
+                    max_cost_increase: 0.3
+                    require_same_features: false
+      responses:
+        '200':
+          description: Successful completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionChunk'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/completions:
+    post:
+      summary: Create text completion (legacy)
+      description: Creates a text completion response. Maps to chat completions internally.
+      tags:
+        - Text Completions
+      deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletionRequest'
+      responses:
+        '200':
+          description: Successful completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /v1/messages:
+    post:
+      summary: Create Anthropic-compatible message
+      description: Creates a message response compatible with Anthropic's API format.
+      tags:
+        - Messages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+      responses:
+        '200':
+          description: Successful message completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+
+  /v1/providers:
+    get:
+      summary: List providers
+      description: Returns a list of all registered LLM providers.
+      tags:
+        - Management
+      responses:
+        '200':
+          description: List of providers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvidersResponse'
+
+  /v1/providers/{name}:
+    get:
+      summary: Get provider details
+      description: Returns detailed information about a specific provider.
+      tags:
+        - Management
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Provider name (e.g., "openai", "anthropic")
+      responses:
+        '200':
+          description: Provider details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/health:
+    get:
+      summary: Get health status
+      description: Returns the overall health status of all providers.
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Health status (when all providers healthy)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Degraded health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /v1/health/{name}:
+    get:
+      summary: Get provider health
+      description: Returns the health status of a specific provider.
+      tags:
+        - Health
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Provider name
+      responses:
+        '200':
+          description: Provider health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderHealthResponse'
+
+  /v1/capabilities:
+    get:
+      summary: Get router capabilities
+      description: Returns the capabilities of all registered providers.
+      tags:
+        - Management
+      responses:
+        '200':
+          description: Router capabilities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilitiesResponse'
+
+  /v1/routing/decision:
+    post:
+      summary: Get routing decision
+      description: |
+        Returns routing decision information without executing the request.
+        Useful for understanding which provider would be selected and why.
+      tags:
+        - Routing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: Routing decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoutingDecisionResponse'
+
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Basic health check endpoint (no /v1 prefix).
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service healthy
+        '503':
+          description: Service unhealthy
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      description: Returns metrics in Prometheus format for monitoring.
+      tags:
+        - Monitoring
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key authentication
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Bearer token authentication (API key or JWT)
+
+  schemas:
+    ChatCompletionRequest:
+      type: object
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+          description: ID of the model to use
+          example: "gpt-3.5-turbo"
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+          description: Array of message objects
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          description: Sampling temperature (0-2)
+          example: 0.7
+        max_tokens:
+          type: integer
+          minimum: 1
+          description: Maximum number of tokens to generate
+          example: 100
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Nucleus sampling parameter
+          example: 1.0
+        frequency_penalty:
+          type: number
+          minimum: -2
+          maximum: 2
+          description: Frequency penalty (-2 to 2)
+          example: 0.0
+        presence_penalty:
+          type: number
+          minimum: -2
+          maximum: 2
+          description: Presence penalty (-2 to 2)
+          example: 0.0
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          description: Stop sequences
+        stream:
+          type: boolean
+          description: Whether to stream responses
+          default: false
+        functions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Function'
+          description: Available functions for calling
+        function_call:
+          oneOf:
+            - type: string
+            - type: object
+          description: Control function calling
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tool'
+          description: Available tools
+        tool_choice:
+          oneOf:
+            - type: string
+            - type: object
+          description: Control tool usage
+        response_format:
+          $ref: '#/components/schemas/ResponseFormat'
+        seed:
+          type: integer
+          description: Random seed for deterministic generation
+        optimize_for:
+          type: string
+          enum: [cost, performance, quality]
+          description: Optimization preference for routing
+          example: "cost"
+        required_features:
+          type: array
+          items:
+            type: string
+          description: Required provider features
+          example: ["functions", "vision"]
+        max_cost:
+          type: number
+          description: Maximum cost threshold
+          example: 0.10
+        retry_config:
+          $ref: '#/components/schemas/RetryConfig'
+        fallback_config:
+          $ref: '#/components/schemas/FallbackConfig'
+        user_id:
+          type: string
+          description: User identifier
+        application_id:
+          type: string
+          description: Application identifier
+
+    RetryConfig:
+      type: object
+      required:
+        - max_attempts
+      properties:
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: Maximum number of retry attempts
+          example: 3
+        backoff_type:
+          type: string
+          enum: [linear, exponential]
+          description: Backoff strategy type
+          example: "exponential"
+          default: "exponential"
+        base_delay:
+          type: string
+          pattern: '^[0-9]+(ns|us|µs|ms|s|m|h)$'
+          description: Base delay between retries (duration format)
+          example: "1s"
+        max_delay:
+          type: string
+          pattern: '^[0-9]+(ns|us|µs|ms|s|m|h)$'
+          description: Maximum delay cap (duration format)
+          example: "30s"
+        retryable_errors:
+          type: array
+          items:
+            type: string
+          description: Error patterns that should trigger retries
+          example: ["timeout", "connection", "unavailable", "rate limit"]
+
+    FallbackConfig:
+      type: object
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+          description: Enable fallback to alternative providers
+          example: true
+        preferred_chain:
+          type: array
+          items:
+            type: string
+          description: Custom fallback order (provider names)
+          example: ["anthropic", "openai"]
+        max_cost_increase:
+          type: number
+          minimum: 0
+          description: Maximum cost increase allowed for fallback (as percentage, e.g. 0.5 = 50%)
+          example: 0.5
+        require_same_features:
+          type: boolean
+          description: Whether fallback providers must support same features
+          example: true
+          default: true
+
+    Message:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, function, tool]
+          description: Message role
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: '#/components/schemas/ContentPart'
+          description: Message content (string or multimodal content)
+        name:
+          type: string
+          description: Name of the function (for function role)
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolCall'
+          description: Tool calls made by assistant
+
+    ContentPart:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [text, image_url]
+          description: Content part type
+        text:
+          type: string
+          description: Text content
+        image_url:
+          $ref: '#/components/schemas/ImageURL'
+
+    ImageURL:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Image URL
+        detail:
+          type: string
+          enum: [auto, low, high]
+          description: Image detail level
+          default: "auto"
+
+    Function:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Function name
+        description:
+          type: string
+          description: Function description
+        parameters:
+          type: object
+          description: Function parameters schema
+
+    Tool:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [function]
+          description: Tool type
+        function:
+          $ref: '#/components/schemas/Function'
+
+    ToolCall:
+      type: object
+      required:
+        - id
+        - type
+        - function
+      properties:
+        id:
+          type: string
+          description: Tool call ID
+        type:
+          type: string
+          enum: [function]
+          description: Tool call type
+        function:
+          $ref: '#/components/schemas/Function'
+
+    ResponseFormat:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [text, json_object, json_schema]
+          description: Response format type
+        json_schema:
+          $ref: '#/components/schemas/JSONSchema'
+
+    JSONSchema:
+      type: object
+      required:
+        - name
+        - schema
+      properties:
+        name:
+          type: string
+          description: Schema name
+        description:
+          type: string
+          description: Schema description
+        schema:
+          type: object
+          description: JSON schema definition
+        strict:
+          type: boolean
+          description: Strict mode (OpenAI specific)
+          default: false
+
+    ChatCompletionResponse:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - model
+        - choices
+      properties:
+        id:
+          type: string
+          description: Completion ID
+          example: "chatcmpl-123"
+        object:
+          type: string
+          enum: [chat.completion]
+          description: Object type
+        created:
+          type: integer
+          description: Unix timestamp
+          example: 1677652288
+        model:
+          type: string
+          description: Model used
+          example: "gpt-3.5-turbo"
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/Choice'
+          description: Completion choices
+        usage:
+          $ref: '#/components/schemas/Usage'
+        system_fingerprint:
+          type: string
+          description: System fingerprint
+        router_metadata:
+          $ref: '#/components/schemas/RouterMetadata'
+
+    Choice:
+      type: object
+      required:
+        - index
+        - message
+        - finish_reason
+      properties:
+        index:
+          type: integer
+          description: Choice index
+        message:
+          $ref: '#/components/schemas/Message'
+        finish_reason:
+          type: string
+          enum: [stop, length, function_call, tool_calls, content_filter]
+          description: Reason for completion end
+        logprobs:
+          $ref: '#/components/schemas/Logprobs'
+
+    Usage:
+      type: object
+      required:
+        - prompt_tokens
+        - completion_tokens
+        - total_tokens
+      properties:
+        prompt_tokens:
+          type: integer
+          description: Prompt token count
+        completion_tokens:
+          type: integer
+          description: Completion token count
+        total_tokens:
+          type: integer
+          description: Total token count
+
+    RouterMetadata:
+      type: object
+      required:
+        - provider
+        - model
+        - routing_reason
+        - processing_time
+        - request_id
+        - attempt_count
+        - fallback_used
+      properties:
+        provider:
+          type: string
+          description: Selected provider name
+          example: "openai"
+        model:
+          type: string
+          description: Model used
+          example: "gpt-3.5-turbo"
+        routing_reason:
+          type: array
+          items:
+            type: string
+          description: Human-readable routing reasons
+          example: ["Specific model requested: gpt-3.5-turbo"]
+        estimated_cost:
+          type: number
+          description: Estimated request cost
+          example: 0.002
+        actual_cost:
+          type: number
+          description: Actual request cost
+          example: 0.0025
+        processing_time:
+          type: string
+          description: Processing time duration
+          example: "150ms"
+        request_id:
+          type: string
+          description: Unique request identifier
+          example: "chatcmpl-123"
+        provider_latency:
+          type: string
+          description: Provider response latency
+          example: "120ms"
+        attempt_count:
+          type: integer
+          minimum: 1
+          description: Number of attempts made (1 = no retries)
+          example: 1
+        failed_providers:
+          type: array
+          items:
+            type: string
+          description: Providers that failed before success
+          example: ["anthropic"]
+        fallback_used:
+          type: boolean
+          description: Whether fallback was used
+          example: false
+        retry_delays:
+          type: array
+          items:
+            type: integer
+          description: Retry delays in milliseconds
+          example: [1000, 2000]
+        total_retry_time:
+          type: integer
+          description: Total retry time in milliseconds
+          example: 3000
+
+    ChatCompletionChunk:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - model
+        - choices
+      properties:
+        id:
+          type: string
+          description: Completion ID
+        object:
+          type: string
+          enum: [chat.completion.chunk]
+        created:
+          type: integer
+          description: Unix timestamp
+        model:
+          type: string
+          description: Model used
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChoiceChunk'
+        usage:
+          $ref: '#/components/schemas/Usage'
+        router_metadata:
+          $ref: '#/components/schemas/RouterMetadata'
+
+    ChoiceChunk:
+      type: object
+      required:
+        - index
+        - delta
+      properties:
+        index:
+          type: integer
+          description: Choice index
+        delta:
+          $ref: '#/components/schemas/Message'
+        finish_reason:
+          type: string
+          enum: [stop, length, function_call, tool_calls, content_filter]
+
+    Logprobs:
+      type: object
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/TokenLogprob'
+
+    TokenLogprob:
+      type: object
+      required:
+        - token
+        - logprob
+      properties:
+        token:
+          type: string
+          description: Token
+        logprob:
+          type: number
+          description: Log probability
+        bytes:
+          type: array
+          items:
+            type: integer
+          description: Token bytes
+        top_logprobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopLogprob'
+
+    TopLogprob:
+      type: object
+      required:
+        - token
+        - logprob
+      properties:
+        token:
+          type: string
+        logprob:
+          type: number
+        bytes:
+          type: array
+          items:
+            type: integer
+
+    CompletionRequest:
+      type: object
+      required:
+        - model
+        - prompt
+      properties:
+        model:
+          type: string
+          description: Model ID
+        prompt:
+          type: string
+          description: Text prompt
+        max_tokens:
+          type: integer
+          description: Maximum tokens to generate
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+        n:
+          type: integer
+          minimum: 1
+          description: Number of completions
+
+    MessageRequest:
+      type: object
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+          description: Model ID
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        max_tokens:
+          type: integer
+          description: Maximum tokens to generate
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    ProvidersResponse:
+      type: object
+      required:
+        - providers
+        - count
+      properties:
+        providers:
+          type: array
+          items:
+            type: string
+          description: List of provider names
+          example: ["openai", "anthropic"]
+        count:
+          type: integer
+          description: Number of providers
+          example: 2
+
+    ProviderResponse:
+      type: object
+      required:
+        - name
+        - provider
+        - capabilities
+      properties:
+        name:
+          type: string
+          description: Provider name
+        provider:
+          type: string
+          description: Provider type
+        capabilities:
+          $ref: '#/components/schemas/ProviderCapabilities'
+
+    ProviderCapabilities:
+      type: object
+      required:
+        - provider_name
+        - supported_models
+        - supports_functions
+        - supports_streaming
+        - max_context_window
+      properties:
+        provider_name:
+          type: string
+          description: Provider name
+        supported_models:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelInfo'
+        supports_functions:
+          type: boolean
+        supports_parallel_functions:
+          type: boolean
+        supports_vision:
+          type: boolean
+        supports_structured_output:
+          type: boolean
+        supports_streaming:
+          type: boolean
+        supports_assistants:
+          type: boolean
+        supports_batch:
+          type: boolean
+        max_context_window:
+          type: integer
+        supported_image_formats:
+          type: array
+          items:
+            type: string
+        cost_per_1k_tokens:
+          $ref: '#/components/schemas/CostStructure'
+
+    ModelInfo:
+      type: object
+      required:
+        - name
+        - max_context_window
+        - input_cost_per_1k
+        - output_cost_per_1k
+      properties:
+        name:
+          type: string
+        display_name:
+          type: string
+        max_context_window:
+          type: integer
+        max_output_tokens:
+          type: integer
+        supports_functions:
+          type: boolean
+        supports_vision:
+          type: boolean
+        supports_structured_output:
+          type: boolean
+        input_cost_per_1k:
+          type: number
+        output_cost_per_1k:
+          type: number
+        provider_model_id:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+
+    CostStructure:
+      type: object
+      required:
+        - input_cost_per_1k
+        - output_cost_per_1k
+        - currency
+      properties:
+        input_cost_per_1k:
+          type: number
+        output_cost_per_1k:
+          type: number
+        currency:
+          type: string
+          example: "USD"
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - providers
+        - timestamp
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+          description: Overall health status
+        providers:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/HealthStatus'
+          description: Per-provider health status
+        timestamp:
+          type: integer
+          description: Unix timestamp
+
+    ProviderHealthResponse:
+      type: object
+      required:
+        - provider
+        - status
+        - timestamp
+      properties:
+        provider:
+          type: string
+          description: Provider name
+        status:
+          $ref: '#/components/schemas/HealthStatus'
+        timestamp:
+          type: integer
+          description: Unix timestamp
+
+    HealthStatus:
+      type: object
+      required:
+        - status
+        - response_time_ms
+        - last_checked
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy, unknown]
+          description: Health status
+        response_time_ms:
+          type: integer
+          description: Response time in milliseconds
+        last_checked:
+          type: integer
+          description: Last check unix timestamp
+        error_message:
+          type: string
+          description: Error message if unhealthy
+
+    CapabilitiesResponse:
+      type: object
+      properties:
+        providers:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ProviderCapabilities'
+        timestamp:
+          type: integer
+
+    RoutingDecisionResponse:
+      type: object
+      required:
+        - selected_provider
+        - reasoning
+        - estimated_cost
+        - estimated_latency
+        - feature_compatibility
+        - fallback_chain
+      properties:
+        selected_provider:
+          type: string
+          description: Selected provider name
+        reasoning:
+          type: array
+          items:
+            type: string
+          description: Routing decision reasoning
+        estimated_cost:
+          type: number
+          description: Estimated cost
+        estimated_latency:
+          type: string
+          description: Estimated latency
+        feature_compatibility:
+          type: object
+          additionalProperties:
+            type: boolean
+          description: Feature compatibility matrix
+        fallback_chain:
+          type: array
+          items:
+            type: string
+          description: Available fallback providers
+        routing_context:
+          $ref: '#/components/schemas/RoutingContext'
+
+    RoutingContext:
+      type: object
+      required:
+        - strategy
+        - timestamp
+      properties:
+        strategy:
+          type: string
+          description: Routing strategy used
+        request_features:
+          type: array
+          items:
+            type: string
+          description: Detected request features
+        provider_health:
+          type: object
+          additionalProperties:
+            type: string
+          description: Provider health at routing time
+        considered_providers:
+          type: array
+          items:
+            type: string
+          description: Providers considered for routing
+        timestamp:
+          type: string
+          format: date-time
+          description: Routing timestamp
+        cost_comparison:
+          type: object
+          additionalProperties:
+            type: number
+          description: Cost comparison data
+        performance_comparison:
+          type: object
+          additionalProperties:
+            type: string
+          description: Performance comparison data
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - timestamp
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+        timestamp:
+          type: integer
+          description: Unix timestamp
+
+    ErrorDetail:
+      type: object
+      required:
+        - message
+        - type
+        - code
+      properties:
+        message:
+          type: string
+          description: Error message
+        type:
+          type: string
+          description: Error type
+        code:
+          oneOf:
+            - type: string
+            - type: integer
+          description: Error code
+        param:
+          type: string
+          description: Parameter that caused error
+
+    RateLimitResponse:
+      type: object
+      required:
+        - error
+        - timestamp
+      properties:
+        error:
+          type: object
+          required:
+            - message
+            - type
+            - code
+            - retry_after
+          properties:
+            message:
+              type: string
+              example: "Rate limit exceeded"
+            type:
+              type: string
+              example: "rate_limit_error"
+            code:
+              type: integer
+              example: 429
+            retry_after:
+              type: integer
+              description: Seconds to wait before retrying
+        timestamp:
+          type: integer
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: "Invalid request format"
+              type: "invalid_request_error"
+              code: "400"
+            timestamp: 1677652288
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: "Invalid API key"
+              type: "invalid_request_error"
+              code: "401"
+            timestamp: 1677652288
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: "Provider not found"
+              type: "invalid_request_error"
+              code: "404"
+            timestamp: 1677652288
+
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Request limit per minute
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Remaining requests in current window
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Unix timestamp when limit resets
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RateLimitResponse'
+
+    ServiceUnavailable:
+      description: Service unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: "No healthy providers available"
+              type: "api_error"
+              code: "503"
+            timestamp: 1677652288
+
+tags:
+  - name: Chat Completions
+    description: OpenAI-compatible chat completion endpoints
+  - name: Text Completions
+    description: Legacy text completion endpoints
+  - name: Messages
+    description: Anthropic-compatible message endpoints
+  - name: Management
+    description: Provider and router management endpoints
+  - name: Health
+    description: Health check and monitoring endpoints
+  - name: Routing
+    description: Routing decision and strategy endpoints
+  - name: Monitoring
+    description: Metrics and observability endpoints

@@ -1,0 +1,39 @@
+# Prometheus configuration for metrics adapter
+# This collects metrics from LLM Router and forwards to shared Prometheus
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'tas-llm-router'
+    environment: 'development'
+
+# Forward to shared Prometheus via remote write
+remote_write:
+  - url: http://tas-prometheus-shared:9090/api/v1/write
+    queue_config:
+      max_samples_per_send: 1000
+      batch_send_deadline: 5s
+      min_shards: 1
+      max_shards: 10
+
+rule_files:
+  # Add any LLM Router specific alerting rules here
+
+scrape_configs:
+  # Scrape metrics from LLM Router application
+  - job_name: 'llm-router-aether'
+    static_configs:
+      - targets: ['llm-router-aether-app:8080']
+    scrape_interval: 15s
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'llm-router-aether'
+
+  # Scrape self metrics
+  - job_name: 'prometheus-adapter'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 30s

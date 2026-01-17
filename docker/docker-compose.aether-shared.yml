@@ -1,0 +1,110 @@
+version: '3.8'
+
+# Aether Shared Services Integration
+# This extends the LLM Router to use shared infrastructure from aether-shared
+
+services:
+  # LLM Router application configured to use aether-shared infrastructure
+  llm-router-aether:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    container_name: llm-router-aether-app
+    ports:
+      - "8086:8080"  # Different port to avoid conflicts
+    environment:
+      # Provider API Keys (required)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Provider Optional Configuration
+      - OPENAI_ORG_ID=${OPENAI_ORG_ID:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      # LLM Router Configuration
+      - LLM_ROUTER_PORT=8080
+      - LLM_ROUTER_LOG_LEVEL=${LLM_ROUTER_LOG_LEVEL:-debug}
+      - LLM_ROUTER_LOG_FORMAT=${LLM_ROUTER_LOG_FORMAT:-json}
+      - LLM_ROUTER_DEFAULT_STRATEGY=${LLM_ROUTER_DEFAULT_STRATEGY:-cost_optimized}
+      # Use shared Redis instead of local
+      - REDIS_URL=redis://tas-redis-shared:6379
+      # Use shared Prometheus instead of local  
+      - PROMETHEUS_URL=http://tas-prometheus-shared:9090
+      # Use shared OTEL Collector
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tas-otel-collector-shared:4317
+      # Use shared PostgreSQL
+      - DATABASE_URL=postgres://tasuser:taspassword@tas-postgres-shared:5432/tas_shared
+      # Use shared Keycloak for auth
+      - KEYCLOAK_URL=http://tas-keycloak-shared:8080
+      - KEYCLOAK_REALM=aether
+      # Use shared Kafka for messaging
+      - KAFKA_BROKERS=tas-kafka-shared:29092
+      # Use shared MinIO for object storage
+      - MINIO_ENDPOINT=tas-minio-shared:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin123}
+      # Environment identification
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - SERVICE_NAME=llm-router-aether
+    volumes:
+      - ../configs:/app/configs
+      - ../logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - tas-shared-network
+    # Note: Database initialization is handled by start script
+    # depends_on:
+    #   - llm-router-db-init
+
+  # Initialize database schema for LLM Router in shared PostgreSQL
+  llm-router-db-init:
+    image: postgres:15-alpine
+    container_name: llm-router-db-init
+    environment:
+      - PGHOST=tas-postgres-shared
+      - PGPORT=5432
+      - PGDATABASE=tas_shared
+      - PGUSER=tasuser
+      - PGPASSWORD=taspassword
+    volumes:
+      - ./init-llm-router-schema.sql:/docker-entrypoint-initdb.d/init-schema.sql:ro
+    command: |
+      sh -c '
+        until pg_isready -h tas-postgres-shared -p 5432 -U tasuser; do
+          echo "Waiting for shared PostgreSQL..."
+          sleep 2
+        done
+        echo "Creating LLM Router schema..."
+        psql -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/init-schema.sql
+        echo "Schema initialization complete"
+      '
+    networks:
+      - tas-shared-network
+    profiles:
+      - init  # Only run when explicitly requested
+
+  # Local metrics adapter (bridges local metrics to shared Prometheus)
+  metrics-adapter:
+    image: prom/prometheus:latest
+    container_name: llm-router-metrics-adapter
+    ports:
+      - "9092:9090"  # Local port for debugging
+    volumes:
+      - ./prometheus-adapter.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-lifecycle'
+      - '--storage.tsdb.retention.time=1h'  # Short retention, just for local debugging
+    networks:
+      - tas-shared-network
+    profiles:
+      - metrics-debug  # Only for debugging metrics
+
+networks:
+  tas-shared-network:
+    name: tas-shared-network
+    external: true  # This network is created by aether-shared
