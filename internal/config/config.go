@@ -190,8 +190,8 @@ func (c *Config) setDefaults() {
 		Anthropic: &anthropic.AnthropicConfig{
 			Models: []types.ModelInfo{
 				{
-					Name:              "claude-3-5-sonnet-20241022",
-					ProviderModelID:   "claude-3-5-sonnet-20241022",
+					Name:              "claude-sonnet-4-20250514",
+					ProviderModelID:   "claude-sonnet-4-20250514",
 					InputCostPer1K:    0.003,
 					OutputCostPer1K:   0.015,
 					MaxContextWindow:  200000,
