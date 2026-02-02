@@ -80,7 +80,8 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 	
 	// Update health status if needed
 	if time.Since(r.lastHealthCheck) > r.healthCheckInterval {
-		go r.updateHealthStatus(ctx)
+		// Use background context for health checks to avoid cancellation when request completes
+		go r.updateHealthStatus(context.Background())
 		r.lastHealthCheck = time.Now()
 	}
 	
