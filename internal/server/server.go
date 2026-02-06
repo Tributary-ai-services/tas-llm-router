@@ -744,6 +744,13 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// Flush implements http.Flusher interface for streaming support
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 // handleMetrics serves Prometheus metrics endpoint
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

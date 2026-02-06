@@ -469,6 +469,13 @@ func (w *responseWriterWrapper) WriteHeader(statusCode int) {
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
+// Flush implements http.Flusher interface for streaming support
+func (w *responseWriterWrapper) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func generateEventID() string {
 	return fmt.Sprintf("audit_%d_%d", time.Now().Unix(), time.Now().Nanosecond())
 }
