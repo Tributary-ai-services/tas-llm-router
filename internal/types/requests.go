@@ -39,10 +39,11 @@ type ChatRequest struct {
 }
 
 type Message struct {
-	Role      string      `json:"role"`
-	Content   interface{} `json:"content"` // string or []ContentPart for multimodal
-	Name      string      `json:"name,omitempty"`
-	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content"` // string or []ContentPart for multimodal
+	Name       string      `json:"name,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"` // For tool result messages (role=tool)
 }
 
 type ContentPart struct {
@@ -60,6 +61,7 @@ type Function struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description,omitempty"`
 	Parameters  interface{} `json:"parameters,omitempty"`
+	Arguments   string      `json:"arguments,omitempty"` // Used in tool_call responses (JSON string of args)
 }
 
 type Tool struct {
