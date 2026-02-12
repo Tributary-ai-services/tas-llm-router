@@ -260,9 +260,27 @@ func (c *Config) loadFromEnv() {
 		c.Logging.Format = format
 	}
 
+	// Server timeout configuration
+	if rt := os.Getenv("SERVER_READ_TIMEOUT"); rt != "" {
+		if d, err := time.ParseDuration(rt); err == nil {
+			c.Server.ReadTimeout = d
+		}
+	}
+	if wt := os.Getenv("SERVER_WRITE_TIMEOUT"); wt != "" {
+		if d, err := time.ParseDuration(wt); err == nil {
+			c.Server.WriteTimeout = d
+		}
+	}
+
 	// Router configuration
 	if strategy := os.Getenv("LLM_ROUTER_DEFAULT_STRATEGY"); strategy != "" {
 		c.Router.DefaultStrategy = strategy
+	}
+
+	if rt := os.Getenv("ROUTER_REQUEST_TIMEOUT"); rt != "" {
+		if d, err := time.ParseDuration(rt); err == nil {
+			c.Router.RequestTimeout = d
+		}
 	}
 }
 
