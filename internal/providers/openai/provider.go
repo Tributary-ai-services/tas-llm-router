@@ -571,14 +571,14 @@ func (p *OpenAIProvider) convertFromOpenAIChunk(chunk *openai.ChatCompletionStre
 			FinishReason: string(choice.FinishReason),
 		}
 
-		// Convert delta
-		if choice.Delta.Content != "" || choice.Delta.Role != "" {
+		// Convert delta — create Message for content, role, OR tool calls
+		if choice.Delta.Content != "" || choice.Delta.Role != "" || len(choice.Delta.ToolCalls) > 0 {
 			ourChoice.Delta = &types.Message{
 				Role:    choice.Delta.Role,
 				Content: choice.Delta.Content,
 			}
 
-			// Handle tool calls in delta
+			// Handle tool calls in delta (including argument-only fragments)
 			if len(choice.Delta.ToolCalls) > 0 {
 				var toolCalls []types.ToolCall
 				for _, tc := range choice.Delta.ToolCalls {
@@ -586,8 +586,8 @@ func (p *OpenAIProvider) convertFromOpenAIChunk(chunk *openai.ChatCompletionStre
 						ID:   tc.ID,
 						Type: string(tc.Type),
 						Function: types.Function{
-							Name:        tc.Function.Name,
-							Parameters:  map[string]interface{}{"arguments": tc.Function.Arguments},
+							Name:      tc.Function.Name,
+							Arguments: tc.Function.Arguments,
 						},
 					}
 					toolCalls = append(toolCalls, toolCall)
