@@ -17,11 +17,30 @@ import (
 
 // Config represents the complete application configuration
 type Config struct {
-	Server    ServerConfig     `yaml:"server"`
-	Router    RouterConfig     `yaml:"router"`
-	Providers ProvidersConfig  `yaml:"providers"`
-	Logging   LoggingConfig    `yaml:"logging"`
-	Security  SecurityConfig   `yaml:"security"`
+	Server     ServerConfig     `yaml:"server"`
+	Router     RouterConfig     `yaml:"router"`
+	Providers  ProvidersConfig  `yaml:"providers"`
+	Logging    LoggingConfig    `yaml:"logging"`
+	Security   SecurityConfig   `yaml:"security"`
+	Gatekeeper GatekeeperConfig `yaml:"gatekeeper"`
+}
+
+// GatekeeperConfig holds content scanning configuration
+type GatekeeperConfig struct {
+	Enabled           bool                  `yaml:"enabled"`
+	FailOpen          bool                  `yaml:"fail_open"`
+	HonorAttestations bool                  `yaml:"honor_attestations"`
+	ScanTimeout       time.Duration         `yaml:"scan_timeout"`
+	Inbound           ScanDirectionConfig   `yaml:"inbound"`
+	Outbound          ScanDirectionConfig   `yaml:"outbound"`
+}
+
+// ScanDirectionConfig configures scanning for a direction (inbound/outbound)
+type ScanDirectionConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	ScanProfile     string `yaml:"scan_profile"`
+	TrustTier       string `yaml:"trust_tier"`
+	BlockOnCritical bool   `yaml:"block_on_critical"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -156,6 +175,26 @@ func (c *Config) setDefaults() {
 		},
 	}
 	
+	// Gatekeeper defaults
+	c.Gatekeeper = GatekeeperConfig{
+		Enabled:           true,
+		FailOpen:          true,
+		HonorAttestations: true,
+		ScanTimeout:       30 * time.Second,
+		Inbound: ScanDirectionConfig{
+			Enabled:         true,
+			ScanProfile:     "full",
+			TrustTier:       "external",
+			BlockOnCritical: true,
+		},
+		Outbound: ScanDirectionConfig{
+			Enabled:         true,
+			ScanProfile:     "full",
+			TrustTier:       "partner",
+			BlockOnCritical: true,
+		},
+	}
+
 	// Provider defaults
 	c.Providers = ProvidersConfig{
 		OpenAI: &openai.OpenAIConfig{
@@ -280,6 +319,19 @@ func (c *Config) loadFromEnv() {
 	if rt := os.Getenv("ROUTER_REQUEST_TIMEOUT"); rt != "" {
 		if d, err := time.ParseDuration(rt); err == nil {
 			c.Router.RequestTimeout = d
+		}
+	}
+
+	// Gatekeeper configuration
+	if enabled := os.Getenv("GATEKEEPER_ENABLED"); enabled == "false" {
+		c.Gatekeeper.Enabled = false
+	}
+	if failOpen := os.Getenv("GATEKEEPER_FAIL_OPEN"); failOpen == "false" {
+		c.Gatekeeper.FailOpen = false
+	}
+	if st := os.Getenv("GATEKEEPER_SCAN_TIMEOUT"); st != "" {
+		if d, err := time.ParseDuration(st); err == nil {
+			c.Gatekeeper.ScanTimeout = d
 		}
 	}
 }
