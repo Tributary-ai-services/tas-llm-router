@@ -12,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/tributary-ai/llm-router-waf/internal/config"
+	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/anthropic"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/openai"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
@@ -52,6 +53,41 @@ func NewApplication(configPath string) (*Application, error) {
 	serverInstance, err := server.NewServer(routerInstance, cfg.ToServerConfig(), logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create server: %w", err)
+	}
+
+	// Initialize Gatekeeper content scanning
+	if cfg.Gatekeeper.Enabled {
+		gkCfg := gatekeeper.Config{
+			Enabled:           cfg.Gatekeeper.Enabled,
+			FailOpen:          cfg.Gatekeeper.FailOpen,
+			HonorAttestations: cfg.Gatekeeper.HonorAttestations,
+			ScanTimeout:       cfg.Gatekeeper.ScanTimeout,
+			Inbound: gatekeeper.ScanDirectionConfig{
+				Enabled:         cfg.Gatekeeper.Inbound.Enabled,
+				ScanProfile:     cfg.Gatekeeper.Inbound.ScanProfile,
+				TrustTier:       cfg.Gatekeeper.Inbound.TrustTier,
+				BlockOnCritical: cfg.Gatekeeper.Inbound.BlockOnCritical,
+			},
+			Outbound: gatekeeper.ScanDirectionConfig{
+				Enabled:         cfg.Gatekeeper.Outbound.Enabled,
+				ScanProfile:     cfg.Gatekeeper.Outbound.ScanProfile,
+				TrustTier:       cfg.Gatekeeper.Outbound.TrustTier,
+				BlockOnCritical: cfg.Gatekeeper.Outbound.BlockOnCritical,
+			},
+		}
+
+		gkClient, err := gatekeeper.New(gkCfg, logger)
+		if err != nil {
+			logger.WithError(err).Warn("Failed to initialize Gatekeeper, content scanning disabled")
+		} else {
+			bypassMgr := gatekeeper.NewBypassManager(
+				gatekeeper.NewInMemoryBypassStore(),
+				&gatekeeper.NoopAuditLogger{},
+				logger,
+			)
+			serverInstance.SetGatekeeper(gkClient, &gkCfg, bypassMgr)
+			logger.Info("Gatekeeper content scanning enabled")
+		}
 	}
 
 	return &Application{

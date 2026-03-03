@@ -60,6 +60,11 @@ data:
   HEALTH_CHECK_TIMEOUT: "5s"
   SHUTDOWN_TIMEOUT: "30s"
 
+  # Gatekeeper (Content Scanning)
+  GATEKEEPER_ENABLED: "true"
+  GATEKEEPER_FAIL_OPEN: "true"
+  GATEKEEPER_SCAN_TIMEOUT: "30s"
+
   # Feature Flags
   FEATURE_ADVANCED_ROUTING: "true"
   FEATURE_CIRCUIT_BREAKER: "true"

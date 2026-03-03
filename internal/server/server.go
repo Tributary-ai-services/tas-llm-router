@@ -11,20 +11,26 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
+	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
+	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
 
 // Server represents the HTTP server
 type Server struct {
-	router           *routing.Router
-	httpServer       *http.Server
-	logger           *logrus.Logger
-	config           *ServerConfig
-	securityMiddleware *middleware.SecurityMiddleware
+	router               *routing.Router
+	httpServer           *http.Server
+	logger               *logrus.Logger
+	config               *ServerConfig
+	securityMiddleware   *middleware.SecurityMiddleware
 	validationMiddleware *middleware.ValidationMiddleware
+	gatekeeper           *gatekeeper.Client
+	gatekeeperConfig     *gatekeeper.Config
+	bypassManager        *gatekeeper.BypassManager
+	bypassHandler        *gatekeeper.BypassHandler
 }
 
 // ServerConfig holds server configuration
@@ -66,6 +72,16 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 	return server, nil
 }
 
+// SetGatekeeper configures the Gatekeeper content scanning client.
+func (s *Server) SetGatekeeper(client *gatekeeper.Client, cfg *gatekeeper.Config, bypass *gatekeeper.BypassManager) {
+	s.gatekeeper = client
+	s.gatekeeperConfig = cfg
+	if bypass != nil {
+		s.bypassManager = bypass
+		s.bypassHandler = gatekeeper.NewBypassHandler(bypass, s.logger)
+	}
+}
+
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	r := s.setupRoutes()
@@ -85,12 +101,19 @@ func (s *Server) Start() error {
 // Stop stops the HTTP server gracefully
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.Info("Stopping LLM Router server")
-	
+
 	// Stop security middleware
 	if s.securityMiddleware != nil {
 		s.securityMiddleware.Stop()
 	}
-	
+
+	// Close gatekeeper
+	if s.gatekeeper != nil {
+		if err := s.gatekeeper.Close(); err != nil {
+			s.logger.WithError(err).Error("Failed to close gatekeeper")
+		}
+	}
+
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -130,6 +153,11 @@ func (s *Server) setupRoutes() *mux.Router {
 	api.HandleFunc("/health/{name}", s.handleProviderHealth).Methods("GET")
 	api.HandleFunc("/capabilities", s.handleCapabilities).Methods("GET")
 	api.HandleFunc("/routing/decision", s.handleRoutingDecision).Methods("POST")
+
+	// Bypass token management endpoints
+	if s.bypassHandler != nil {
+		s.bypassHandler.RegisterRoutes(r)
+	}
 
 	// Health check endpoint (no /v1 prefix)
 	r.HandleFunc("/health", s.handleHealthCheck).Methods("GET")
@@ -209,6 +237,53 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Timestamp = time.Now()
 
+	// Gatekeeper: check bypass token
+	scanBypassed := false
+	if bypassToken := r.Header.Get("X-TAS-Scan-Bypass"); bypassToken != "" && s.bypassManager != nil {
+		contentHash := "" // Could compute hash of messages if needed
+		userID, valid := s.bypassManager.ValidateBypassToken(r.Context(), bypassToken, req.ID, contentHash)
+		if valid {
+			scanBypassed = true
+			s.logger.WithFields(logrus.Fields{
+				"request_id": req.ID,
+				"user_id":    userID,
+			}).Warn("Scan bypassed via token")
+		}
+	}
+
+	// Gatekeeper: inbound scan
+	if !scanBypassed && s.gatekeeper != nil && s.gatekeeperConfig != nil && s.gatekeeperConfig.Inbound.Enabled {
+		meta := gatekeeper.ScanMeta{
+			TenantID:  s.extractTenantID(r),
+			RequestID: req.ID,
+			UserID:    s.extractUserID(r),
+			Source:    "llm_input",
+		}
+
+		result, err := s.gatekeeper.ScanMessages(r.Context(), req.Messages, meta)
+		if err != nil {
+			s.logger.WithError(err).WithField("request_id", req.ID).Error("Inbound scan failed")
+			if !s.gatekeeperConfig.FailOpen {
+				s.writeErrorResponse(w, http.StatusInternalServerError, "content scan failed")
+				return
+			}
+		} else if s.gatekeeper.ShouldBlock(result, "inbound") {
+			msg := gatekeeper.FormatBlockMessage(result, "Inbound")
+			s.logger.WithField("request_id", req.ID).Warn(msg)
+			s.writeErrorResponse(w, http.StatusForbidden, "request blocked by content policy")
+			return
+		}
+
+		// Set scan status header
+		if result != nil && result.ScanResult != nil {
+			if len(result.ScanResult.Findings) == 0 {
+				w.Header().Set("X-TAS-Scan-Status", "clean")
+			} else {
+				w.Header().Set("X-TAS-Scan-Status", "violations")
+			}
+		}
+	}
+
 	// Route the request
 	metadata, provider, err := s.router.Route(r.Context(), &req)
 	if err != nil {
@@ -222,6 +297,24 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.handleNonStreamingCompletionWithRetry(w, r, &req, provider, metadata)
 	}
+}
+
+// extractTenantID extracts tenant ID from request context or headers.
+func (s *Server) extractTenantID(r *http.Request) string {
+	if authInfo, ok := security.GetAuthInfo(r.Context()); ok && authInfo.Metadata != nil {
+		if tid, exists := authInfo.Metadata["tenant_id"]; exists {
+			return tid
+		}
+	}
+	return r.Header.Get("X-Tenant-ID")
+}
+
+// extractUserID extracts user ID from request context or headers.
+func (s *Server) extractUserID(r *http.Request) string {
+	if authInfo, ok := security.GetAuthInfo(r.Context()); ok {
+		return authInfo.UserID
+	}
+	return r.Header.Get("X-User-ID")
 }
 
 // handleCompletion handles legacy OpenAI completion requests (maps to chat completion)
@@ -306,7 +399,7 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, initialProvider providers.LLMProvider, metadata *types.RouterMetadata) {
 	var resp *types.ChatResponse
 	var err error
-	
+
 	// Perform actual completion with retry logic
 	resp, err = s.attemptCompletionWithRetryAndFallback(r.Context(), req, initialProvider, metadata)
 	if err != nil {
@@ -315,12 +408,56 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 		return
 	}
 
+	// Gatekeeper: outbound scan (non-streaming only)
+	if s.gatekeeper != nil && s.gatekeeperConfig != nil && s.gatekeeperConfig.Outbound.Enabled {
+		responseContent := extractResponseContent(resp)
+		if responseContent != "" {
+			meta := gatekeeper.ScanMeta{
+				TenantID:  s.extractTenantID(r),
+				RequestID: req.ID,
+				UserID:    s.extractUserID(r),
+				Source:    "llm_output",
+			}
+
+			result, scanErr := s.gatekeeper.ScanResponse(r.Context(), responseContent, meta)
+			if scanErr != nil {
+				s.logger.WithError(scanErr).WithField("request_id", req.ID).Error("Outbound scan failed")
+				if !s.gatekeeperConfig.FailOpen {
+					s.writeErrorResponse(w, http.StatusInternalServerError, "response content scan failed")
+					return
+				}
+			} else if s.gatekeeper.ShouldBlock(result, "outbound") {
+				msg := gatekeeper.FormatBlockMessage(result, "Outbound")
+				s.logger.WithField("request_id", req.ID).Warn(msg)
+				s.writeErrorResponse(w, http.StatusForbidden, "response blocked by content policy")
+				return
+			}
+		}
+	}
+
 	// Add routing metadata to response
 	resp.RouterMetadata = metadata
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// extractResponseContent extracts text content from a ChatResponse.
+func extractResponseContent(resp *types.ChatResponse) string {
+	if resp == nil {
+		return ""
+	}
+	var parts []string
+	for _, choice := range resp.Choices {
+		switch v := choice.Message.Content.(type) {
+		case string:
+			if v != "" {
+				parts = append(parts, v)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // handleStreamingCompletionWithRetry handles streaming completions with retry/fallback

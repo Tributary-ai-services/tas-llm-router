@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -351,38 +350,31 @@ func (r *Router) determineStrategy(req *types.ChatRequest) RoutingStrategy {
 	}
 }
 
-// isSpecificProviderRequested checks if a specific provider is requested
+// isSpecificProviderRequested checks if exactly one registered provider
+// advertises the requested model in its capabilities.
 func (r *Router) isSpecificProviderRequested(model string) bool {
-	// Check if model name contains provider-specific prefixes
-	providerPrefixes := map[string]string{
-		"gpt-":    "openai",
-		"claude-": "anthropic",
-	}
-	
-	for prefix := range providerPrefixes {
-		if strings.HasPrefix(model, prefix) {
-			return true
-		}
-	}
-	
-	return false
-}
-
-// getProviderForModel returns the provider that should handle a specific model
-func (r *Router) getProviderForModel(model string) (string, bool) {
-	providerPrefixes := map[string]string{
-		"gpt-":    "openai",
-		"claude-": "anthropic",
-	}
-	
-	for prefix, providerName := range providerPrefixes {
-		if strings.HasPrefix(model, prefix) {
-			if _, exists := r.providers[providerName]; exists {
-				return providerName, true
+	matchCount := 0
+	for _, provider := range r.providers {
+		for _, m := range provider.GetCapabilities().SupportedModels {
+			if m.Name == model || m.ProviderModelID == model {
+				matchCount++
+				break
 			}
 		}
 	}
-	
+	return matchCount == 1
+}
+
+// getProviderForModel returns the registered provider that advertises
+// the requested model in its capabilities.
+func (r *Router) getProviderForModel(model string) (string, bool) {
+	for name, provider := range r.providers {
+		for _, m := range provider.GetCapabilities().SupportedModels {
+			if m.Name == model || m.ProviderModelID == model {
+				return name, true
+			}
+		}
+	}
 	return "", false
 }
 
@@ -531,13 +523,13 @@ func (r *Router) routeByPerformance(ctx context.Context, req *types.ChatRequest)
 		return nil, nil, fmt.Errorf("no providers support required features")
 	}
 	
-	// For now, use a simple heuristic: OpenAI tends to be faster
-	// In a real implementation, we'd track actual latencies
+	// Select the candidate with the lowest estimated latency
 	selected := candidates[0]
-	for _, name := range candidates {
-		if name == "openai" {
+	bestLatency := r.estimateLatency(selected)
+	for _, name := range candidates[1:] {
+		if lat := r.estimateLatency(name); lat < bestLatency {
+			bestLatency = lat
 			selected = name
-			break
 		}
 	}
 	
@@ -737,18 +729,13 @@ func (r *Router) buildFallbackChain(primary string, req *types.ChatRequest) []st
 	return fallbacks
 }
 
-// estimateLatency provides a rough latency estimate
+// estimateLatency returns a latency estimate from health-check measurements
+// when available, falling back to a default.
 func (r *Router) estimateLatency(providerName string) time.Duration {
-	// Simple heuristic based on provider characteristics
-	// In production, this would be based on actual measurements
-	switch providerName {
-	case "openai":
-		return 800 * time.Millisecond
-	case "anthropic":
-		return 1200 * time.Millisecond
-	default:
-		return 1000 * time.Millisecond
+	if status, exists := r.healthStatus[providerName]; exists && status.ResponseTime > 0 {
+		return time.Duration(status.ResponseTime) * time.Millisecond
 	}
+	return 1000 * time.Millisecond
 }
 
 // updateHealthStatus performs health checks on all providers
