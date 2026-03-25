@@ -67,12 +67,24 @@ func NewApplication(configPath string) (*Application, error) {
 				ScanProfile:     cfg.Gatekeeper.Inbound.ScanProfile,
 				TrustTier:       cfg.Gatekeeper.Inbound.TrustTier,
 				BlockOnCritical: cfg.Gatekeeper.Inbound.BlockOnCritical,
+				ScanPolicy: gatekeeper.ScanPolicy{
+					AlwaysScanRoles: cfg.Gatekeeper.Inbound.ScanPolicy.AlwaysScanRoles,
+					NeverScanRoles:  cfg.Gatekeeper.Inbound.ScanPolicy.NeverScanRoles,
+					TrustMetaKey:    "trust",
+					PreScannedValue: "pre_scanned",
+				},
 			},
 			Outbound: gatekeeper.ScanDirectionConfig{
 				Enabled:         cfg.Gatekeeper.Outbound.Enabled,
 				ScanProfile:     cfg.Gatekeeper.Outbound.ScanProfile,
 				TrustTier:       cfg.Gatekeeper.Outbound.TrustTier,
 				BlockOnCritical: cfg.Gatekeeper.Outbound.BlockOnCritical,
+				ScanPolicy: gatekeeper.ScanPolicy{
+					AlwaysScanRoles: cfg.Gatekeeper.Outbound.ScanPolicy.AlwaysScanRoles,
+					NeverScanRoles:  cfg.Gatekeeper.Outbound.ScanPolicy.NeverScanRoles,
+					TrustMetaKey:    "trust",
+					PreScannedValue: "pre_scanned",
+				},
 			},
 		}
 
@@ -129,7 +141,7 @@ func (app *Application) Run() error {
 
 	// Graceful shutdown
 	app.logger.Info("Starting graceful shutdown...")
-	
+
 	// Create shutdown context with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer shutdownCancel()

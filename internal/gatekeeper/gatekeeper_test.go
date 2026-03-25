@@ -476,5 +476,152 @@ func TestParseTrustTier(t *testing.T) {
 	assert.Equal(t, scan.TierExternal, parseTrustTier("unknown"))
 }
 
+func TestShouldScanMessage(t *testing.T) {
+	policy := DefaultScanPolicy()
+
+	tests := []struct {
+		name     string
+		msg      routerTypes.Message
+		wantScan bool
+	}{
+		{
+			name:     "user messages are always scanned",
+			msg:      routerTypes.Message{Role: "user", Content: "hello"},
+			wantScan: true,
+		},
+		{
+			name: "user messages scanned even with pre_scanned metadata",
+			msg: routerTypes.Message{
+				Role:     "user",
+				Content:  "hello",
+				Metadata: map[string]interface{}{"trust": "pre_scanned"},
+			},
+			wantScan: true,
+		},
+		{
+			name:     "assistant messages are never scanned",
+			msg:      routerTypes.Message{Role: "assistant", Content: "response"},
+			wantScan: false,
+		},
+		{
+			name:     "system messages without metadata are scanned",
+			msg:      routerTypes.Message{Role: "system", Content: "You are a helpful assistant"},
+			wantScan: true,
+		},
+		{
+			name: "system messages with pre_scanned metadata are skipped",
+			msg: routerTypes.Message{
+				Role:    "system",
+				Content: "document context with --- dividers",
+				Metadata: map[string]interface{}{
+					"trust":       "pre_scanned",
+					"scan_source": "deeplake",
+				},
+			},
+			wantScan: false,
+		},
+		{
+			name: "tool messages with pre_scanned metadata are skipped",
+			msg: routerTypes.Message{
+				Role:    "tool",
+				Content: "tool result content",
+				Metadata: map[string]interface{}{
+					"trust":       "pre_scanned",
+					"scan_source": "mcp",
+				},
+			},
+			wantScan: false,
+		},
+		{
+			name:     "tool messages without metadata are scanned",
+			msg:      routerTypes.Message{Role: "tool", Content: "tool result"},
+			wantScan: true,
+		},
+		{
+			name: "system messages with unrelated metadata are scanned",
+			msg: routerTypes.Message{
+				Role:     "system",
+				Content:  "prompt",
+				Metadata: map[string]interface{}{"other_key": "value"},
+			},
+			wantScan: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldScanMessage(tt.msg, policy)
+			assert.Equal(t, tt.wantScan, got)
+		})
+	}
+}
+
+func TestScanMessages_PreScannedSystemSkipped(t *testing.T) {
+	client := newTestClient(t)
+	defer client.Close()
+
+	// System message with pre-scanned metadata containing SQL-injection-like content
+	// that would normally trigger a false positive
+	messages := []routerTypes.Message{
+		{
+			Role:    "system",
+			Content: "Document context:\n--- Section ---\nSome content with -- dashes\n--- END ---",
+			Metadata: map[string]interface{}{
+				"trust":       "pre_scanned",
+				"scan_source": "deeplake",
+			},
+		},
+		{
+			Role:    "user",
+			Content: "What does this document say?",
+		},
+	}
+
+	meta := ScanMeta{
+		TenantID:  "test-tenant",
+		RequestID: "req-selective-1",
+		UserID:    "user-1",
+		Source:    "llm_input",
+	}
+
+	result, err := client.ScanMessages(context.Background(), messages, meta)
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+	// Should NOT block because the problematic content is in the pre-scanned system message
+	assert.False(t, client.ShouldBlock(result, "inbound"))
+}
+
+func TestScanMessages_AllPreScannedReturnsSkipped(t *testing.T) {
+	client := newTestClient(t)
+	defer client.Close()
+
+	// All messages are either assistant (never scan) or pre-scanned
+	messages := []routerTypes.Message{
+		{
+			Role:    "system",
+			Content: "system prompt",
+			Metadata: map[string]interface{}{
+				"trust": "pre_scanned",
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "previous response",
+		},
+	}
+
+	meta := ScanMeta{
+		TenantID:  "test-tenant",
+		RequestID: "req-selective-2",
+		UserID:    "user-1",
+		Source:    "llm_input",
+	}
+
+	result, err := client.ScanMessages(context.Background(), messages, meta)
+	require.NoError(t, err)
+	assert.True(t, result.Skipped)
+	assert.Equal(t, "all_messages_pre_scanned_or_empty", result.SkipReason)
+}
+
 // Suppress unused import warnings
 var _ = types.Attestation{}

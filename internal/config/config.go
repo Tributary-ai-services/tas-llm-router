@@ -27,20 +27,27 @@ type Config struct {
 
 // GatekeeperConfig holds content scanning configuration
 type GatekeeperConfig struct {
-	Enabled           bool                  `yaml:"enabled"`
-	FailOpen          bool                  `yaml:"fail_open"`
-	HonorAttestations bool                  `yaml:"honor_attestations"`
-	ScanTimeout       time.Duration         `yaml:"scan_timeout"`
-	Inbound           ScanDirectionConfig   `yaml:"inbound"`
-	Outbound          ScanDirectionConfig   `yaml:"outbound"`
+	Enabled           bool                `yaml:"enabled"`
+	FailOpen          bool                `yaml:"fail_open"`
+	HonorAttestations bool                `yaml:"honor_attestations"`
+	ScanTimeout       time.Duration       `yaml:"scan_timeout"`
+	Inbound           ScanDirectionConfig `yaml:"inbound"`
+	Outbound          ScanDirectionConfig `yaml:"outbound"`
+}
+
+// ScanPolicyConfig controls which messages are scanned based on role and trust metadata.
+type ScanPolicyConfig struct {
+	AlwaysScanRoles []string `yaml:"always_scan_roles"` // Roles always scanned (default: ["user"])
+	NeverScanRoles  []string `yaml:"never_scan_roles"`  // Roles never scanned (default: ["assistant"])
 }
 
 // ScanDirectionConfig configures scanning for a direction (inbound/outbound)
 type ScanDirectionConfig struct {
-	Enabled         bool   `yaml:"enabled"`
-	ScanProfile     string `yaml:"scan_profile"`
-	TrustTier       string `yaml:"trust_tier"`
-	BlockOnCritical bool   `yaml:"block_on_critical"`
+	Enabled         bool             `yaml:"enabled"`
+	ScanProfile     string           `yaml:"scan_profile"`
+	TrustTier       string           `yaml:"trust_tier"`
+	BlockOnCritical bool             `yaml:"block_on_critical"`
+	ScanPolicy      ScanPolicyConfig `yaml:"scan_policy"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -53,11 +60,11 @@ type ServerConfig struct {
 
 // RouterConfig holds routing engine configuration
 type RouterConfig struct {
-	DefaultStrategy         string        `yaml:"default_strategy"`
-	HealthCheckInterval     time.Duration `yaml:"health_check_interval"`
-	MaxCostThreshold        float64       `yaml:"max_cost_threshold"`
-	EnableFallbackChaining  bool          `yaml:"enable_fallback_chaining"`
-	RequestTimeout          time.Duration `yaml:"request_timeout"`
+	DefaultStrategy        string        `yaml:"default_strategy"`
+	HealthCheckInterval    time.Duration `yaml:"health_check_interval"`
+	MaxCostThreshold       float64       `yaml:"max_cost_threshold"`
+	EnableFallbackChaining bool          `yaml:"enable_fallback_chaining"`
+	RequestTimeout         time.Duration `yaml:"request_timeout"`
 }
 
 // ProvidersConfig holds configuration for all providers
@@ -75,18 +82,18 @@ type LoggingConfig struct {
 
 // SecurityConfig holds security-related configuration
 type SecurityConfig struct {
-	APIKeys          []string          `yaml:"api_keys"`
-	RateLimiting     RateLimitConfig   `yaml:"rate_limiting"`
-	CORS             CORSConfig        `yaml:"cors"`
+	APIKeys           []string         `yaml:"api_keys"`
+	RateLimiting      RateLimitConfig  `yaml:"rate_limiting"`
+	CORS              CORSConfig       `yaml:"cors"`
 	RequestValidation ValidationConfig `yaml:"request_validation"`
 }
 
 // RateLimitConfig holds rate limiting configuration
 type RateLimitConfig struct {
-	Enabled         bool          `yaml:"enabled"`
-	RequestsPerMin  int           `yaml:"requests_per_minute"`
-	BurstSize       int           `yaml:"burst_size"`
-	WindowDuration  time.Duration `yaml:"window_duration"`
+	Enabled        bool          `yaml:"enabled"`
+	RequestsPerMin int           `yaml:"requests_per_minute"`
+	BurstSize      int           `yaml:"burst_size"`
+	WindowDuration time.Duration `yaml:"window_duration"`
 }
 
 // CORSConfig holds CORS configuration
@@ -106,25 +113,25 @@ type ValidationConfig struct {
 // LoadConfig loads configuration from file and environment variables
 func LoadConfig(configPath string) (*Config, error) {
 	config := &Config{}
-	
+
 	// Set defaults
 	config.setDefaults()
-	
+
 	// Load from file if provided
 	if configPath != "" {
 		if err := config.loadFromFile(configPath); err != nil {
 			return nil, fmt.Errorf("failed to load config from file: %w", err)
 		}
 	}
-	
+
 	// Override with environment variables
 	config.loadFromEnv()
-	
+
 	// Validate configuration
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
-	
+
 	return config, nil
 }
 
@@ -137,23 +144,23 @@ func (c *Config) setDefaults() {
 		WriteTimeout:   30 * time.Second,
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
-	
+
 	// Router defaults
 	c.Router = RouterConfig{
-		DefaultStrategy:         "cost_optimized",
-		HealthCheckInterval:     30 * time.Second,
-		MaxCostThreshold:        1.0,
-		EnableFallbackChaining:  true,
-		RequestTimeout:          120 * time.Second,
+		DefaultStrategy:        "cost_optimized",
+		HealthCheckInterval:    30 * time.Second,
+		MaxCostThreshold:       1.0,
+		EnableFallbackChaining: true,
+		RequestTimeout:         120 * time.Second,
 	}
-	
+
 	// Logging defaults
 	c.Logging = LoggingConfig{
 		Level:  "info",
 		Format: "json",
 		Output: "stdout",
 	}
-	
+
 	// Security defaults
 	c.Security = SecurityConfig{
 		APIKeys: []string{},
@@ -174,7 +181,7 @@ func (c *Config) setDefaults() {
 			MaxMessages:      50,
 		},
 	}
-	
+
 	// Gatekeeper defaults
 	c.Gatekeeper = GatekeeperConfig{
 		Enabled:           true,
@@ -186,12 +193,20 @@ func (c *Config) setDefaults() {
 			ScanProfile:     "full",
 			TrustTier:       "external",
 			BlockOnCritical: true,
+			ScanPolicy: ScanPolicyConfig{
+				AlwaysScanRoles: []string{"user"},
+				NeverScanRoles:  []string{"assistant"},
+			},
 		},
 		Outbound: ScanDirectionConfig{
 			Enabled:         true,
 			ScanProfile:     "full",
 			TrustTier:       "partner",
 			BlockOnCritical: true,
+			ScanPolicy: ScanPolicyConfig{
+				AlwaysScanRoles: []string{"user"},
+				NeverScanRoles:  []string{"assistant"},
+			},
 		},
 	}
 
@@ -200,28 +215,28 @@ func (c *Config) setDefaults() {
 		OpenAI: &openai.OpenAIConfig{
 			Models: []types.ModelInfo{
 				{
-					Name:              "gpt-4o",
-					ProviderModelID:   "gpt-4o",
-					InputCostPer1K:    0.005,
-					OutputCostPer1K:   0.015,
-					MaxContextWindow:  128000,
-					MaxOutputTokens:   4096,
+					Name:             "gpt-4o",
+					ProviderModelID:  "gpt-4o",
+					InputCostPer1K:   0.005,
+					OutputCostPer1K:  0.015,
+					MaxContextWindow: 128000,
+					MaxOutputTokens:  4096,
 				},
 				{
-					Name:              "gpt-4o-mini",
-					ProviderModelID:   "gpt-4o-mini",
-					InputCostPer1K:    0.00015,
-					OutputCostPer1K:   0.0006,
-					MaxContextWindow:  128000,
-					MaxOutputTokens:   16384,
+					Name:             "gpt-4o-mini",
+					ProviderModelID:  "gpt-4o-mini",
+					InputCostPer1K:   0.00015,
+					OutputCostPer1K:  0.0006,
+					MaxContextWindow: 128000,
+					MaxOutputTokens:  16384,
 				},
 				{
-					Name:              "gpt-3.5-turbo",
-					ProviderModelID:   "gpt-3.5-turbo",
-					InputCostPer1K:    0.0015,
-					OutputCostPer1K:   0.002,
-					MaxContextWindow:  16385,
-					MaxOutputTokens:   4096,
+					Name:             "gpt-3.5-turbo",
+					ProviderModelID:  "gpt-3.5-turbo",
+					InputCostPer1K:   0.0015,
+					OutputCostPer1K:  0.002,
+					MaxContextWindow: 16385,
+					MaxOutputTokens:  4096,
 				},
 			},
 			Timeout: 120 * time.Second,
@@ -229,20 +244,28 @@ func (c *Config) setDefaults() {
 		Anthropic: &anthropic.AnthropicConfig{
 			Models: []types.ModelInfo{
 				{
-					Name:              "claude-sonnet-4-20250514",
-					ProviderModelID:   "claude-sonnet-4-20250514",
-					InputCostPer1K:    0.003,
-					OutputCostPer1K:   0.015,
-					MaxContextWindow:  200000,
-					MaxOutputTokens:   8192,
+					Name:             "claude-opus-4-6",
+					ProviderModelID:  "claude-opus-4-6",
+					InputCostPer1K:   0.015,
+					OutputCostPer1K:  0.075,
+					MaxContextWindow: 1000000,
+					MaxOutputTokens:  128000,
 				},
 				{
-					Name:              "claude-3-haiku-20240307",
-					ProviderModelID:   "claude-3-haiku-20240307",
-					InputCostPer1K:    0.00025,
-					OutputCostPer1K:   0.00125,
-					MaxContextWindow:  200000,
-					MaxOutputTokens:   4096,
+					Name:             "claude-sonnet-4-6",
+					ProviderModelID:  "claude-sonnet-4-6",
+					InputCostPer1K:   0.003,
+					OutputCostPer1K:  0.015,
+					MaxContextWindow: 1000000,
+					MaxOutputTokens:  64000,
+				},
+				{
+					Name:             "claude-haiku-4-5-20251001",
+					ProviderModelID:  "claude-haiku-4-5-20251001",
+					InputCostPer1K:   0.0008,
+					OutputCostPer1K:  0.004,
+					MaxContextWindow: 200000,
+					MaxOutputTokens:  64000,
 				},
 			},
 			Timeout: 120 * time.Second,
@@ -256,11 +279,11 @@ func (c *Config) loadFromFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
-	
+
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return fmt.Errorf("failed to parse YAML config: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -342,7 +365,7 @@ func (c *Config) validate() error {
 	if c.Server.Port == "" {
 		return fmt.Errorf("server port cannot be empty")
 	}
-	
+
 	// Validate router strategy
 	validStrategies := map[string]bool{
 		"cost_optimized": true,
@@ -350,11 +373,11 @@ func (c *Config) validate() error {
 		"round_robin":    true,
 		"specific":       true,
 	}
-	
+
 	if !validStrategies[c.Router.DefaultStrategy] {
 		return fmt.Errorf("invalid default strategy: %s", c.Router.DefaultStrategy)
 	}
-	
+
 	// Validate logging level
 	validLogLevels := map[string]bool{
 		"debug": true,
@@ -363,14 +386,14 @@ func (c *Config) validate() error {
 		"error": true,
 		"fatal": true,
 	}
-	
+
 	if !validLogLevels[c.Logging.Level] {
 		return fmt.Errorf("invalid log level: %s", c.Logging.Level)
 	}
-	
+
 	// Validate provider configurations
 	providerCount := 0
-	
+
 	if c.Providers.OpenAI != nil {
 		if c.Providers.OpenAI.APIKey == "" {
 			return fmt.Errorf("OpenAI API key is required when OpenAI provider is enabled")
@@ -380,7 +403,7 @@ func (c *Config) validate() error {
 		}
 		providerCount++
 	}
-	
+
 	if c.Providers.Anthropic != nil {
 		if c.Providers.Anthropic.APIKey == "" {
 			return fmt.Errorf("Anthropic API key is required when Anthropic provider is enabled")
@@ -390,11 +413,11 @@ func (c *Config) validate() error {
 		}
 		providerCount++
 	}
-	
+
 	if providerCount == 0 {
 		return fmt.Errorf("at least one provider must be configured")
 	}
-	
+
 	return nil
 }
 
@@ -425,15 +448,15 @@ func (c *Config) ToSecurityMiddlewareConfig() *middleware.SecurityMiddlewareConf
 			CleanupInterval:   5 * time.Minute,
 		},
 		Validation: &security.ValidationConfig{
-			MaxRequestSize:    10 * 1024 * 1024, // 10MB
-			AllowedMethods:    c.Security.CORS.AllowedMethods,
-			ContentTypes:      []string{"application/json", "text/plain"},
-			MaxJSONDepth:      20,
-			MaxFieldLength:    1024,
+			MaxRequestSize: 10 * 1024 * 1024, // 10MB
+			AllowedMethods: c.Security.CORS.AllowedMethods,
+			ContentTypes:   []string{"application/json", "text/plain"},
+			MaxJSONDepth:   20,
+			MaxFieldLength: 1024,
 		},
 		Audit: &security.AuditConfig{
-			Enabled:     true,
-			BufferSize:  1000,
+			Enabled:       true,
+			BufferSize:    1000,
 			FlushInterval: 10 * time.Second,
 		},
 	}
@@ -445,25 +468,25 @@ func (c *Config) SaveToFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal config to YAML: %w", err)
 	}
-	
+
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
-	
+
 	return nil
 }
 
 // GetEnabledProviders returns a list of enabled provider names
 func (c *Config) GetEnabledProviders() []string {
 	var providers []string
-	
+
 	if c.Providers.OpenAI != nil && c.Providers.OpenAI.APIKey != "" {
 		providers = append(providers, "openai")
 	}
-	
+
 	if c.Providers.Anthropic != nil && c.Providers.Anthropic.APIKey != "" {
 		providers = append(providers, "anthropic")
 	}
-	
+
 	return providers
 }

@@ -354,8 +354,9 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, provider providers.LLMProvider, metadata *types.RouterMetadata) {
 	chunks, err := provider.StreamCompletion(r.Context(), req)
 	if err != nil {
-		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("Streaming completion failed")
-		s.writeErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Streaming failed: %v", err))
+		// Fall back to non-streaming if the provider doesn't support streaming
+		s.logger.WithError(err).WithField("provider", metadata.Provider).Warn("Streaming not supported, falling back to non-streaming")
+		s.handleNonStreamingCompletion(w, r, req, provider, metadata)
 		return
 	}
 
