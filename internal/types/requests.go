@@ -6,44 +6,45 @@ import (
 
 // Core request/response types
 type ChatRequest struct {
-	ID               string                 `json:"id"`
-	Model            string                 `json:"model"`
-	Messages         []Message              `json:"messages"`
-	Temperature      *float32               `json:"temperature,omitempty"`
-	MaxTokens        *int                   `json:"max_tokens,omitempty"`
-	TopP             *float32               `json:"top_p,omitempty"`
-	FrequencyPenalty *float32               `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float32               `json:"presence_penalty,omitempty"`
-	Stop             []string               `json:"stop,omitempty"`
-	Stream           bool                   `json:"stream"`
-	Functions        []Function             `json:"functions,omitempty"`
-	FunctionCall     interface{}            `json:"function_call,omitempty"`
-	Tools            []Tool                 `json:"tools,omitempty"`
-	ToolChoice       interface{}            `json:"tool_choice,omitempty"`
-	ResponseFormat   *ResponseFormat        `json:"response_format,omitempty"`
-	Seed             *int                   `json:"seed,omitempty"`
-	
+	ID               string          `json:"id"`
+	Model            string          `json:"model"`
+	Messages         []Message       `json:"messages"`
+	Temperature      *float32        `json:"temperature,omitempty"`
+	MaxTokens        *int            `json:"max_tokens,omitempty"`
+	TopP             *float32        `json:"top_p,omitempty"`
+	FrequencyPenalty *float32        `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float32        `json:"presence_penalty,omitempty"`
+	Stop             []string        `json:"stop,omitempty"`
+	Stream           bool            `json:"stream"`
+	Functions        []Function      `json:"functions,omitempty"`
+	FunctionCall     interface{}     `json:"function_call,omitempty"`
+	Tools            []Tool          `json:"tools,omitempty"`
+	ToolChoice       interface{}     `json:"tool_choice,omitempty"`
+	ResponseFormat   *ResponseFormat `json:"response_format,omitempty"`
+	Seed             *int            `json:"seed,omitempty"`
+
 	// Routing hints
-	OptimizeFor      OptimizationType       `json:"optimize_for,omitempty"`
-	RequiredFeatures []string               `json:"required_features,omitempty"`
-	MaxCost          *float64               `json:"max_cost,omitempty"`
-	
+	OptimizeFor      OptimizationType `json:"optimize_for,omitempty"`
+	RequiredFeatures []string         `json:"required_features,omitempty"`
+	MaxCost          *float64         `json:"max_cost,omitempty"`
+
 	// Retry and fallback controls
-	RetryConfig      *RetryConfig           `json:"retry_config,omitempty"`
-	FallbackConfig   *FallbackConfig        `json:"fallback_config,omitempty"`
-	
+	RetryConfig    *RetryConfig    `json:"retry_config,omitempty"`
+	FallbackConfig *FallbackConfig `json:"fallback_config,omitempty"`
+
 	// Metadata
-	UserID           string                 `json:"user_id"`
-	ApplicationID    string                 `json:"application_id"`
-	Timestamp        time.Time              `json:"timestamp"`
+	UserID        string    `json:"user_id"`
+	ApplicationID string    `json:"application_id"`
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 type Message struct {
-	Role       string      `json:"role"`
-	Content    interface{} `json:"content"` // string or []ContentPart for multimodal
-	Name       string      `json:"name,omitempty"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"` // For tool result messages (role=tool)
+	Role       string                 `json:"role"`
+	Content    interface{}            `json:"content"` // string or []ContentPart for multimodal
+	Name       string                 `json:"name,omitempty"`
+	ToolCalls  []ToolCall             `json:"tool_calls,omitempty"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"` // For tool result messages (role=tool)
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`     // Per-message metadata (e.g. trust: "pre_scanned")
 }
 
 type ContentPart struct {
@@ -98,9 +99,9 @@ const (
 
 // Batch processing types
 type BatchRequest struct {
-	InputFileID      string `json:"input_file_id"`
-	Endpoint         string `json:"endpoint"`
-	CompletionWindow string `json:"completion_window"`
+	InputFileID      string                 `json:"input_file_id"`
+	Endpoint         string                 `json:"endpoint"`
+	CompletionWindow string                 `json:"completion_window"`
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`
 }
 
@@ -164,7 +165,7 @@ type AssistantResponse struct {
 
 // Retry and fallback control structures
 type RetryConfig struct {
-	MaxAttempts     int           `json:"max_attempts"`               // 0 = no retry, 1-5 allowed  
+	MaxAttempts     int           `json:"max_attempts"`               // 0 = no retry, 1-5 allowed
 	BackoffType     string        `json:"backoff_type"`               // "linear", "exponential"
 	BaseDelay       time.Duration `json:"base_delay"`                 // Starting delay (e.g., 1s)
 	MaxDelay        time.Duration `json:"max_delay"`                  // Cap on delay (e.g., 30s)
@@ -172,8 +173,8 @@ type RetryConfig struct {
 }
 
 type FallbackConfig struct {
-	Enabled             bool     `json:"enabled"`                          // Enable fallback to healthy providers
-	PreferredChain      []string `json:"preferred_chain,omitempty"`        // Custom fallback order
-	MaxCostIncrease     *float64 `json:"max_cost_increase,omitempty"`      // Max % cost increase allowed (e.g., 0.5 = 50%)
-	RequireSameFeatures bool     `json:"require_same_features"`            // Must support same capabilities
+	Enabled             bool     `json:"enabled"`                     // Enable fallback to healthy providers
+	PreferredChain      []string `json:"preferred_chain,omitempty"`   // Custom fallback order
+	MaxCostIncrease     *float64 `json:"max_cost_increase,omitempty"` // Max % cost increase allowed (e.g., 0.5 = 50%)
+	RequireSameFeatures bool     `json:"require_same_features"`       // Must support same capabilities
 }

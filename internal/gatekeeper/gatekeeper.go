@@ -33,12 +33,31 @@ type Config struct {
 	Outbound ScanDirectionConfig `yaml:"outbound"`
 }
 
+// ScanPolicy controls which messages are scanned based on role and trust metadata.
+type ScanPolicy struct {
+	AlwaysScanRoles []string `yaml:"always_scan_roles"` // Roles always scanned (default: ["user"])
+	NeverScanRoles  []string `yaml:"never_scan_roles"`  // Roles never scanned (default: ["assistant"])
+	TrustMetaKey    string   `yaml:"trust_meta_key"`    // Metadata key to check (default: "trust")
+	PreScannedValue string   `yaml:"pre_scanned_value"` // Value that marks content as pre-scanned (default: "pre_scanned")
+}
+
+// DefaultScanPolicy returns sensible defaults for selective scanning.
+func DefaultScanPolicy() ScanPolicy {
+	return ScanPolicy{
+		AlwaysScanRoles: []string{"user"},
+		NeverScanRoles:  []string{"assistant"},
+		TrustMetaKey:    "trust",
+		PreScannedValue: "pre_scanned",
+	}
+}
+
 // ScanDirectionConfig configures scanning for a direction (inbound/outbound).
 type ScanDirectionConfig struct {
-	Enabled         bool   `yaml:"enabled"`
-	ScanProfile     string `yaml:"scan_profile"`
-	TrustTier       string `yaml:"trust_tier"`
-	BlockOnCritical bool   `yaml:"block_on_critical"`
+	Enabled         bool       `yaml:"enabled"`
+	ScanProfile     string     `yaml:"scan_profile"`
+	TrustTier       string     `yaml:"trust_tier"`
+	BlockOnCritical bool       `yaml:"block_on_critical"`
+	ScanPolicy      ScanPolicy `yaml:"scan_policy"`
 }
 
 // DefaultConfig returns the default Gatekeeper configuration.
@@ -53,12 +72,14 @@ func DefaultConfig() Config {
 			ScanProfile:     "full",
 			TrustTier:       "external",
 			BlockOnCritical: true,
+			ScanPolicy:      DefaultScanPolicy(),
 		},
 		Outbound: ScanDirectionConfig{
 			Enabled:         true,
 			ScanProfile:     "full",
 			TrustTier:       "partner",
 			BlockOnCritical: true,
+			ScanPolicy:      DefaultScanPolicy(),
 		},
 	}
 }
@@ -84,7 +105,7 @@ func New(cfg Config, logger *logrus.Logger) (*Client, error) {
 	procConfig.ServiceID = "tas-llm-router"
 	procConfig.HonorAttestations = cfg.HonorAttestations
 	procConfig.EnableExtraction = false  // LLM messages are already relevant
-	procConfig.EnableStreaming = false    // LLM Router manages its own audit
+	procConfig.EnableStreaming = false   // LLM Router manages its own audit
 	procConfig.EnableActions = false     // LLM Router handles blocking
 	procConfig.EnableAttestation = false // Simplified for now
 	if cfg.ScanTimeout > 0 {
@@ -100,11 +121,28 @@ func New(cfg Config, logger *logrus.Logger) (*Client, error) {
 	}, nil
 }
 
-// ScanMessages extracts text from messages and scans for violations.
+// ScanMessages extracts text from scannable messages and scans for violations.
+// Messages are filtered based on the inbound ScanPolicy:
+//   - Roles in AlwaysScanRoles (default: "user") are always scanned regardless of metadata.
+//   - Roles in NeverScanRoles (default: "assistant") are always skipped.
+//   - Other messages are skipped if metadata[TrustMetaKey] == PreScannedValue.
 func (c *Client) ScanMessages(ctx context.Context, messages []types.Message, meta ScanMeta) (*pipeline.ProcessResult, error) {
-	content := extractMessagesText(messages)
+	policy := c.config.Inbound.ScanPolicy
+	if len(policy.AlwaysScanRoles) == 0 && len(policy.NeverScanRoles) == 0 {
+		policy = DefaultScanPolicy()
+	}
+
+	// Filter to only scannable messages
+	var scannable []types.Message
+	for _, msg := range messages {
+		if shouldScanMessage(msg, policy) {
+			scannable = append(scannable, msg)
+		}
+	}
+
+	content := extractMessagesText(scannable)
 	if len(content) == 0 {
-		return &pipeline.ProcessResult{Skipped: true, SkipReason: "empty_content"}, nil
+		return &pipeline.ProcessResult{Skipped: true, SkipReason: "all_messages_pre_scanned_or_empty"}, nil
 	}
 
 	profile := parseScanProfile(c.config.Inbound.ScanProfile)
@@ -120,10 +158,49 @@ func (c *Client) ScanMessages(ctx context.Context, messages []types.Message, met
 		UserID:         meta.UserID,
 		Source:         meta.Source,
 		SkipExtraction: true,
-		SkipStreaming:   true,
+		SkipStreaming:  true,
 	}
 
 	return c.processor.Process(ctx, req)
+}
+
+// shouldScanMessage determines whether a message should be included in content scanning.
+func shouldScanMessage(msg types.Message, policy ScanPolicy) bool {
+	role := strings.ToLower(msg.Role)
+
+	// Always scan roles in the always-scan list (e.g. "user")
+	for _, r := range policy.AlwaysScanRoles {
+		if role == strings.ToLower(r) {
+			return true
+		}
+	}
+
+	// Never scan roles in the never-scan list (e.g. "assistant")
+	for _, r := range policy.NeverScanRoles {
+		if role == strings.ToLower(r) {
+			return false
+		}
+	}
+
+	// For other roles (system, tool), check trust metadata
+	if msg.Metadata != nil {
+		trustKey := policy.TrustMetaKey
+		if trustKey == "" {
+			trustKey = "trust"
+		}
+		preScannedVal := policy.PreScannedValue
+		if preScannedVal == "" {
+			preScannedVal = "pre_scanned"
+		}
+		if val, ok := msg.Metadata[trustKey]; ok {
+			if strVal, ok := val.(string); ok && strVal == preScannedVal {
+				return false
+			}
+		}
+	}
+
+	// Default: scan the message
+	return true
 }
 
 // ScanResponse scans LLM output content for violations.
@@ -145,7 +222,7 @@ func (c *Client) ScanResponse(ctx context.Context, content string, meta ScanMeta
 		UserID:         meta.UserID,
 		Source:         "llm_output",
 		SkipExtraction: true,
-		SkipStreaming:   true,
+		SkipStreaming:  true,
 	}
 
 	return c.processor.Process(ctx, req)

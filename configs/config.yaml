@@ -71,24 +71,52 @@ providers:
     base_url: "https://api.anthropic.com"
     timeout: 120s
     models:
-      - name: "claude-sonnet-4-20250514"
-        provider_model_id: "claude-sonnet-4-20250514"
+      - name: "claude-opus-4-6"
+        provider_model_id: "claude-opus-4-6"
+        input_cost_per_1k: 0.015
+        output_cost_per_1k: 0.075
+        max_context_window: 1000000
+        max_output_tokens: 128000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "claude-sonnet-4-6"
+        provider_model_id: "claude-sonnet-4-6"
         input_cost_per_1k: 0.003
         output_cost_per_1k: 0.015
-        max_context_window: 200000
-        max_output_tokens: 8192
+        max_context_window: 1000000
+        max_output_tokens: 64000
         supports_functions: true
         supports_vision: true
-        supports_structured_output: false
-      - name: "claude-3-haiku-20240307"
-        provider_model_id: "claude-3-haiku-20240307"
-        input_cost_per_1k: 0.00025
-        output_cost_per_1k: 0.00125
+        supports_structured_output: true
+      - name: "claude-haiku-4-5-20251001"
+        provider_model_id: "claude-haiku-4-5-20251001"
+        input_cost_per_1k: 0.0008
+        output_cost_per_1k: 0.004
         max_context_window: 200000
-        max_output_tokens: 4096
+        max_output_tokens: 64000
         supports_functions: true
         supports_vision: true
-        supports_structured_output: false
+        supports_structured_output: true
+
+gatekeeper:
+  enabled: true
+  fail_open: true
+  honor_attestations: true
+  scan_timeout: 30s
+  inbound:
+    enabled: true
+    scan_profile: "full"
+    trust_tier: "internal"
+    block_on_critical: false   # Don't block internal service requests with document content
+    scan_policy:
+      always_scan_roles: ["user"]
+      never_scan_roles: ["assistant"]
+  outbound:
+    enabled: true
+    scan_profile: "full"
+    trust_tier: "partner"
+    block_on_critical: false   # Log but don't block - document content may trigger false positives
 
 logging:
   level: "info"

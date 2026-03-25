@@ -21,19 +21,19 @@ type ProviderCapabilities struct {
 }
 
 type ModelInfo struct {
-	Name                 string   `json:"name"`
-	DisplayName          string   `json:"display_name"`
-	MaxContextWindow     int      `json:"max_context_window"`
-	MaxOutputTokens      int      `json:"max_output_tokens"`
-	SupportsFunctions    bool     `json:"supports_functions"`
-	SupportsVision       bool     `json:"supports_vision"`
-	SupportsStructured   bool     `json:"supports_structured_output"`
-	InputCostPer1K       float64  `json:"input_cost_per_1k"`
-	OutputCostPer1K      float64  `json:"output_cost_per_1k"`
-	
+	Name                 string   `json:"name" yaml:"name"`
+	DisplayName          string   `json:"display_name" yaml:"display_name"`
+	MaxContextWindow     int      `json:"max_context_window" yaml:"max_context_window"`
+	MaxOutputTokens      int      `json:"max_output_tokens" yaml:"max_output_tokens"`
+	SupportsFunctions    bool     `json:"supports_functions" yaml:"supports_functions"`
+	SupportsVision       bool     `json:"supports_vision" yaml:"supports_vision"`
+	SupportsStructured   bool     `json:"supports_structured_output" yaml:"supports_structured_output"`
+	InputCostPer1K       float64  `json:"input_cost_per_1k" yaml:"input_cost_per_1k"`
+	OutputCostPer1K      float64  `json:"output_cost_per_1k" yaml:"output_cost_per_1k"`
+
 	// Provider-specific model info
-	ProviderModelID      string   `json:"provider_model_id,omitempty"`
-	Tags                 []string `json:"tags,omitempty"`
+	ProviderModelID      string   `json:"provider_model_id,omitempty" yaml:"provider_model_id"`
+	Tags                 []string `json:"tags,omitempty" yaml:"tags"`
 }
 
 type CostStructure struct {

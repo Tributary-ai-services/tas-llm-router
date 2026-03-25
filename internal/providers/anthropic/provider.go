@@ -9,7 +9,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/sirupsen/logrus"
-	
+
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
@@ -34,13 +34,13 @@ func NewAnthropicProvider(config *AnthropicConfig, logger *logrus.Logger) *Anthr
 	opts := []option.RequestOption{
 		option.WithAPIKey(config.APIKey),
 	}
-	
+
 	if config.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(config.BaseURL))
 	}
-	
+
 	client := anthropic.NewClient(opts...)
-	
+
 	return &AnthropicProvider{
 		client: &client,
 		config: config,
@@ -58,13 +58,13 @@ func (p *AnthropicProvider) GetCapabilities() types.ProviderCapabilities {
 	return types.ProviderCapabilities{
 		ProviderName:              "anthropic",
 		SupportedModels:           p.config.Models,
-		SupportsFunctions:         true, // Tool use
+		SupportsFunctions:         true,  // Tool use
 		SupportsParallelFunctions: false, // Claude doesn't support parallel tool calls
 		SupportsVision:            true,
 		SupportsStructuredOutput:  false, // No strict JSON schema mode
 		SupportsStreaming:         true,
-		SupportsAssistants:        false, // No assistants API
-		SupportsBatch:             false, // No batch API yet
+		SupportsAssistants:        false,  // No assistants API
+		SupportsBatch:             false,  // No batch API yet
 		MaxContextWindow:          200000, // Claude-3.5 Sonnet context window
 		SupportedImageFormats:     []string{"png", "jpeg", "webp", "gif"},
 		CostPer1KTokens: types.CostStructure{
@@ -73,12 +73,12 @@ func (p *AnthropicProvider) GetCapabilities() types.ProviderCapabilities {
 			Currency:        "USD",
 		},
 		AnthropicSpecific: &types.AnthropicCapabilities{
-			SupportsSystemMessages:    true,
-			MaxSystemMessageLength:    100000,
-			SupportsStopSequences:     true,
-			SupportsToolUse:           true,
-			MaxToolCalls:              5,
-			SupportedStopSequences:    []string{"\n\nHuman:", "\n\nAssistant:"},
+			SupportsSystemMessages: true,
+			MaxSystemMessageLength: 100000,
+			SupportsStopSequences:  true,
+			SupportsToolUse:        true,
+			MaxToolCalls:           5,
+			SupportedStopSequences: []string{"\n\nHuman:", "\n\nAssistant:"},
 		},
 	}
 }
@@ -105,8 +105,118 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *types.ChatR
 
 // StreamCompletion performs a streaming chat completion request
 func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.ChatRequest) (<-chan *types.ChatChunk, error) {
-	// For now, return an error as streaming implementation needs to be updated for the current SDK
-	return nil, fmt.Errorf("streaming not yet implemented for current Anthropic SDK version")
+	// Convert our request to Anthropic format
+	anthropicReq, err := p.convertToAnthropicRequest(req)
+	if err != nil {
+		p.logger.WithError(err).Error("Failed to convert request to Anthropic format")
+		return nil, fmt.Errorf("failed to convert request: %w", err)
+	}
+
+	// Create the streaming request
+	stream := p.client.Messages.NewStreaming(ctx, *anthropicReq)
+
+	// Create our response channel
+	chunks := make(chan *types.ChatChunk, 100)
+
+	// Start goroutine to process stream
+	go func() {
+		defer close(chunks)
+
+		message := anthropic.Message{}
+		for stream.Next() {
+			event := stream.Current()
+			err := message.Accumulate(event)
+			if err != nil {
+				p.logger.WithError(err).Error("Failed to accumulate streaming event")
+				return
+			}
+
+			// Convert event to our chunk format
+			chunk := p.convertStreamEvent(event, req, &message)
+			if chunk != nil {
+				select {
+				case chunks <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+
+		if stream.Err() != nil {
+			p.logger.WithError(stream.Err()).Error("Anthropic streaming error")
+			return
+		}
+
+		// Send final chunk with finish reason and usage
+		finalChunk := &types.ChatChunk{
+			ID:      message.ID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   string(message.Model),
+			Choices: []types.ChoiceChunk{
+				{
+					Index:        0,
+					Delta:        &types.Message{Role: "assistant"},
+					FinishReason: string(message.StopReason),
+				},
+			},
+		}
+		if message.Usage.InputTokens > 0 || message.Usage.OutputTokens > 0 {
+			finalChunk.Usage = &types.Usage{
+				PromptTokens:     int(message.Usage.InputTokens),
+				CompletionTokens: int(message.Usage.OutputTokens),
+				TotalTokens:      int(message.Usage.InputTokens + message.Usage.OutputTokens),
+			}
+		}
+		select {
+		case chunks <- finalChunk:
+		case <-ctx.Done():
+		}
+	}()
+
+	return chunks, nil
+}
+
+// convertStreamEvent converts an Anthropic streaming event to our ChatChunk format
+func (p *AnthropicProvider) convertStreamEvent(event anthropic.MessageStreamEventUnion, req *types.ChatRequest, message *anthropic.Message) *types.ChatChunk {
+	switch variant := event.AsAny().(type) {
+	case anthropic.ContentBlockDeltaEvent:
+		switch delta := variant.Delta.AsAny().(type) {
+		case anthropic.TextDelta:
+			return &types.ChatChunk{
+				ID:      message.ID,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   req.Model,
+				Choices: []types.ChoiceChunk{
+					{
+						Index: 0,
+						Delta: &types.Message{
+							Role:    "assistant",
+							Content: delta.Text,
+						},
+					},
+				},
+			}
+		}
+	case anthropic.MessageStartEvent:
+		// Send initial chunk with role
+		return &types.ChatChunk{
+			ID:      message.ID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   req.Model,
+			Choices: []types.ChoiceChunk{
+				{
+					Index: 0,
+					Delta: &types.Message{
+						Role: "assistant",
+					},
+				},
+			},
+		}
+	}
+	return nil
 }
 
 // EstimateCost estimates the cost for a chat completion request
@@ -159,13 +269,13 @@ func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
 		},
 		MaxTokens: 1,
 	}
-	
+
 	_, err := p.client.Messages.New(ctx, testReq)
 	if err != nil {
 		p.logger.WithError(err).Error("Anthropic health check failed")
 		return fmt.Errorf("anthropic health check failed: %w", err)
 	}
-	
+
 	p.logger.Debug("Anthropic health check passed")
 	return nil
 }
@@ -177,7 +287,7 @@ func (p *AnthropicProvider) SupportsFunctionCalling() bool {
 	return true // Claude supports tool use
 }
 
-// SupportsParallelFunctions implements FunctionCallingProvider  
+// SupportsParallelFunctions implements FunctionCallingProvider
 func (p *AnthropicProvider) SupportsParallelFunctions() bool {
 	return false // Claude doesn't support parallel tool calls
 }
@@ -229,7 +339,7 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 	// Extract system message if present
 	var systemMessage string
 	var messages []anthropic.MessageParam
-	
+
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
 			// Claude handles system messages separately
@@ -241,7 +351,7 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 			}
 			continue
 		}
-		
+
 		// Convert regular messages
 		anthropicMsg, err := p.convertMessage(msg)
 		if err != nil {
@@ -269,15 +379,15 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 	} else {
 		anthropicReq.MaxTokens = 1024 // Anthropic requires max_tokens
 	}
-	
+
 	if req.Temperature != nil {
 		anthropicReq.Temperature = anthropic.Float(float64(*req.Temperature))
 	}
-	
+
 	if req.TopP != nil {
 		anthropicReq.TopP = anthropic.Float(float64(*req.TopP))
 	}
-	
+
 	if len(req.Stop) > 0 {
 		stopSeqs := make([]string, len(req.Stop))
 		copy(stopSeqs, req.Stop)
@@ -295,13 +405,13 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 					// For now, use an empty schema as direct conversion is complex
 					inputSchema = anthropic.ToolInputSchemaParam{}
 				}
-				
+
 				// Create tool using the union constructor
 				anthropicTool := anthropic.ToolUnionParamOfTool(
 					inputSchema,
 					tool.Function.Name,
 				)
-				
+
 				tools = append(tools, anthropicTool)
 			}
 		}
@@ -322,7 +432,7 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 		} else {
 			return anthropic.NewAssistantMessage(anthropic.NewTextBlock(content)), nil
 		}
-		
+
 	case []types.ContentPart:
 		// Multimodal message - only handle text parts for now
 		var blocks []anthropic.ContentBlockParamUnion
@@ -332,13 +442,13 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 			}
 			// Skip image parts for now - would need base64 conversion
 		}
-		
+
 		if msg.Role == "user" {
 			return anthropic.NewUserMessage(blocks...), nil
 		} else {
 			return anthropic.NewAssistantMessage(blocks...), nil
 		}
-		
+
 	default:
 		// Convert any other type to string
 		contentStr := fmt.Sprintf("%v", content)
@@ -350,12 +460,11 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 	}
 }
 
-
 // convertFromAnthropicResponse converts Anthropic's response to our format
 func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message, req *types.ChatRequest) *types.ChatResponse {
 	// Build choices from content blocks
 	var choices []types.Choice
-	
+
 	choice := types.Choice{
 		Index:        0,
 		FinishReason: string(resp.StopReason),
@@ -364,19 +473,19 @@ func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message
 			Content: "", // Will be built from blocks
 		},
 	}
-	
+
 	// Process content blocks - simple text extraction for now
 	var textContent strings.Builder
-	
+
 	for _, block := range resp.Content {
 		if block.Type == "text" {
 			textContent.WriteString(block.Text)
 		}
 	}
-	
+
 	choice.Message.Content = textContent.String()
 	choices = append(choices, choice)
-	
+
 	// Build usage information
 	var usage *types.Usage
 	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
@@ -386,7 +495,7 @@ func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message
 			TotalTokens:      int(resp.Usage.InputTokens + resp.Usage.OutputTokens),
 		}
 	}
-	
+
 	return &types.ChatResponse{
 		ID:      resp.ID,
 		Object:  "chat.completion",
@@ -397,11 +506,10 @@ func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message
 	}
 }
 
-
 // estimateTokens provides a rough estimate of tokens in the request
 func (p *AnthropicProvider) estimateTokens(req *types.ChatRequest) int {
 	totalChars := 0
-	
+
 	for _, msg := range req.Messages {
 		switch content := msg.Content.(type) {
 		case string:
@@ -417,16 +525,16 @@ func (p *AnthropicProvider) estimateTokens(req *types.ChatRequest) int {
 				}
 			}
 		}
-		
+
 		// Add role tokens
 		totalChars += len(msg.Role)
 	}
-	
+
 	// Add tool tokens
 	for _, tool := range req.Tools {
 		totalChars += len(tool.Function.Name) + len(tool.Function.Description)
 	}
-	
+
 	// Claude token estimation: approximately 3.5 chars per token
 	return totalChars * 10 / 35
 }
