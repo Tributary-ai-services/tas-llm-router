@@ -261,9 +261,13 @@ func (p *AnthropicProvider) EstimateCost(req *types.ChatRequest) (*types.CostEst
 
 // HealthCheck performs a health check on the Anthropic API
 func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
-	// Simple health check using a minimal message
+	model := p.pickHealthCheckModel()
+	if model == "" {
+		return fmt.Errorf("anthropic health check skipped: no models configured")
+	}
+
 	testReq := anthropic.MessageNewParams{
-		Model: anthropic.Model("claude-3-haiku-20240307"), // Use cheapest model for health check
+		Model: anthropic.Model(model),
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock("test")),
 		},
@@ -278,6 +282,22 @@ func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
 
 	p.logger.Debug("Anthropic health check passed")
 	return nil
+}
+
+// pickHealthCheckModel chooses a currently-configured model for the health
+// probe. We can't hardcode a model name — Anthropic deprecates dated snapshots
+// and the probe then 404s, marking the whole provider unhealthy. Prefer a
+// Haiku-family model (cheapest), fall back to the first configured model.
+func (p *AnthropicProvider) pickHealthCheckModel() string {
+	if len(p.config.Models) == 0 {
+		return ""
+	}
+	for _, m := range p.config.Models {
+		if strings.Contains(strings.ToLower(m.Name), "haiku") {
+			return m.Name
+		}
+	}
+	return p.config.Models[0].Name
 }
 
 // Interface implementations for advanced features
