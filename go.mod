@@ -6,12 +6,14 @@ toolchain go1.24.4
 
 require (
 	github.com/Tributary-ai-services/Gatekeeper v0.0.0-00010101000000-000000000000
+	github.com/Tributary-ai-services/aether-shared/go-events v0.0.0-00010101000000-000000000000
 	github.com/anthropics/anthropic-sdk-go v1.7.0
 	github.com/getkin/kin-openapi v0.133.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
 	github.com/sashabaranov/go-openai v1.40.5
+	github.com/segmentio/kafka-go v0.4.47
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.11.1
 	gopkg.in/yaml.v2 v2.4.0
@@ -19,6 +21,8 @@ require (
 )
 
 replace github.com/Tributary-ai-services/Gatekeeper => ../Gatekeeper
+
+replace github.com/Tributary-ai-services/aether-shared/go-events => ../aether-shared/go-events
 
 require (
 	github.com/IBM/sarama v1.46.3 // indirect

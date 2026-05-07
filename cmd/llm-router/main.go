@@ -6,18 +6,37 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/tributary-ai/llm-router-waf/internal/config"
+	"github.com/tributary-ai/llm-router-waf/internal/events"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/anthropic"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/openai"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/server"
 )
+
+// kafkaBrokersFromEnv reads KAFKA_BROKERS as a comma-separated list. Empty if
+// unset, which causes events.New to return nil and the server to no-op publish.
+func kafkaBrokersFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // Application represents the main application
 type Application struct {
@@ -53,6 +72,18 @@ func NewApplication(configPath string) (*Application, error) {
 	serverInstance, err := server.NewServer(routerInstance, cfg.ToServerConfig(), logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create server: %w", err)
+	}
+
+	// Wire CloudEvents publisher (no-op if KAFKA_BROKERS is unset)
+	if brokers := kafkaBrokersFromEnv(); len(brokers) > 0 {
+		eventsPublisher := events.New(events.Config{
+			Brokers: brokers,
+			Logger:  logger,
+		})
+		serverInstance.SetEventsPublisher(eventsPublisher)
+		logger.WithField("brokers", brokers).Info("CloudEvents publisher enabled — emitting tas.activity.llm")
+	} else {
+		logger.Info("KAFKA_BROKERS unset — activity event publishing disabled")
 	}
 
 	// Initialize Gatekeeper content scanning

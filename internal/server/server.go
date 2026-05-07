@@ -11,6 +11,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
+	"github.com/Tributary-ai-services/aether-shared/go-events/payloads"
+
+	"github.com/tributary-ai/llm-router-waf/internal/events"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
@@ -31,6 +34,7 @@ type Server struct {
 	gatekeeperConfig     *gatekeeper.Config
 	bypassManager        *gatekeeper.BypassManager
 	bypassHandler        *gatekeeper.BypassHandler
+	eventsPublisher      *events.Publisher
 }
 
 // ServerConfig holds server configuration
@@ -70,6 +74,12 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 	}
 	
 	return server, nil
+}
+
+// SetEventsPublisher wires the CloudEvents publisher used to emit
+// activity events to Kafka. Pass nil to disable event publishing.
+func (s *Server) SetEventsPublisher(p *events.Publisher) {
+	s.eventsPublisher = p
 }
 
 // SetGatekeeper configures the Gatekeeper content scanning client.
@@ -236,6 +246,15 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		req.ID = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	}
 	req.Timestamp = time.Now()
+	requestStart := req.Timestamp
+	tenantID := s.extractTenantID(r)
+	userID := s.extractUserID(r)
+
+	// Emit activity event: llm.request
+	s.eventsPublisher.PublishRequest(r.Context(), tenantID, userID, req.ID, payloads.LLMRequest{
+		Model:        req.Model,
+		MessageCount: len(req.Messages),
+	})
 
 	// Gatekeeper: check bypass token
 	scanBypassed := false
@@ -294,9 +313,37 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// Handle streaming vs non-streaming with retry/fallback support
 	if req.Stream {
 		s.handleStreamingCompletionWithRetry(w, r, &req, provider, metadata)
+		// Streaming exit cannot easily report token counts; emit a minimal
+		// response event so consumers see request/response correlation.
+		s.eventsPublisher.PublishResponse(r.Context(), tenantID, userID, req.ID, payloads.LLMResponse{
+			Model:      req.Model,
+			Provider:   metadata.Provider,
+			DurationMS: time.Since(requestStart).Milliseconds(),
+		})
 	} else {
-		s.handleNonStreamingCompletionWithRetry(w, r, &req, provider, metadata)
+		resp := s.handleNonStreamingCompletionWithRetry(w, r, &req, provider, metadata)
+		if resp != nil {
+			out := payloads.LLMResponse{
+				Model:        resp.Model,
+				Provider:     metadata.Provider,
+				DurationMS:   time.Since(requestStart).Milliseconds(),
+				FinishReason: firstFinishReason(resp),
+			}
+			if resp.Usage != nil {
+				out.TokensIn = resp.Usage.PromptTokens
+				out.TokensOut = resp.Usage.CompletionTokens
+			}
+			s.eventsPublisher.PublishResponse(r.Context(), tenantID, userID, req.ID, out)
+		}
 	}
+}
+
+// firstFinishReason returns the finish_reason of the first choice, or "".
+func firstFinishReason(resp *types.ChatResponse) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	return resp.Choices[0].FinishReason
 }
 
 // extractTenantID extracts tenant ID from request context or headers.
@@ -396,8 +443,9 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 	w.(http.Flusher).Flush()
 }
 
-// handleNonStreamingCompletionWithRetry handles non-streaming completions with retry/fallback
-func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, initialProvider providers.LLMProvider, metadata *types.RouterMetadata) {
+// handleNonStreamingCompletionWithRetry handles non-streaming completions with retry/fallback.
+// Returns the response so the caller can emit activity events; nil on error.
+func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, initialProvider providers.LLMProvider, metadata *types.RouterMetadata) *types.ChatResponse {
 	var resp *types.ChatResponse
 	var err error
 
@@ -406,7 +454,7 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("All completion attempts failed")
 		s.writeErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
-		return
+		return nil
 	}
 
 	// Gatekeeper: outbound scan (non-streaming only)
@@ -425,13 +473,13 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 				s.logger.WithError(scanErr).WithField("request_id", req.ID).Error("Outbound scan failed")
 				if !s.gatekeeperConfig.FailOpen {
 					s.writeErrorResponse(w, http.StatusInternalServerError, "response content scan failed")
-					return
+					return nil
 				}
 			} else if s.gatekeeper.ShouldBlock(result, "outbound") {
 				msg := gatekeeper.FormatBlockMessage(result, "Outbound")
 				s.logger.WithField("request_id", req.ID).Warn(msg)
 				s.writeErrorResponse(w, http.StatusForbidden, "response blocked by content policy")
-				return
+				return nil
 			}
 		}
 	}
@@ -442,6 +490,7 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
+	return resp
 }
 
 // extractResponseContent extracts text content from a ChatResponse.

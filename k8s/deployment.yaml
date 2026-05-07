@@ -55,6 +55,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        - name: KAFKA_BROKERS
+          value: "kafka-shared-0.kafka-shared.tas-shared.svc.cluster.local:9092"
 
         resources:
           requests:

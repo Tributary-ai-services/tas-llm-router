@@ -1,19 +1,21 @@
 # Build stage
 FROM golang:1.24-alpine AS builder
 
+RUN apk add --no-cache git
+
 WORKDIR /build
 
-# Copy Gatekeeper dependency (local replace directive)
+# Copy Gatekeeper and aether-shared/go-events sibling modules (replace directives)
 COPY Gatekeeper/ /build/Gatekeeper/
+COPY aether-shared/go-events/ /build/aether-shared/go-events/
 
 WORKDIR /build/app
 
-# Copy go mod files and download dependencies
-COPY tas-llm-router/go.mod tas-llm-router/go.sum ./
-RUN go mod download
-
 # Copy source code
 COPY tas-llm-router/ .
+
+# Resolve module deps (replace directives now find ../Gatekeeper and ../aether-shared/go-events)
+RUN go mod download
 
 # Build with nohs tag (regexp engine, no CGO/Hyperscan needed)
 RUN CGO_ENABLED=0 GOOS=linux go build -tags nohs -a -installsuffix cgo -o llm-router ./cmd/llm-router/main.go
