@@ -11,6 +11,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
+	"github.com/Tributary-ai-services/Gatekeeper/pkg/pipeline"
+	gkstream "github.com/Tributary-ai-services/Gatekeeper/pkg/stream"
 	"github.com/Tributary-ai-services/aether-shared/go-events/payloads"
 
 	"github.com/tributary-ai/llm-router-waf/internal/events"
@@ -35,6 +37,14 @@ type Server struct {
 	bypassManager        *gatekeeper.BypassManager
 	bypassHandler        *gatekeeper.BypassHandler
 	eventsPublisher      *events.Publisher
+	complianceStreamer   gkstream.Streamer
+}
+
+// SetComplianceStreamer wires Gatekeeper's findings streamer used to
+// publish dual-envelope (legacy + CloudEvents) findings to Kafka. Pass nil
+// to disable streaming — handler call sites are nil-safe.
+func (s *Server) SetComplianceStreamer(st gkstream.Streamer) {
+	s.complianceStreamer = st
 }
 
 // ServerConfig holds server configuration
@@ -80,6 +90,36 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 // activity events to Kafka. Pass nil to disable event publishing.
 func (s *Server) SetEventsPublisher(p *events.Publisher) {
 	s.eventsPublisher = p
+}
+
+// streamFindings fans the findings out of a Gatekeeper scan result onto
+// the compliance Kafka topics. Dual-publishes legacy + CloudEvents per
+// finding (handled inside the Gatekeeper KafkaStreamer). Safe to call
+// with a nil streamer, nil result, or a result with zero findings — all
+// short-circuit. Errors are logged and dropped: streaming must never
+// block the chat completion path.
+func (s *Server) streamFindings(ctx context.Context, result *pipeline.ProcessResult, requestID, tenantID, userID, source, contentType string) {
+	if s.complianceStreamer == nil || result == nil || result.ScanResult == nil {
+		return
+	}
+	findings := result.ScanResult.Findings
+	if len(findings) == 0 {
+		return
+	}
+
+	streamFindings := make([]gkstream.Finding, len(findings))
+	for i := range findings {
+		streamFindings[i] = gkstream.ConvertFinding(
+			&findings[i], requestID, tenantID, userID, source, "", contentType,
+		)
+	}
+	if err := s.complianceStreamer.Stream(ctx, streamFindings); err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"request_id":     requestID,
+			"source":         source,
+			"findings_count": len(findings),
+		}).Warn("Failed to stream Gatekeeper findings")
+	}
 }
 
 // SetGatekeeper configures the Gatekeeper content scanning client.
@@ -301,6 +341,10 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("X-TAS-Scan-Status", "violations")
 			}
 		}
+
+		// Stream findings to the compliance Kafka topics (no-op if streamer
+		// unset). Uses the request context so cancellation propagates.
+		s.streamFindings(r.Context(), result, req.ID, meta.TenantID, meta.UserID, "llm_input", "chat")
 	}
 
 	// Route the request
@@ -481,6 +525,9 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 				s.writeErrorResponse(w, http.StatusForbidden, "response blocked by content policy")
 				return nil
 			}
+
+			// Stream outbound findings to compliance topics (no-op if streamer unset).
+			s.streamFindings(r.Context(), result, req.ID, meta.TenantID, meta.UserID, "llm_output", "chat")
 		}
 	}
 

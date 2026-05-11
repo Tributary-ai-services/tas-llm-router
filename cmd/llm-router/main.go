@@ -12,6 +12,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	gkstream "github.com/Tributary-ai-services/Gatekeeper/pkg/stream"
+
 	"github.com/tributary-ai/llm-router-waf/internal/config"
 	"github.com/tributary-ai/llm-router-waf/internal/events"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
@@ -130,6 +132,22 @@ func NewApplication(configPath string) (*Application, error) {
 			)
 			serverInstance.SetGatekeeper(gkClient, &gkCfg, bypassMgr)
 			logger.Info("Gatekeeper content scanning enabled")
+
+			// Wire the Gatekeeper KafkaStreamer (dual-publish legacy + CE)
+			// only when Kafka brokers are configured. Streaming is best-effort:
+			// a streamer failure must not fail Gatekeeper init.
+			if brokers := kafkaBrokersFromEnv(); len(brokers) > 0 {
+				streamerCfg := gkstream.DefaultStreamerConfig()
+				streamerCfg.Brokers = brokers
+				streamerCfg.SourceService = "gatekeeper"
+				streamer, sErr := gkstream.NewKafkaStreamer(streamerCfg)
+				if sErr != nil {
+					logger.WithError(sErr).Warn("Failed to initialize Gatekeeper KafkaStreamer; compliance findings will not be streamed")
+				} else {
+					serverInstance.SetComplianceStreamer(streamer)
+					logger.WithField("brokers", brokers).Info("Gatekeeper compliance streamer enabled — dual-publishing findings to tas.compliance.* topics")
+				}
+			}
 		}
 	}
 
