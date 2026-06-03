@@ -21,11 +21,14 @@ import (
 // can't accidentally overwrite an earlier decision with a fallback
 // guess.
 type Routing struct {
-	mu        sync.Mutex
-	vendor    string
-	model     string
-	streaming bool
-	streamSet bool
+	mu               sync.Mutex
+	vendor           string
+	model            string
+	streaming        bool
+	streamSet        bool
+	promptTokens     int
+	completionTokens int
+	usageSet         bool
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -44,6 +47,15 @@ type RoutingSnapshot struct {
 	// from "never stamped" — the events package uses this to decide
 	// whether to fall back to its URL-query heuristic.
 	StreamingSet bool
+
+	// Token usage from the vendor response. UsageSet distinguishes
+	// "vendor returned 0 tokens" (which is legitimate for some
+	// finish_reason=content_filter responses) from "vendor never
+	// returned a usage block" (the events package emits the former
+	// as `prompt_tokens: 0`, the latter omits the field).
+	PromptTokens     int
+	CompletionTokens int
+	UsageSet         bool
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -51,10 +63,13 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return RoutingSnapshot{
-		Vendor:       r.vendor,
-		Model:        r.model,
-		Streaming:    r.streaming,
-		StreamingSet: r.streamSet,
+		Vendor:           r.vendor,
+		Model:            r.model,
+		Streaming:        r.streaming,
+		StreamingSet:     r.streamSet,
+		PromptTokens:     r.promptTokens,
+		CompletionTokens: r.completionTokens,
+		UsageSet:         r.usageSet,
 	}
 }
 
@@ -125,5 +140,26 @@ func StampStreaming(ctx context.Context, streaming bool) {
 	if !r.streamSet {
 		r.streaming = streaming
 		r.streamSet = true
+	}
+}
+
+// StampTokenUsage records the vendor-reported token counts. Same
+// first-write-wins semantic as the other stampers — for streaming
+// responses, the final chunk's usage is the authoritative value,
+// and subsequent fallback paths must not overwrite it. Calling with
+// both counts zero is still treated as a valid stamp (UsageSet flips
+// true) so the event distinguishes "vendor returned 0 tokens" from
+// "vendor never returned a usage block".
+func StampTokenUsage(ctx context.Context, promptTokens, completionTokens int) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.usageSet {
+		r.promptTokens = promptTokens
+		r.completionTokens = completionTokens
+		r.usageSet = true
 	}
 }

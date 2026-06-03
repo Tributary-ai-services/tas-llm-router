@@ -90,6 +90,44 @@ func TestRouting_StreamingSetSemantic(t *testing.T) {
 	}
 }
 
+func TestRouting_StampTokenUsage(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+
+	// Before stamping: UsageSet=false, counts=0 (distinguishable from "vendor returned 0").
+	if s := r.Snapshot(); s.UsageSet {
+		t.Errorf("UsageSet=true before stamping")
+	}
+
+	StampTokenUsage(ctx, 1000, 500)
+	s := r.Snapshot()
+	if !s.UsageSet {
+		t.Errorf("UsageSet=false after stamping")
+	}
+	if s.PromptTokens != 1000 || s.CompletionTokens != 500 {
+		t.Errorf("counts: prompt=%d completion=%d", s.PromptTokens, s.CompletionTokens)
+	}
+
+	// First-write-wins: a later fallback path must not overwrite.
+	StampTokenUsage(ctx, 9999, 9999)
+	s2 := r.Snapshot()
+	if s2.PromptTokens != 1000 || s2.CompletionTokens != 500 {
+		t.Errorf("StampTokenUsage not idempotent: %#v", s2)
+	}
+}
+
+// Stamping (0, 0) is a valid stamp — represents the legitimate case of
+// a content_filter response with no completion. UsageSet must flip true.
+func TestRouting_StampTokenUsageZeroIsValid(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+	StampTokenUsage(ctx, 0, 0)
+	s := r.Snapshot()
+	if !s.UsageSet {
+		t.Errorf("UsageSet should be true after explicit (0,0) stamp")
+	}
+}
+
 func TestRouting_ConcurrentStamps(t *testing.T) {
 	r := NewRouting()
 	ctx := WithRouting(context.Background(), r)

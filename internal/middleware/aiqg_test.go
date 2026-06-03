@@ -556,6 +556,51 @@ func TestAIQG_NoResolverAcceptsAnyToken(t *testing.T) {
 	}
 }
 
+// Stamping vendor + model + token usage from the handler must produce
+// a populated TokenAccounting on the response event and a non-nil
+// CLEAR.Cost score. End-to-end test of the second CLEAR dimension.
+func TestAIQG_TokenUsageStampedReachesEventAndCost(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampVendor(r.Context(), "openai")
+		StampModel(r.Context(), "gpt-4o-mini")
+		StampTokenUsage(r.Context(), 1000, 500)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	if em.Len() != 1 {
+		t.Fatalf("emit count=%d want=1", em.Len())
+	}
+	rd := em.Responses()[0].Data
+
+	if rd.TokenAccounting == nil {
+		t.Fatalf("TokenAccounting nil despite StampTokenUsage")
+	}
+	if rd.TokenAccounting.PromptTokens != 1000 || rd.TokenAccounting.CompletionTokens != 500 {
+		t.Errorf("token counts: prompt=%d completion=%d", rd.TokenAccounting.PromptTokens, rd.TokenAccounting.CompletionTokens)
+	}
+	if rd.TokenAccounting.TotalTokens != 1500 {
+		t.Errorf("total_tokens=%d want=1500", rd.TokenAccounting.TotalTokens)
+	}
+	if rd.TokenAccounting.TotalCostUSD <= 0 {
+		t.Errorf("TotalCostUSD=%v want>0 for priced model", rd.TokenAccounting.TotalCostUSD)
+	}
+	if rd.TokenAccounting.ModelPricingVersion == "" {
+		t.Errorf("ModelPricingVersion empty")
+	}
+	if rd.CLEAR.Cost == nil {
+		t.Fatalf("CLEAR.Cost nil despite priced model + usage stamp")
+	}
+}
+
 // Vendor/Model stamps made by the downstream handler must reach the
 // emitted event. Proves the Routing sidecar (attached by middleware) +
 // the deferred snapshot read both work end-to-end.
@@ -628,9 +673,11 @@ func TestAIQG_EmittedEventCarriesCLEARScores(t *testing.T) {
 	if respEnv.Data.CLEAR.Composite == nil {
 		t.Errorf("CLEAR.Composite nil — should equal Latency when only Latency is scored")
 	}
-	// MVP: other dimensions remain nil until their respective slices land.
+	// This handler doesn't stamp vendor/model/usage, so the Cost path
+	// stays nil here even though it's wired. See
+	// TestAIQG_TokenUsageStampedReachesEventAndCost for the populated case.
 	if respEnv.Data.CLEAR.Cost != nil {
-		t.Errorf("CLEAR.Cost should be nil at MVP (token-accounting not plumbed)")
+		t.Errorf("CLEAR.Cost should be nil when no usage stamped, got %d", *respEnv.Data.CLEAR.Cost)
 	}
 	if respEnv.Data.CLEAR.Efficacy != nil {
 		t.Errorf("CLEAR.Efficacy should be nil at MVP (response body not captured)")

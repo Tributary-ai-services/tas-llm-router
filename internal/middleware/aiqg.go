@@ -221,10 +221,13 @@ func routingView(r *Routing) events.RoutingView {
 	}
 	s := r.Snapshot()
 	return events.RoutingView{
-		Vendor:       s.Vendor,
-		Model:        s.Model,
-		Streaming:    s.Streaming,
-		StreamingSet: s.StreamingSet,
+		Vendor:           s.Vendor,
+		Model:            s.Model,
+		Streaming:        s.Streaming,
+		StreamingSet:     s.StreamingSet,
+		PromptTokens:     s.PromptTokens,
+		CompletionTokens: s.CompletionTokens,
+		UsageSet:         s.UsageSet,
 	}
 }
 

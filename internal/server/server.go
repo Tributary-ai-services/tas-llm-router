@@ -428,6 +428,13 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// AIQG: stamp the vendor-reported token usage onto the routing
+	// sidecar so the response event carries TokenAccounting + the
+	// clear.Cost dimension scores. No-op outside AIQG mode.
+	if resp.Usage != nil {
+		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
+
 	// Add routing metadata to response
 	if resp.RouterMetadata == nil {
 		resp.RouterMetadata = metadata
@@ -469,6 +476,14 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 
 	// Stream chunks
 	for chunk := range chunks {
+		// AIQG: stamp vendor token usage from the final chunk. OpenAI
+		// emits this on the last chunk when stream_options.include_usage
+		// is set; Anthropic carries it in message_delta. StampTokenUsage
+		// is first-write-wins so safe to call on every chunk.
+		if chunk.Usage != nil {
+			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+		}
+
 		data, err := json.Marshal(chunk)
 		if err != nil {
 			s.logger.WithError(err).Error("Failed to marshal chunk")
@@ -522,6 +537,12 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 				return
 			}
 		}
+	}
+
+	// AIQG: stamp the vendor-reported token usage (same as the non-retry
+	// path) so the response event carries TokenAccounting + Cost score.
+	if resp.Usage != nil {
+		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 
 	// Add routing metadata to response
@@ -583,6 +604,14 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 
 	// Stream chunks
 	for chunk := range chunks {
+		// AIQG: stamp vendor token usage from the final chunk. OpenAI
+		// emits this on the last chunk when stream_options.include_usage
+		// is set; Anthropic carries it in message_delta. StampTokenUsage
+		// is first-write-wins so safe to call on every chunk.
+		if chunk.Usage != nil {
+			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+		}
+
 		data, err := json.Marshal(chunk)
 		if err != nil {
 			s.logger.WithError(err).Error("Failed to marshal chunk")
