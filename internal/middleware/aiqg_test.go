@@ -10,6 +10,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 )
 
 // silentLogger returns a logger that discards output — keeps test
@@ -272,6 +273,143 @@ func TestAIQG_UnknownWorkflowFallsThrough(t *testing.T) {
 	}
 	if next.headers.Workflow != "" {
 		t.Errorf("Workflow=%q should be cleared on invalid override", next.headers.Workflow)
+	}
+}
+
+// Happy-path AIQG requests must produce a paired (request, response)
+// event via the configured Emitter. This is the integration point
+// between the AIQG middleware and pkg/aiqg/events.
+func TestAIQG_EmitsPairedEvents(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{
+		Strict:  true,
+		Logger:  silentLogger(),
+		Emitter: em,
+		Region:  "us-east",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions?stream=true", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc123")
+	req.Header.Set("Authorization", "Bearer sk-customer")
+	req.Header.Set("TAS-Workflow", "rag")
+	req.Header.Set("TAS-Trace", "1")
+	req.Header.Set("TAS-Source-App", "billing-api-prod")
+	req.Header.Set("X-Request-ID", "client-req-xyz")
+
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if !next.called {
+		t.Fatalf("downstream not called")
+	}
+	if em.Len() != 1 {
+		t.Fatalf("emit count=%d want=1", em.Len())
+	}
+
+	reqEnv := em.Requests()[0]
+	respEnv := em.Responses()[0]
+
+	// Pair correlation
+	if reqEnv.Data.CorrelatedResponseEventID != respEnv.Data.ResponseEventID {
+		t.Errorf("CorrelatedResponseEventID does not match ResponseEventID")
+	}
+	if respEnv.Data.RequestEventID != reqEnv.Data.RequestEventID {
+		t.Errorf("response.RequestEventID does not match request.RequestEventID")
+	}
+
+	// Header reflection
+	if reqEnv.Data.Workflow != "rag" {
+		t.Errorf("workflow=%q", reqEnv.Data.Workflow)
+	}
+	if !reqEnv.Data.TraceReturned {
+		t.Errorf("trace_returned not propagated")
+	}
+	if reqEnv.Data.SourceApp != "billing-api-prod" {
+		t.Errorf("source_app=%q", reqEnv.Data.SourceApp)
+	}
+	if reqEnv.Data.ClientRequestID != "client-req-xyz" {
+		t.Errorf("client_request_id=%q", reqEnv.Data.ClientRequestID)
+	}
+	if reqEnv.Data.Region != "us-east" {
+		t.Errorf("region=%q", reqEnv.Data.Region)
+	}
+	if !reqEnv.Data.Streaming {
+		t.Errorf("streaming should be true for ?stream=true URL")
+	}
+
+	// Timing snapshot must be embedded with both endpoints set —
+	// proves StampReceived (entry) and StampComplete (defer LIFO order)
+	// both fired before the emitter ran.
+	if respEnv.Data.EventTimestamps.RequestReceivedAt == nil {
+		t.Errorf("request_received_at not stamped before emit")
+	}
+	if respEnv.Data.EventTimestamps.ResponseCompleteAt == nil {
+		t.Errorf("response_complete_at not stamped before emit (defer order broken)")
+	}
+
+	// HTTP status captured from the echo handler's WriteHeader(200).
+	if respEnv.Data.HTTPStatus != http.StatusOK {
+		t.Errorf("http_status=%d want=200", respEnv.Data.HTTPStatus)
+	}
+	if respEnv.Data.Status != events.StatusSuccess {
+		t.Errorf("status=%q", respEnv.Data.Status)
+	}
+}
+
+// Nil emitter must default to NoopEmitter (no panic, request succeeds).
+func TestAIQG_NilEmitterDefaultsToNoop(t *testing.T) {
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: nil})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk-customer")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil emitter caused %d", rec.Code)
+	}
+	if !next.called {
+		t.Fatalf("downstream not called")
+	}
+}
+
+// Pass-through requests (no TAS-Auth, permissive mode) must NOT emit
+// events — internal-routing traffic stays out of the AIQG event stream.
+func TestAIQG_PassThroughDoesNotEmit(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{Strict: false, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if em.Len() != 0 {
+		t.Errorf("internal pass-through emitted %d events (want 0)", em.Len())
+	}
+}
+
+// 401/400 rejections still need to be observable elsewhere, but they
+// MUST NOT produce a paired AIQG event — the spec (request-event.md §273)
+// says pre-validation auth failures emit no events.
+func TestAIQG_StrictRejectionDoesNotEmit(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if em.Len() != 0 {
+		t.Errorf("pre-validation auth failure emitted %d events (want 0 per spec §273)", em.Len())
 	}
 }
 

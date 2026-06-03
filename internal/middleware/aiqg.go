@@ -37,6 +37,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 )
 
 // AIQGConfig configures the AIQG entry middleware.
@@ -50,6 +51,17 @@ type AIQGConfig struct {
 	// Logger is used for warnings (invalid TAS-Workflow values) and the
 	// path_a_auth_rejected audit event. Required.
 	Logger *logrus.Logger
+
+	// Emitter publishes the paired (request, response) AIQG events on
+	// response completion. Nil is treated as events.NoopEmitter — the
+	// middleware never panics on a nil emitter, but production should
+	// always wire a real one (LogEmitter for MVP, KafkaEmitter later).
+	Emitter events.Emitter
+
+	// Region is stamped on every emitted RequestEvent (e.g. "us-east",
+	// "us-west", "eu"). Set from deployment config. Empty is allowed
+	// during local dev and is omitted from the event JSON.
+	Region string
 }
 
 // NewAIQG returns the middleware constructor. The returned handler is a
@@ -112,15 +124,84 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	}
 
 	// Enter AIQG mode: attach collector + headers, stamp Received,
-	// arrange for StampComplete on response end.
+	// arrange for StampComplete + event emission on response end.
 	collector := instrumentation.NewCollector()
 	ctx := instrumentation.WithCollector(r.Context(), collector)
 	ctx = WithHeaders(ctx, parsed)
 	instrumentation.StampReceived(ctx)
 
+	sw := &statusCapturingResponseWriter{ResponseWriter: w}
+
+	emitter := cfg.Emitter
+	if emitter == nil {
+		emitter = events.NoopEmitter{}
+	}
+
+	// Defers fire LIFO: emit runs AFTER StampComplete so the snapshot
+	// it builds includes the response_complete_at timestamp.
+	defer func() {
+		reqEnv, respEnv := events.Build(r, headersView(parsed), collector.Snapshot(), events.BuildOptions{
+			HTTPStatus: sw.status(),
+			Region:     cfg.Region,
+		})
+		if err := emitter.Emit(ctx, reqEnv, respEnv); err != nil {
+			cfg.Logger.WithError(err).Warn("AIQG event emission failed")
+		}
+	}()
 	defer instrumentation.StampComplete(ctx)
 
-	next.ServeHTTP(w, r.WithContext(ctx))
+	next.ServeHTTP(sw, r.WithContext(ctx))
+}
+
+// headersView projects an AIQGHeaders into the read-only view the
+// events package consumes. Defined here (in internal/middleware) to
+// avoid pkg/aiqg/events importing internal/middleware (which would
+// create an import cycle).
+func headersView(h AIQGHeaders) events.AIQGHeadersView {
+	return events.AIQGHeadersView{
+		SourceApp:    h.SourceApp,
+		Workflow:     h.Workflow,
+		Policy:       h.Policy,
+		PolicyBundle: h.PolicyBundle,
+		DryRun:       h.DryRun,
+		Trace:        h.Trace,
+	}
+}
+
+// statusCapturingResponseWriter records the HTTP status code written
+// by downstream handlers so the AIQG event emitter can include it in
+// the response event. Wraps the underlying writer transparently.
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	code        int
+	wroteHeader bool
+}
+
+func (w *statusCapturingResponseWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.code = code
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Write captures the implicit 200 that net/http writes when a handler
+// calls Write without first calling WriteHeader.
+func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.code = http.StatusOK
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// status returns the captured HTTP status, defaulting to 200 if the
+// handler never wrote anything (matches net/http's implicit-200 behavior).
+func (w *statusCapturingResponseWriter) status() int {
+	if !w.wroteHeader {
+		return http.StatusOK
+	}
+	return w.code
 }
 
 // rejectPathA emits the strict-mode 401 response and the
