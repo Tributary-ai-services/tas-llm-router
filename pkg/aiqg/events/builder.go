@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
+	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 )
 
 // AIQGHeadersView is the subset of parsed TAS-* headers the event
@@ -28,11 +29,11 @@ type AIQGHeadersView struct {
 // at build time via -ldflags "-X .../events.GatewayVersion=v1.4.2".
 var GatewayVersion = "dev"
 
-// ScoringVersion is the pkg/clear version stamped on every event. The
-// scorer slice will replace this with the actual computed version.
-// Until then, the constant signals "no scoring yet" without violating
-// the spec requirement that the field be present.
-const ScoringVersion = "clear-v0-pending"
+// ScoringVersion is the pkg/clear version stamped on every event.
+// Re-exported from pkg/clear so call sites don't need to import both
+// packages just to read the version string. When pkg/clear bumps Version,
+// every emitted event reflects the new value automatically.
+var ScoringVersion = clear.Version
 
 // BuildOptions captures inputs the middleware passes through that
 // aren't on the request context (HTTP status, response status string,
@@ -113,8 +114,15 @@ func Build(r *http.Request, headers AIQGHeadersView, snap instrumentation.Snapsh
 		ChunkCount:        snap.ChunkCount,
 		ContentChunkCount: snap.ContentChunkCount,
 		EventTimestamps:   snap,
-		ScoringVersion:    ScoringVersion,
-		GatewayVersion:    GatewayVersion,
+		CLEAR: clear.Compute(clear.Input{
+			EndToEndMs:        snap.EndToEndMs,
+			GatewayOverheadMs: snap.GatewayOverheadMs,
+			VendorTTFTMs:      snap.VendorTTFTMs,
+			Workflow:          headers.Workflow,
+			HTTPStatus:        opts.HTTPStatus,
+		}),
+		ScoringVersion: ScoringVersion,
+		GatewayVersion: GatewayVersion,
 	}
 
 	reqEnv := RequestEnvelope{
