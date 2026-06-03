@@ -7,7 +7,8 @@ import (
 
 	"github.com/sashabaranov/go-openai"
 	"github.com/sirupsen/logrus"
-	
+
+	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
@@ -117,6 +118,10 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 	// Enable streaming
 	openaiReq.Stream = true
 
+	// AIQG: stamp the moment the request is handed to the vendor client.
+	// No-op when no TimingCollector is attached to ctx (non-AIQG callers).
+	instrumentation.StampForwarded(ctx)
+
 	// Make the streaming API call
 	stream, err := p.client.CreateChatCompletionStream(ctx, *openaiReq)
 	if err != nil {
@@ -131,6 +136,7 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 	go func() {
 		defer close(chunks)
 		defer stream.Close()
+		defer instrumentation.StampLastChunk(ctx)
 
 		for {
 			response, err := stream.Recv()
@@ -140,6 +146,15 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 				}
 				return
 			}
+
+			// AIQG: per the architect-review fix (§4 Risk #5), TTFT must
+			// be the first non-empty content delta — not the first Recv.
+			// OpenAI's first chunk is typically a role announcement
+			// (Delta.Role = "assistant", Delta.Content = "") which is not
+			// generated content. hasContent below is true only when the
+			// chunk carries actual model output (content text or a
+			// tool-call argument fragment).
+			instrumentation.StampChunk(ctx, openaiChunkHasContent(&response))
 
 			// Convert chunk to our format
 			chunk := p.convertFromOpenAIChunk(&response, req)
@@ -152,6 +167,34 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 	}()
 
 	return chunks, nil
+}
+
+// openaiChunkHasContent reports whether a streaming chunk carries actual
+// generated content (text or tool-call argument fragment), as opposed to
+// a role announcement, empty heartbeat, or finish-reason-only frame.
+// Used by AIQG TTFT detection.
+func openaiChunkHasContent(resp *openai.ChatCompletionStreamResponse) bool {
+	if resp == nil {
+		return false
+	}
+	for _, choice := range resp.Choices {
+		if choice.Delta.Content != "" {
+			return true
+		}
+		// Tool-call argument fragments count as content — they're what
+		// the model generated and they drive cost in agentic flows.
+		for _, tc := range choice.Delta.ToolCalls {
+			if tc.Function.Arguments != "" || tc.Function.Name != "" {
+				return true
+			}
+		}
+		// Legacy function_call API (non-tool-calls path).
+		if choice.Delta.FunctionCall != nil &&
+			(choice.Delta.FunctionCall.Arguments != "" || choice.Delta.FunctionCall.Name != "") {
+			return true
+		}
+	}
+	return false
 }
 
 // EstimateCost estimates the cost for a chat completion request
