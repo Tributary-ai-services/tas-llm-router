@@ -91,12 +91,15 @@ test-security: ## Run security tests
 ##@ Testing & Quality
 
 .PHONY: test
+# -tags nohs matches the Docker build (docker/Dockerfile:19) and swaps
+# Hyperscan for the regexp engine, so contributors without libhyperscan
+# installed locally can still run the test suite.
 test: ## Run all tests
-	go test ./... -v
+	go test -tags nohs ./... -v
 
 .PHONY: test-coverage
 test-coverage: ## Generate test coverage report
-	go test ./... -coverprofile=coverage.out
+	go test -tags nohs ./... -coverprofile=coverage.out
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "📊 Coverage report generated: coverage.html"
 

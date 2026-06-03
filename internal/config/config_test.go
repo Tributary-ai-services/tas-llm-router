@@ -95,7 +95,9 @@ func TestLoadConfig_Validation(t *testing.T) {
 			},
 			cleanup: func() {},
 			wantErr: true,
-			errMsg:  "OpenAI API key is required",
+			// LoadConfig now requires at least one provider rather than
+			// specifically OpenAI; the message reflects that.
+			errMsg:  "at least one provider must be configured",
 		},
 		{
 			name: "Invalid log level",
