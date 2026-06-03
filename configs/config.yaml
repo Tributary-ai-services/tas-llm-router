@@ -138,3 +138,34 @@ security:
     max_request_size: 10485760  # 10MB
     max_message_length: 100000
     max_messages: 50
+
+# AIQG (AI Quality Gateway) ingress
+#
+# When enabled, mounts the AIQG middleware on the three completion routes
+# (/v1/chat/completions, /v1/completions, /v1/messages). Permissive mode
+# (strict: false) is the default: internal callers without TAS-Auth pass
+# through untouched; customer-facing requests with TAS-Auth + Authorization
+# enter Path A and emit paired CloudEvents via the LogEmitter → Loki path.
+#
+# Strict mode (strict: true) returns 401 on any request missing TAS-Auth or
+# Authorization — use only on a customer-facing ingress (gateway.aiqg.tas.io).
+#
+# Tokens: the in-memory MVP store. Omit the list (or omit the whole aiqg
+# block) and the middleware accepts any TAS-Auth as opaque — events emit
+# with empty tenant fields. Populate to enable tenant attribution before
+# the dashboard-backed Resolver ships.
+#
+# Env-var overrides: AIQG_ENABLED, AIQG_STRICT, AIQG_REGION.
+aiqg:
+  enabled: false
+  strict: false
+  region: ""
+  tokens: []
+  # Example token entry:
+  # tokens:
+  #   - token_id: "7c8d5e2a-1a4b-4d2c-9e3f-1234567890ab"   # UUID FK to aiqg_token table
+  #     token: "tas_qg_live_abc123"                          # the actual bearer
+  #     tenant_id: "tenant-a"
+  #     aiqg_account_id: "account-a"
+  #     source_app: "billing-api-prod"
+  #     suspended: false

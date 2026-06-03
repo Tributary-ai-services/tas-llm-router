@@ -312,6 +312,87 @@ func TestConfig_ToServerConfig(t *testing.T) {
 	}
 }
 
+// AIQG disabled (the safe default) maps to a nil server.AIQGServerConfig
+// so the middleware doesn't mount.
+func TestConfig_ToAIQGServerConfig_Disabled(t *testing.T) {
+	cfg := &Config{}
+	cfg.setDefaults()
+	// AIQG.Enabled is false by default.
+
+	if got := cfg.ToAIQGServerConfig(); got != nil {
+		t.Errorf("expected nil AIQG config when disabled, got %#v", got)
+	}
+	if got := cfg.ToServerConfig().AIQG; got != nil {
+		t.Errorf("ToServerConfig should also yield nil AIQG when disabled, got %#v", got)
+	}
+}
+
+// When enabled, AIQG values + tokens copy through to the server config.
+func TestConfig_ToAIQGServerConfig_EnabledWithTokens(t *testing.T) {
+	cfg := &Config{}
+	cfg.setDefaults()
+	cfg.AIQG.Enabled = true
+	cfg.AIQG.Strict = true
+	cfg.AIQG.Region = "us-west"
+	cfg.AIQG.Tokens = []AIQGTokenConfig{
+		{
+			TokenID:       "tok_1",
+			Token:         "tas_qg_live_abc",
+			TenantID:      "tenant-a",
+			AIQGAccountID: "account-a",
+			SourceApp:     "billing",
+			Suspended:     false,
+		},
+		{
+			TokenID:   "tok_2",
+			Token:     "tas_qg_live_def",
+			Suspended: true,
+		},
+	}
+
+	got := cfg.ToAIQGServerConfig()
+	if got == nil {
+		t.Fatalf("expected non-nil AIQG config when enabled")
+	}
+	if !got.Enabled || !got.Strict {
+		t.Errorf("flags not propagated: enabled=%v strict=%v", got.Enabled, got.Strict)
+	}
+	if got.Region != "us-west" {
+		t.Errorf("Region=%q", got.Region)
+	}
+	if len(got.Tokens) != 2 {
+		t.Fatalf("token count=%d want=2", len(got.Tokens))
+	}
+	if got.Tokens[0].Token != "tas_qg_live_abc" || got.Tokens[0].TenantID != "tenant-a" {
+		t.Errorf("token[0] mismatch: %#v", got.Tokens[0])
+	}
+	if !got.Tokens[1].Suspended {
+		t.Errorf("token[1].Suspended not propagated")
+	}
+}
+
+// Env-var overrides flip the YAML defaults.
+func TestLoadConfig_AIQGEnvOverrides(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key") // satisfy provider validation
+	t.Setenv("AIQG_ENABLED", "true")
+	t.Setenv("AIQG_STRICT", "1")
+	t.Setenv("AIQG_REGION", "eu")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AIQG.Enabled {
+		t.Errorf("AIQG_ENABLED=true did not flip Enabled")
+	}
+	if !cfg.AIQG.Strict {
+		t.Errorf("AIQG_STRICT=1 did not flip Strict")
+	}
+	if cfg.AIQG.Region != "eu" {
+		t.Errorf("Region=%q", cfg.AIQG.Region)
+	}
+}
+
 func TestConfig_SaveToFile(t *testing.T) {
 	// Create a config
 	cfg := &Config{}
