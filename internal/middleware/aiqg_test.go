@@ -358,6 +358,45 @@ func TestAIQG_EmitsPairedEvents(t *testing.T) {
 	}
 }
 
+// Vendor/Model stamps made by the downstream handler must reach the
+// emitted event. Proves the Routing sidecar (attached by middleware) +
+// the deferred snapshot read both work end-to-end.
+func TestAIQG_VendorModelStampedReachEmittedEvent(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampVendor(r.Context(), "anthropic")
+		StampModel(r.Context(), "claude-3-7-sonnet-20250219")
+		StampStreaming(r.Context(), true)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := NewAIQG(AIQGConfig{
+		Strict:  true,
+		Logger:  silentLogger(),
+		Emitter: em,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk-customer")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	if em.Len() != 1 {
+		t.Fatalf("emit count=%d want=1", em.Len())
+	}
+	got := em.Requests()[0].Data
+	if got.Vendor != "anthropic" {
+		t.Errorf("Vendor=%q want=anthropic", got.Vendor)
+	}
+	if got.Model != "claude-3-7-sonnet-20250219" {
+		t.Errorf("Model=%q want=claude-3-7-sonnet-20250219", got.Model)
+	}
+	if !got.Streaming {
+		t.Errorf("Streaming=false despite explicit stamp")
+	}
+}
+
 // The emitted response event must carry a populated CLEAR scores
 // block — at MVP, that means Latency + Composite are non-nil and the
 // other dimensions are nil. End-to-end check of the

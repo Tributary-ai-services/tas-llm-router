@@ -293,6 +293,11 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Timestamp = time.Now()
 
+	// AIQG: stamp the requested model + streaming flag onto the routing
+	// sidecar so the response event carries them. No-op outside AIQG mode.
+	middleware.StampModel(r.Context(), req.Model)
+	middleware.StampStreaming(r.Context(), req.Stream)
+
 	// Gatekeeper: check bypass token
 	scanBypassed := false
 	if bypassToken := r.Header.Get("X-TAS-Scan-Bypass"); bypassToken != "" && s.bypassManager != nil {
@@ -346,6 +351,11 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, fmt.Sprintf("Routing failed: %v", err))
 		return
 	}
+
+	// AIQG: stamp the chosen provider's name onto the routing sidecar.
+	// Done here (not in router.Route) so AIQG plumbing stays in the
+	// server/middleware layer and doesn't leak into the routing package.
+	middleware.StampVendor(r.Context(), provider.GetProviderName())
 
 	// Handle streaming vs non-streaming with retry/fallback support
 	if req.Stream {

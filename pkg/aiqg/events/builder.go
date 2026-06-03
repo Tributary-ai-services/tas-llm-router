@@ -25,6 +25,21 @@ type AIQGHeadersView struct {
 	Trace        bool
 }
 
+// RoutingView is the subset of routing-layer state the event builder
+// needs. Same anti-cycle motivation as AIQGHeadersView — the middleware
+// projects its mutable middleware.Routing into this read-only struct
+// before invoking Build.
+//
+// Fields default to zero-value when unset; the builder then falls back
+// to its URL/method heuristics (e.g. Streaming reads the ?stream=true
+// query param when StreamingSet is false).
+type RoutingView struct {
+	Vendor       string
+	Model        string
+	Streaming    bool
+	StreamingSet bool
+}
+
 // GatewayVersion is the build version stamped on every event. Override
 // at build time via -ldflags "-X .../events.GatewayVersion=v1.4.2".
 var GatewayVersion = "dev"
@@ -56,11 +71,16 @@ type BuildOptions struct {
 // them in — this keeps the builder importable without cycling back into
 // internal/middleware.
 //
-// Fields the gateway can't populate at MVP today (tenant_id, vendor,
-// model, CLEAR scores) are left empty — downstream slices fill them
+// Fields the gateway can't populate at MVP today (tenant_id, CLEAR
+// scores beyond Latency) are left empty — downstream slices fill them
 // either by enriching the returned envelopes before Emit, or by adding
 // new args to Build.
-func Build(r *http.Request, headers AIQGHeadersView, snap instrumentation.Snapshot, opts BuildOptions) (RequestEnvelope, ResponseEnvelope) {
+//
+// routing carries the vendor/model decision and the authoritative
+// streaming flag. When routing.StreamingSet is false, the builder
+// falls back to the URL-query heuristic — handy for tests but the
+// completion handlers in production always stamp it explicitly.
+func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, snap instrumentation.Snapshot, opts BuildOptions) (RequestEnvelope, ResponseEnvelope) {
 	reqID := newUUID()
 	respID := newUUID()
 	now := time.Now().UTC()
@@ -79,6 +99,11 @@ func Build(r *http.Request, headers AIQGHeadersView, snap instrumentation.Snapsh
 		status = StatusFromHTTP(opts.HTTPStatus)
 	}
 
+	streaming := isStreaming(r)
+	if routing.StreamingSet {
+		streaming = routing.Streaming
+	}
+
 	reqEvent := RequestEvent{
 		RequestEventID:            reqID,
 		ReceivedAt:                receivedAt,
@@ -88,7 +113,9 @@ func Build(r *http.Request, headers AIQGHeadersView, snap instrumentation.Snapsh
 		SourceApp:                 headers.SourceApp,
 		ClientRequestID:           r.Header.Get("X-Request-ID"),
 		Region:                    opts.Region,
-		Streaming:                 isStreaming(r),
+		Vendor:                    routing.Vendor,
+		Model:                     routing.Model,
+		Streaming:                 streaming,
 		IsAIQGMode:                true,
 		DryRun:                    headers.DryRun,
 		TraceReturned:             headers.Trace,
