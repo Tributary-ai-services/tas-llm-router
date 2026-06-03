@@ -123,11 +123,16 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Enter AIQG mode: attach collector + headers, stamp Received,
-	// arrange for StampComplete + event emission on response end.
+	// Enter AIQG mode: attach collector + headers + routing sidecar,
+	// stamp Received, arrange for StampComplete + event emission on
+	// response end. The routing sidecar is empty here; the completion
+	// handlers populate it via StampVendor / StampModel / StampStreaming
+	// as those decisions are made.
 	collector := instrumentation.NewCollector()
+	routing := NewRouting()
 	ctx := instrumentation.WithCollector(r.Context(), collector)
 	ctx = WithHeaders(ctx, parsed)
+	ctx = WithRouting(ctx, routing)
 	instrumentation.StampReceived(ctx)
 
 	sw := &statusCapturingResponseWriter{ResponseWriter: w}
@@ -138,9 +143,11 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	}
 
 	// Defers fire LIFO: emit runs AFTER StampComplete so the snapshot
-	// it builds includes the response_complete_at timestamp.
+	// it builds includes the response_complete_at timestamp. The
+	// routing sidecar is read at the same moment, so any vendor/model
+	// stamps made by the handler reach the event.
 	defer func() {
-		reqEnv, respEnv := events.Build(r, headersView(parsed), collector.Snapshot(), events.BuildOptions{
+		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), collector.Snapshot(), events.BuildOptions{
 			HTTPStatus: sw.status(),
 			Region:     cfg.Region,
 		})
@@ -165,6 +172,23 @@ func headersView(h AIQGHeaders) events.AIQGHeadersView {
 		PolicyBundle: h.PolicyBundle,
 		DryRun:       h.DryRun,
 		Trace:        h.Trace,
+	}
+}
+
+// routingView snapshots the mutable Routing sidecar into the read-only
+// shape events.Build expects. Same anti-cycle motivation as headersView.
+// Tolerates a nil collector (returns the zero view) so the middleware
+// doesn't have to nil-check before passing it to Build.
+func routingView(r *Routing) events.RoutingView {
+	if r == nil {
+		return events.RoutingView{}
+	}
+	s := r.Snapshot()
+	return events.RoutingView{
+		Vendor:       s.Vendor,
+		Model:        s.Model,
+		Streaming:    s.Streaming,
+		StreamingSet: s.StreamingSet,
 	}
 }
 
