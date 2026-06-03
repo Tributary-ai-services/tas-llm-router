@@ -13,6 +13,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/server"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
 
 // Config represents the complete application configuration
@@ -23,6 +24,38 @@ type Config struct {
 	Logging    LoggingConfig    `yaml:"logging"`
 	Security   SecurityConfig   `yaml:"security"`
 	Gatekeeper GatekeeperConfig `yaml:"gatekeeper"`
+	AIQG       AIQGConfig       `yaml:"aiqg"`
+}
+
+// AIQGConfig configures the AIQG ingress feature. Empty/zero means
+// AIQG is disabled — the middleware doesn't mount and existing traffic
+// is completely unaffected. Flipping Enabled=true wires the timing
+// collector + header parser + Path A entry middleware onto the three
+// completion routes; the LogEmitter ships paired CloudEvents to logrus
+// (→ Loki via the existing Alloy pipeline).
+//
+// MVP Tokens is a small in-process list; production deployments swap
+// to a backend-client Resolver against aiqg-dashboard-be once that
+// service ships.
+type AIQGConfig struct {
+	Enabled bool                  `yaml:"enabled"`
+	Strict  bool                  `yaml:"strict"`
+	Region  string                `yaml:"region"`
+	Tokens  []AIQGTokenConfig     `yaml:"tokens"`
+}
+
+// AIQGTokenConfig is the in-memory MVP token entry. Mirrors
+// pkg/aiqg/tokens.ConfigToken so the conversion in ToServerConfig is
+// a straight field copy; defined here to keep the config package's
+// YAML schema self-describing without pulling pkg/aiqg/tokens into
+// callers that only need to parse config.
+type AIQGTokenConfig struct {
+	TokenID       string `yaml:"token_id"`
+	Token         string `yaml:"token"`
+	TenantID      string `yaml:"tenant_id"`
+	AIQGAccountID string `yaml:"aiqg_account_id"`
+	SourceApp     string `yaml:"source_app"`
+	Suspended     bool   `yaml:"suspended"`
 }
 
 // GatekeeperConfig holds content scanning configuration
@@ -357,6 +390,21 @@ func (c *Config) loadFromEnv() {
 			c.Gatekeeper.ScanTimeout = d
 		}
 	}
+
+	// AIQG ingress — env overrides for the simple scalars. Tokens are
+	// only loadable via the YAML config file (env vars are a poor
+	// shape for a list of structs); deployments that want a token
+	// store either ship a baked config.yaml or wait for the
+	// dashboard-backed Resolver slice.
+	if enabled := os.Getenv("AIQG_ENABLED"); enabled != "" {
+		c.AIQG.Enabled = enabled == "true" || enabled == "1"
+	}
+	if strict := os.Getenv("AIQG_STRICT"); strict != "" {
+		c.AIQG.Strict = strict == "true" || strict == "1"
+	}
+	if region := os.Getenv("AIQG_REGION"); region != "" {
+		c.AIQG.Region = region
+	}
 }
 
 // validate validates the configuration
@@ -429,7 +477,36 @@ func (c *Config) ToServerConfig() *server.ServerConfig {
 		WriteTimeout:   c.Server.WriteTimeout,
 		MaxHeaderBytes: c.Server.MaxHeaderBytes,
 		Security:       c.ToSecurityMiddlewareConfig(),
+		AIQG:           c.ToAIQGServerConfig(),
 	}
+}
+
+// ToAIQGServerConfig converts to server.AIQGServerConfig. Returns nil
+// when AIQG isn't enabled — server.NewServer treats that as "skip the
+// middleware entirely". Token list is copied through verbatim.
+func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
+	if !c.AIQG.Enabled {
+		return nil
+	}
+	out := &server.AIQGServerConfig{
+		Enabled: c.AIQG.Enabled,
+		Strict:  c.AIQG.Strict,
+		Region:  c.AIQG.Region,
+	}
+	if len(c.AIQG.Tokens) > 0 {
+		out.Tokens = make([]tokens.ConfigToken, len(c.AIQG.Tokens))
+		for i, t := range c.AIQG.Tokens {
+			out.Tokens[i] = tokens.ConfigToken{
+				TokenID:       t.TokenID,
+				Token:         t.Token,
+				TenantID:      t.TenantID,
+				AIQGAccountID: t.AIQGAccountID,
+				SourceApp:     t.SourceApp,
+				Suspended:     t.Suspended,
+			}
+		}
+	}
+	return out
 }
 
 // ToSecurityMiddlewareConfig converts to middleware.SecurityMiddlewareConfig

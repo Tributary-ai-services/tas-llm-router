@@ -71,3 +71,15 @@ data:
   FEATURE_REQUEST_DEDUPLICATION: "true"
   FEATURE_OPENAI_ASSISTANTS: "true"
   FEATURE_MULTIMODAL_OPTIMIZATION: "true"
+
+  # AIQG (AI Quality Gateway) ingress.
+  # Permissive mode on the internal K3s ingress — internal callers without
+  # a TAS-Auth header pass through unchanged. Customer-facing requests
+  # (with TAS-Auth + Authorization) enter Path A: timing collector +
+  # parsed TAS-* headers attached to ctx, paired CloudEvents emitted on
+  # response completion via LogEmitter → logrus → Loki.
+  # Set AIQG_STRICT=true and route a separate Ingress to this Deployment
+  # to host the customer-facing gateway.aiqg.tas.io endpoint.
+  AIQG_ENABLED: "true"
+  AIQG_STRICT: "false"
+  AIQG_REGION: "us-east"
