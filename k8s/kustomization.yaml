@@ -18,6 +18,11 @@ commonLabels:
   app.kubernetes.io/part-of: tas
 
 images:
+# Ops pushes to registry-api.tas.scharber.com/tas-llm-router — the
+# `tas-` prefix differs from this kustomization's local name
+# (`llm-router`, matching the deployment.yaml container image). Without
+# the prefix, `kubectl apply -k` rewrites the Deployment to pull a
+# stale unrelated repo and the live image silently changes on apply.
 - name: llm-router
-  newName: registry-api.tas.scharber.com/llm-router
+  newName: registry-api.tas.scharber.com/tas-llm-router
   newTag: latest
