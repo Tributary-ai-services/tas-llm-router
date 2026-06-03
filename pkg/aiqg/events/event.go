@@ -1,0 +1,200 @@
+// Package events defines the AIQG request/response event schema and its
+// CloudEvents 1.0 envelope. Per build-vs-reuse §1 placement decision,
+// AIQG-specific code lives in pkg/aiqg/* inside tas-llm-router (not in
+// a separate repo).
+//
+// Two event types are emitted per AIQG request:
+//   - RequestEnvelope (type=com.tas.aiqg.request.v1) — captured at
+//     request open / first inspection.
+//   - ResponseEnvelope (type=com.tas.aiqg.response.v1) — captured at
+//     response close. Carries the timing snapshot, outcome, CLEAR scores
+//     (when scored), and the back-reference to its paired request_event_id.
+//
+// MVP scope: the gateway emits both events at response-close in a single
+// defer (atomic from the request-handler's perspective). Spark/consumers
+// pair them by request_event_id. Future slice may split emission across
+// the request lifecycle if the consumer side justifies it.
+//
+// Fields the gateway can populate at MVP today are concrete types. Fields
+// that depend on still-unmerged slices (token resolution → tenant_id,
+// routing decisions → vendor/model, scorer → clear_*) are pointer types so
+// downstream consumers can distinguish "not yet computed" from "computed
+// as zero." The schema mirrors aether-shared/data-models/aiqg/
+// {request,response}-event.md.
+package events
+
+import (
+	"time"
+
+	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
+)
+
+// CloudEvents 1.0 type identifiers. Bump the suffix when the data shape
+// changes in a breaking way; non-breaking additions don't require a bump
+// (consumers ignore unknown fields).
+const (
+	TypeRequest  = "com.tas.aiqg.request.v1"
+	TypeResponse = "com.tas.aiqg.response.v1"
+
+	SpecVersion     = "1.0"
+	DataContentType = "application/json"
+
+	// Source URI matches Gatekeeper's urn:tas:service:<name> scheme so
+	// every TAS service that emits CloudEvents shares one URI namespace.
+	Source = "urn:tas:service:tas-llm-router"
+)
+
+// RequestEnvelope wraps a RequestEvent in a CloudEvents 1.0 envelope.
+// Marshalled JSON matches the structured-mode binding (§3.5 of the
+// CloudEvents 1.0 spec).
+type RequestEnvelope struct {
+	SpecVersion     string       `json:"specversion"`
+	Type            string       `json:"type"`
+	Source          string       `json:"source"`
+	ID              string       `json:"id"`
+	Time            time.Time    `json:"time"`
+	Subject         string       `json:"subject,omitempty"`
+	DataContentType string       `json:"datacontenttype"`
+	Data            RequestEvent `json:"data"`
+}
+
+// ResponseEnvelope wraps a ResponseEvent in a CloudEvents 1.0 envelope.
+type ResponseEnvelope struct {
+	SpecVersion     string        `json:"specversion"`
+	Type            string        `json:"type"`
+	Source          string        `json:"source"`
+	ID              string        `json:"id"`
+	Time            time.Time     `json:"time"`
+	Subject         string        `json:"subject,omitempty"`
+	DataContentType string        `json:"datacontenttype"`
+	Data            ResponseEvent `json:"data"`
+}
+
+// RequestEvent mirrors aether-shared/data-models/aiqg/request-event.md §2.1.
+// Only fields populatable from the gateway today are concrete; the rest
+// are optional and omitted from JSON when unset.
+type RequestEvent struct {
+	// Identity & linkage
+	RequestEventID string `json:"request_event_id"`
+	TenantID       string `json:"tenant_id,omitempty"`         // filled by token-resolver slice
+	AIQGAccountID  string `json:"aiqg_account_id,omitempty"`   // filled by token-resolver slice
+	TASAuthTokenID string `json:"tas_auth_token_id,omitempty"` // filled by token-resolver slice
+
+	// Request basics (populatable today)
+	ReceivedAt      time.Time `json:"received_at"`
+	Endpoint        string    `json:"endpoint"`
+	Method          string    `json:"method"`
+	SourceIP        string    `json:"source_ip,omitempty"`
+	SourceApp       string    `json:"source_app,omitempty"`
+	ClientRequestID string    `json:"client_request_id,omitempty"`
+	Region          string    `json:"region,omitempty"`
+
+	// Routing (filled by router slice)
+	Vendor    string `json:"vendor,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Streaming bool   `json:"streaming"`
+
+	// Mode
+	IsAIQGMode bool `json:"is_aiqg_mode"`
+
+	// Headers reflected
+	DryRun        bool     `json:"dry_run"`
+	TraceReturned bool     `json:"trace_returned"`
+	Workflow      string   `json:"workflow,omitempty"`
+	PolicyNames   []string `json:"policy_names,omitempty"`
+	PolicyBundle  string   `json:"policy_bundle,omitempty"`
+
+	// Correlation to response (always populated when emitted as a pair)
+	CorrelatedResponseEventID string `json:"correlated_response_event_id,omitempty"`
+
+	// Versioning
+	ScoringVersion string `json:"scoring_version"`
+	GatewayVersion string `json:"gateway_version"`
+	LifecycleState string `json:"lifecycle_state"`
+}
+
+// ResponseEvent mirrors aether-shared/data-models/aiqg/response-event.md §2.2.
+type ResponseEvent struct {
+	// Identity & linkage
+	ResponseEventID string `json:"response_event_id"`
+	RequestEventID  string `json:"request_event_id"`
+	TenantID        string `json:"tenant_id,omitempty"`
+	AIQGAccountID   string `json:"aiqg_account_id,omitempty"`
+
+	// Outcome
+	CompleteAt      time.Time `json:"complete_at"`
+	Status          string    `json:"status"` // success | vendor_error | gateway_error | policy_blocked | client_disconnect | timeout
+	HTTPStatus      int       `json:"http_status"`
+	FinishReason    string    `json:"finish_reason,omitempty"`
+	VendorRequestID string    `json:"vendor_request_id,omitempty"`
+
+	// Streaming telemetry (from timing snapshot)
+	Streamed          bool `json:"streamed"`
+	ChunkCount        int  `json:"chunk_count"`
+	ContentChunkCount int  `json:"content_chunk_count"`
+
+	// Embedded timing block — see event-timestamps.md
+	EventTimestamps instrumentation.Snapshot `json:"event_timestamps"`
+
+	// CLEAR scores (filled by scorer slice; pointers so 0 ≠ unscored)
+	CLEAR *CLEARScores `json:"clear_scores,omitempty"`
+
+	// Versioning
+	ScoringVersion string `json:"scoring_version"`
+	GatewayVersion string `json:"gateway_version"`
+}
+
+// CLEARScores carries the five CLEAR dimension scores + composite.
+// Each value is a pointer to int16 in [0,100] (spec uses smallint for
+// storage compactness). A nil pointer means "not scored" — distinct
+// from a zero score, which means "scored, came out at zero." The MVP
+// scorer slice will populate this; emission can fire with nil today.
+type CLEARScores struct {
+	Cost           *int16 `json:"cost,omitempty"`
+	Latency        *int16 `json:"latency,omitempty"`
+	Efficacy       *int16 `json:"efficacy,omitempty"`
+	Assurance      *int16 `json:"assurance,omitempty"`
+	Reliability    *int16 `json:"reliability,omitempty"`
+	Composite      *int16 `json:"composite,omitempty"`
+	WeightsApplied string `json:"weights_applied,omitempty"`
+}
+
+// Status enum values for ResponseEvent.Status.
+const (
+	StatusSuccess          = "success"
+	StatusVendorError      = "vendor_error"
+	StatusGatewayError     = "gateway_error"
+	StatusPolicyBlocked    = "policy_blocked"
+	StatusClientDisconnect = "client_disconnect"
+	StatusTimeout          = "timeout"
+)
+
+// Lifecycle state enum values for RequestEvent.LifecycleState.
+const (
+	LifecycleReceived            = "received"
+	LifecycleValidated           = "validated"
+	LifecyclePolicyResolved      = "policy_resolved"
+	LifecycleForwarded           = "forwarded"
+	LifecyclePairedWithResponse  = "paired_with_response"
+	LifecycleArchived            = "archived"
+)
+
+// StatusFromHTTP maps an HTTP status code to the spec's status enum.
+// Heuristic, used when the gateway doesn't have a more specific signal
+// (e.g. policy_blocked is set by the policy layer; client_disconnect by
+// the response writer).
+func StatusFromHTTP(code int) string {
+	switch {
+	case code == 0:
+		// 0 means we never wrote a response — gateway blocked before forwarding.
+		return StatusGatewayError
+	case code >= 200 && code < 400:
+		return StatusSuccess
+	case code == 504, code == 408:
+		return StatusTimeout
+	case code >= 400 && code < 500:
+		return StatusGatewayError
+	default:
+		return StatusVendorError
+	}
+}
