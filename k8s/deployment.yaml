@@ -55,6 +55,11 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        # Points the AIQG token-resolver at the Secret-mounted file.
+        # When the Secret isn't present (volume is optional), the binary
+        # logs a warning and runs in the no-resolver permissive path.
+        - name: AIQG_TOKENS_FILE
+          value: /app/secrets/aiqg/aiqg-tokens.yaml
 
         resources:
           requests:
@@ -94,6 +99,12 @@ spec:
           mountPath: /tmp
         - name: cache
           mountPath: /app/cache
+        # AIQG token list — mounted from a Secret rather than a ConfigMap
+        # because token bearers are sensitive. The binary reads this via
+        # AIQG_TOKENS_FILE (set on the env block).
+        - name: aiqg-tokens
+          mountPath: /app/secrets/aiqg
+          readOnly: true
 
       volumes:
       - name: tmp
@@ -101,6 +112,13 @@ spec:
       - name: cache
         emptyDir:
           sizeLimit: 1Gi
+      - name: aiqg-tokens
+        secret:
+          secretName: llm-router-aiqg-tokens
+          # Optional so the Deployment still starts when the Secret
+          # hasn't been applied yet — the AIQG middleware just runs in
+          # the no-resolver permissive path until it lands.
+          optional: true
 
       affinity:
         podAntiAffinity:

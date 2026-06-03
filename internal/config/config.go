@@ -392,10 +392,8 @@ func (c *Config) loadFromEnv() {
 	}
 
 	// AIQG ingress — env overrides for the simple scalars. Tokens are
-	// only loadable via the YAML config file (env vars are a poor
-	// shape for a list of structs); deployments that want a token
-	// store either ship a baked config.yaml or wait for the
-	// dashboard-backed Resolver slice.
+	// only loadable via YAML (env vars are a poor shape for a list of
+	// structs).
 	if enabled := os.Getenv("AIQG_ENABLED"); enabled != "" {
 		c.AIQG.Enabled = enabled == "true" || enabled == "1"
 	}
@@ -405,6 +403,51 @@ func (c *Config) loadFromEnv() {
 	if region := os.Getenv("AIQG_REGION"); region != "" {
 		c.AIQG.Region = region
 	}
+	// AIQG_TOKENS_FILE points to a separate YAML file containing the
+	// token list (typically mounted from a Kubernetes Secret so the
+	// list never sits in a ConfigMap). When set + readable, the file's
+	// tokens REPLACE any tokens already loaded from config.yaml —
+	// this matches the operator's mental model of "the Secret is the
+	// source of truth for live tokens." A missing or unreadable file
+	// is logged but does not fail startup; the AIQG middleware
+	// gracefully degrades to the no-resolver permissive path
+	// documented in pkg/aiqg/middleware.
+	if path := os.Getenv("AIQG_TOKENS_FILE"); path != "" {
+		if err := c.loadAIQGTokensFromFile(path); err != nil {
+			// Use stdlib log here; structured logger isn't initialized
+			// at this point in startup.
+			fmt.Fprintf(os.Stderr, "warning: AIQG_TOKENS_FILE=%q could not be loaded: %v\n", path, err)
+		}
+	}
+}
+
+// loadAIQGTokensFromFile reads a tokens file and replaces c.AIQG.Tokens
+// with its contents. The file shape is:
+//
+//	tokens:
+//	  - token_id: "uuid"
+//	    token: "tas_qg_live_..."
+//	    tenant_id: "..."
+//	    aiqg_account_id: "..."
+//	    source_app: "..."
+//	    suspended: false
+//
+// This is intentionally a sub-schema of the main Config so the same
+// YAML structure works whether tokens come from config.yaml or a
+// separately-mounted Secret.
+func (c *Config) loadAIQGTokensFromFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read tokens file: %w", err)
+	}
+	var wrapper struct {
+		Tokens []AIQGTokenConfig `yaml:"tokens"`
+	}
+	if err := yaml.Unmarshal(data, &wrapper); err != nil {
+		return fmt.Errorf("parse tokens file: %w", err)
+	}
+	c.AIQG.Tokens = wrapper.Tokens
+	return nil
 }
 
 // validate validates the configuration
