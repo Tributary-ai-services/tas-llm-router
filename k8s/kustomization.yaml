@@ -6,7 +6,9 @@ namespace: tas-llm-router
 resources:
 - namespace.yaml
 - configmap.yaml
-- secret.yaml
+# llm-router-secret is intentionally NOT here — see secret.example.yaml
+# for the schema. The real Secret is managed out-of-band by ops because
+# applying a git-tracked stub overwrote live API keys on 2026-06-03.
 - secret-aiqg-tokens.yaml
 - deployment.yaml
 - service.yaml
