@@ -371,6 +371,103 @@ func TestConfig_ToAIQGServerConfig_EnabledWithTokens(t *testing.T) {
 	}
 }
 
+// AIQG_TOKENS_FILE pointing at a valid YAML replaces any config.yaml tokens.
+func TestLoadConfig_AIQGTokensFile(t *testing.T) {
+	dir := t.TempDir()
+	tokensFile := dir + "/tokens.yaml"
+	yaml := `tokens:
+  - token_id: "tok-1"
+    token: "tas_qg_live_abc"
+    tenant_id: "tenant-a"
+    aiqg_account_id: "account-a"
+    source_app: "billing"
+    suspended: false
+  - token_id: "tok-2"
+    token: "tas_qg_live_def"
+    tenant_id: "tenant-b"
+    aiqg_account_id: "account-b"
+    suspended: true
+`
+	if err := os.WriteFile(tokensFile, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write tokens file: %v", err)
+	}
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("AIQG_ENABLED", "true")
+	t.Setenv("AIQG_TOKENS_FILE", tokensFile)
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.AIQG.Tokens) != 2 {
+		t.Fatalf("token count=%d want=2", len(cfg.AIQG.Tokens))
+	}
+	if cfg.AIQG.Tokens[0].TenantID != "tenant-a" || cfg.AIQG.Tokens[0].Token != "tas_qg_live_abc" {
+		t.Errorf("token[0] mismatch: %#v", cfg.AIQG.Tokens[0])
+	}
+	if !cfg.AIQG.Tokens[1].Suspended {
+		t.Errorf("token[1].Suspended not propagated")
+	}
+}
+
+// File takes precedence over config.yaml tokens (replace, not merge).
+func TestLoadConfig_AIQGTokensFileReplacesYAML(t *testing.T) {
+	dir := t.TempDir()
+	tokensFile := dir + "/tokens.yaml"
+	if err := os.WriteFile(tokensFile, []byte("tokens:\n  - token: \"tas_qg_live_from_file\"\n    tenant_id: \"tenant-from-file\"\n"), 0o600); err != nil {
+		t.Fatalf("write tokens file: %v", err)
+	}
+
+	c := &Config{}
+	c.setDefaults()
+	c.AIQG.Tokens = []AIQGTokenConfig{{Token: "tas_qg_live_from_yaml", TenantID: "tenant-from-yaml"}}
+
+	if err := c.loadAIQGTokensFromFile(tokensFile); err != nil {
+		t.Fatalf("loadAIQGTokensFromFile: %v", err)
+	}
+	if len(c.AIQG.Tokens) != 1 {
+		t.Fatalf("len=%d want=1", len(c.AIQG.Tokens))
+	}
+	if c.AIQG.Tokens[0].Token != "tas_qg_live_from_file" {
+		t.Errorf("file did not override YAML: %#v", c.AIQG.Tokens[0])
+	}
+}
+
+// Missing AIQG_TOKENS_FILE is logged but does NOT fail LoadConfig.
+// The middleware just runs in the no-resolver permissive path.
+func TestLoadConfig_AIQGTokensFileMissingDoesNotFail(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("AIQG_TOKENS_FILE", "/this/path/does/not/exist.yaml")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig should not fail on missing tokens file: %v", err)
+	}
+	if len(cfg.AIQG.Tokens) != 0 {
+		t.Errorf("expected empty tokens, got %d", len(cfg.AIQG.Tokens))
+	}
+}
+
+// Malformed YAML in the tokens file is logged but doesn't fail startup.
+func TestLoadConfig_AIQGTokensFileMalformedDoesNotFail(t *testing.T) {
+	dir := t.TempDir()
+	tokensFile := dir + "/tokens.yaml"
+	if err := os.WriteFile(tokensFile, []byte("this is not\n valid: : yaml: :"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("AIQG_TOKENS_FILE", tokensFile)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig should not fail on malformed tokens file: %v", err)
+	}
+	if len(cfg.AIQG.Tokens) != 0 {
+		t.Errorf("malformed yaml should leave tokens empty, got %d", len(cfg.AIQG.Tokens))
+	}
+}
+
 // Env-var overrides flip the YAML defaults.
 func TestLoadConfig_AIQGEnvOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key") // satisfy provider validation
