@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
+	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 )
 
 // CloudEvents 1.0 type identifiers. Bump the suffix when the data shape
@@ -136,27 +137,16 @@ type ResponseEvent struct {
 	// Embedded timing block — see event-timestamps.md
 	EventTimestamps instrumentation.Snapshot `json:"event_timestamps"`
 
-	// CLEAR scores (filled by scorer slice; pointers so 0 ≠ unscored)
-	CLEAR *CLEARScores `json:"clear_scores,omitempty"`
+	// CLEAR scores — populated by pkg/clear.Compute(). A nil *Scores
+	// (rather than a *Scores with all-nil dimension fields) means the
+	// scorer wasn't run at all, which today only happens on the noop
+	// path; once events.Build always invokes the scorer this should be
+	// non-nil on every emitted response event.
+	CLEAR *clear.Scores `json:"clear_scores,omitempty"`
 
 	// Versioning
 	ScoringVersion string `json:"scoring_version"`
 	GatewayVersion string `json:"gateway_version"`
-}
-
-// CLEARScores carries the five CLEAR dimension scores + composite.
-// Each value is a pointer to int16 in [0,100] (spec uses smallint for
-// storage compactness). A nil pointer means "not scored" — distinct
-// from a zero score, which means "scored, came out at zero." The MVP
-// scorer slice will populate this; emission can fire with nil today.
-type CLEARScores struct {
-	Cost           *int16 `json:"cost,omitempty"`
-	Latency        *int16 `json:"latency,omitempty"`
-	Efficacy       *int16 `json:"efficacy,omitempty"`
-	Assurance      *int16 `json:"assurance,omitempty"`
-	Reliability    *int16 `json:"reliability,omitempty"`
-	Composite      *int16 `json:"composite,omitempty"`
-	WeightsApplied string `json:"weights_applied,omitempty"`
 }
 
 // Status enum values for ResponseEvent.Status.

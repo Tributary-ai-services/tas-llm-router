@@ -358,6 +358,57 @@ func TestAIQG_EmitsPairedEvents(t *testing.T) {
 	}
 }
 
+// The emitted response event must carry a populated CLEAR scores
+// block — at MVP, that means Latency + Composite are non-nil and the
+// other dimensions are nil. End-to-end check of the
+// middleware → events.Build → clear.Compute chain.
+func TestAIQG_EmittedEventCarriesCLEARScores(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{
+		Strict:  true,
+		Logger:  silentLogger(),
+		Emitter: em,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk-customer")
+	req.Header.Set("TAS-Workflow", "rag")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if em.Len() != 1 {
+		t.Fatalf("emit count=%d want=1", em.Len())
+	}
+	respEnv := em.Responses()[0]
+	if respEnv.Data.CLEAR == nil {
+		t.Fatalf("ResponseEvent.CLEAR is nil — scorer not wired into Build")
+	}
+	if respEnv.Data.CLEAR.Latency == nil {
+		t.Errorf("CLEAR.Latency nil — should be scored from end_to_end_ms")
+	}
+	if respEnv.Data.CLEAR.Composite == nil {
+		t.Errorf("CLEAR.Composite nil — should equal Latency when only Latency is scored")
+	}
+	// MVP: other dimensions remain nil until their respective slices land.
+	if respEnv.Data.CLEAR.Cost != nil {
+		t.Errorf("CLEAR.Cost should be nil at MVP (token-accounting not plumbed)")
+	}
+	if respEnv.Data.CLEAR.Efficacy != nil {
+		t.Errorf("CLEAR.Efficacy should be nil at MVP (response body not captured)")
+	}
+	if respEnv.Data.CLEAR.Assurance != nil {
+		t.Errorf("CLEAR.Assurance should be nil at MVP (Gatekeeper not integrated)")
+	}
+	if respEnv.Data.CLEAR.Reliability != nil {
+		t.Errorf("CLEAR.Reliability should be nil at MVP (retry detection not built)")
+	}
+	if respEnv.Data.ScoringVersion == "" {
+		t.Errorf("ScoringVersion must be present even with partial scoring")
+	}
+}
+
 // Nil emitter must default to NoopEmitter (no panic, request succeeds).
 func TestAIQG_NilEmitterDefaultsToNoop(t *testing.T) {
 	next := &echoHandler{}
