@@ -3,8 +3,12 @@ FROM golang:1.24-alpine AS builder
 
 WORKDIR /build
 
-# Copy Gatekeeper dependency (local replace directive)
+# Copy local-replace dependencies.
+# Gatekeeper transitively pulls aether-shared/go-events; both are
+# replaced to local paths in tas-llm-router's go.mod, so both must
+# exist under the build context.
 COPY Gatekeeper/ /build/Gatekeeper/
+COPY aether-shared/go-events/ /build/aether-shared/go-events/
 
 WORKDIR /build/app
 
