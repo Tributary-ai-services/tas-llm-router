@@ -20,8 +20,18 @@ require (
 
 replace github.com/Tributary-ai-services/Gatekeeper => ../Gatekeeper
 
+// Mirror Gatekeeper's replace directive so its transitive dependency
+// on aether-shared/go-events resolves to the same local path. Without
+// this, `go build ./internal/server/...` and `make test` fail with
+// "missing go.sum entry for module providing package
+// github.com/Tributary-ai-services/aether-shared/go-events" because
+// replace directives in a dependency don't propagate to the parent
+// module's go.sum.
+replace github.com/Tributary-ai-services/aether-shared/go-events => ../aether-shared/go-events
+
 require (
 	github.com/IBM/sarama v1.46.3 // indirect
+	github.com/Tributary-ai-services/aether-shared/go-events v0.0.0-00010101000000-000000000000 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/eapache/go-resiliency v1.7.0 // indirect
 	github.com/eapache/go-xerial-snappy v0.0.0-20230731223053-c322873962e3 // indirect

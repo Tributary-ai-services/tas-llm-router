@@ -258,7 +258,4 @@ func TestBothProvidersComparison(t *testing.T) {
 	})
 }
 
-// Helper function
-func intPtr(i int) *int {
-	return &i
-}
+// intPtr lives in test_openai_basic.go; both files share package main.
