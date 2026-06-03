@@ -18,6 +18,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
 
 // Server represents the HTTP server
@@ -66,6 +67,13 @@ type AIQGServerConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Strict  bool   `yaml:"strict"`
 	Region  string `yaml:"region"`
+
+	// Tokens is the MVP in-memory token store. Production deployments
+	// swap to a dashboard-backend resolver via a separate config knob
+	// (TBD when aiqg-dashboard-be ships). Empty/omitted means no
+	// resolver is wired — tokens stay opaque and events carry empty
+	// tenant fields. Suitable for incremental rollout.
+	Tokens []tokens.ConfigToken `yaml:"tokens"`
 }
 
 // NewServer creates a new server instance
@@ -102,15 +110,29 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 	// emitted on response completion via LogEmitter → logrus → Loki.
 	if config.AIQG != nil && config.AIQG.Enabled {
 		server.aiqgEmitter = &events.LogEmitter{Logger: logger}
+
+		// Build the token resolver when tokens are configured. Without
+		// a resolver the middleware accepts any TAS-Auth bearer but
+		// emits events with empty tenant fields — useful for an early
+		// rollout where the token store hasn't shipped yet.
+		var resolver tokens.Resolver
+		if len(config.AIQG.Tokens) > 0 {
+			mr := tokens.NewMapResolver(config.AIQG.Tokens)
+			resolver = mr
+			logger.WithField("token_count", mr.Len()).Info("AIQG token resolver loaded (in-memory)")
+		}
+
 		server.aiqgMiddleware = middleware.NewAIQG(middleware.AIQGConfig{
-			Strict:  config.AIQG.Strict,
-			Logger:  logger,
-			Emitter: server.aiqgEmitter,
-			Region:  config.AIQG.Region,
+			Strict:   config.AIQG.Strict,
+			Logger:   logger,
+			Emitter:  server.aiqgEmitter,
+			Region:   config.AIQG.Region,
+			Resolver: resolver,
 		})
 		logger.WithFields(logrus.Fields{
-			"strict": config.AIQG.Strict,
-			"region": config.AIQG.Region,
+			"strict":           config.AIQG.Strict,
+			"region":           config.AIQG.Region,
+			"resolver_enabled": resolver != nil,
 		}).Info("AIQG ingress enabled on completion routes")
 	}
 

@@ -40,6 +40,19 @@ type RoutingView struct {
 	StreamingSet bool
 }
 
+// TokenView is the subset of resolved-token state the event builder
+// needs. The Path A middleware constructs it from pkg/aiqg/tokens.Token
+// after a successful Resolve. Pre-validation auth failures never
+// reach Build (the middleware short-circuits with 401/403 before
+// emitting), so TokenView is either fully populated or fully empty —
+// never partial.
+type TokenView struct {
+	TenantID       string
+	AIQGAccountID  string
+	TASAuthTokenID string
+	SourceApp      string // token-claim source_app; header overrides per spec §80
+}
+
 // GatewayVersion is the build version stamped on every event. Override
 // at build time via -ldflags "-X .../events.GatewayVersion=v1.4.2".
 var GatewayVersion = "dev"
@@ -80,7 +93,12 @@ type BuildOptions struct {
 // streaming flag. When routing.StreamingSet is false, the builder
 // falls back to the URL-query heuristic — handy for tests but the
 // completion handlers in production always stamp it explicitly.
-func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, snap instrumentation.Snapshot, opts BuildOptions) (RequestEnvelope, ResponseEnvelope) {
+//
+// token carries the resolved tenant/account identifiers. Pre-validation
+// auth failures don't reach Build (per spec §273), so token is either
+// fully populated from a successful resolve or fully empty (resolver
+// not configured / non-AIQG path).
+func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token TokenView, snap instrumentation.Snapshot, opts BuildOptions) (RequestEnvelope, ResponseEnvelope) {
 	reqID := newUUID()
 	respID := newUUID()
 	now := time.Now().UTC()
@@ -104,13 +122,24 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, snap i
 		streaming = routing.Streaming
 	}
 
+	// SourceApp precedence per request-event.md §80: customer-supplied
+	// TAS-Source-App header wins; falls back to the token's source_app
+	// claim. Empty if neither side provides it.
+	sourceApp := headers.SourceApp
+	if sourceApp == "" {
+		sourceApp = token.SourceApp
+	}
+
 	reqEvent := RequestEvent{
 		RequestEventID:            reqID,
+		TenantID:                  token.TenantID,
+		AIQGAccountID:             token.AIQGAccountID,
+		TASAuthTokenID:            token.TASAuthTokenID,
 		ReceivedAt:                receivedAt,
 		Endpoint:                  r.URL.Path,
 		Method:                    r.Method,
 		SourceIP:                  clientIP(r),
-		SourceApp:                 headers.SourceApp,
+		SourceApp:                 sourceApp,
 		ClientRequestID:           r.Header.Get("X-Request-ID"),
 		Region:                    opts.Region,
 		Vendor:                    routing.Vendor,
@@ -133,6 +162,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, snap i
 	respEvent := ResponseEvent{
 		ResponseEventID:   respID,
 		RequestEventID:    reqID,
+		TenantID:          token.TenantID,        // denormalized per response-event.md §"Denormalization rationale"
+		AIQGAccountID:     token.AIQGAccountID,   // ditto
 		CompleteAt:        completeAt,
 		Status:            status,
 		HTTPStatus:        opts.HTTPStatus,

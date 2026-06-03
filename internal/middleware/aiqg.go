@@ -38,6 +38,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
 
 // AIQGConfig configures the AIQG entry middleware.
@@ -62,6 +63,14 @@ type AIQGConfig struct {
 	// "us-west", "eu"). Set from deployment config. Empty is allowed
 	// during local dev and is omitted from the event JSON.
 	Region string
+
+	// Resolver turns the TAS-Auth bearer into a tenant_id / account_id
+	// for event attribution. Nil is allowed during incremental rollout:
+	// the middleware skips resolution, every request is treated as
+	// opaque-token-known, and emitted events carry empty tenant fields.
+	// Once a Resolver is configured, unknown tokens become 401 and
+	// suspended accounts become 403.
+	Resolver tokens.Resolver
 }
 
 // NewAIQG returns the middleware constructor. The returned handler is a
@@ -123,16 +132,43 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Enter AIQG mode: attach collector + headers + routing sidecar,
-	// stamp Received, arrange for StampComplete + event emission on
-	// response end. The routing sidecar is empty here; the completion
-	// handlers populate it via StampVendor / StampModel / StampStreaming
-	// as those decisions are made.
+	// Resolve TAS-Auth to a tenant/account when a resolver is wired.
+	// Unknown tokens become 401 (path_a_auth_rejected with reason=
+	// token_unknown); suspended accounts become 403. When no resolver
+	// is configured, tokens stay opaque and emitted events carry empty
+	// tenant fields — this is the incremental-rollout path.
+	var resolvedToken *tokens.Token
+	if cfg.Resolver != nil {
+		tok, err := cfg.Resolver.Resolve(r.Context(), parsed.Auth)
+		switch {
+		case errors.Is(err, tokens.ErrTokenNotFound):
+			rejectTokenUnknown(cfg.Logger, w, r)
+			return
+		case errors.Is(err, tokens.ErrTokenSuspended):
+			rejectAccountSuspended(cfg.Logger, w, r, tok)
+			return
+		case err != nil:
+			cfg.Logger.WithError(err).WithField("event", "aiqg.token_resolve_error").
+				Error("AIQG token resolver returned unexpected error")
+			writeResolverError(w)
+			return
+		}
+		resolvedToken = tok
+	}
+
+	// Enter AIQG mode: attach collector + headers + routing sidecar +
+	// resolved token, stamp Received, arrange for StampComplete + event
+	// emission on response end. The routing sidecar is empty here; the
+	// completion handlers populate it via StampVendor / StampModel /
+	// StampStreaming as those decisions are made.
 	collector := instrumentation.NewCollector()
 	routing := NewRouting()
 	ctx := instrumentation.WithCollector(r.Context(), collector)
 	ctx = WithHeaders(ctx, parsed)
 	ctx = WithRouting(ctx, routing)
+	if resolvedToken != nil {
+		ctx = tokens.WithToken(ctx, resolvedToken)
+	}
 	instrumentation.StampReceived(ctx)
 
 	sw := &statusCapturingResponseWriter{ResponseWriter: w}
@@ -147,7 +183,7 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	// routing sidecar is read at the same moment, so any vendor/model
 	// stamps made by the handler reach the event.
 	defer func() {
-		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), collector.Snapshot(), events.BuildOptions{
+		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
 			HTTPStatus: sw.status(),
 			Region:     cfg.Region,
 		})
@@ -190,6 +226,73 @@ func routingView(r *Routing) events.RoutingView {
 		Streaming:    s.Streaming,
 		StreamingSet: s.StreamingSet,
 	}
+}
+
+// tokenView projects a resolved tokens.Token into the read-only shape
+// events.Build expects. Nil token (no resolver configured) returns the
+// zero view; events then carry empty tenant_id / aiqg_account_id /
+// tas_auth_token_id fields, which downstream consumers can detect and
+// filter out as non-attributed traffic.
+func tokenView(t *tokens.Token) events.TokenView {
+	if t == nil {
+		return events.TokenView{}
+	}
+	return events.TokenView{
+		TenantID:       t.TenantID,
+		AIQGAccountID:  t.AIQGAccountID,
+		TASAuthTokenID: t.TokenID,
+		SourceApp:      t.SourceApp,
+	}
+}
+
+// rejectTokenUnknown emits 401 for a TAS-Auth bearer that the resolver
+// didn't recognize. Distinct response code (`token_unknown`) so
+// dashboards can break out genuine misconfigurations from "auth header
+// missing" failures.
+func rejectTokenUnknown(log *logrus.Logger, w http.ResponseWriter, r *http.Request) {
+	log.WithFields(logrus.Fields{
+		"event":  "aiqg.path_a_auth_rejected",
+		"reason": "token_unknown",
+		"path":   r.URL.Path,
+		"method": r.Method,
+	}).Warn("Path A auth rejected — token unknown")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("WWW-Authenticate", `TAS realm="aiqg"`)
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`{"error":{"code":"path_a_auth_required","message":"AIQG ingress requires a recognized TAS-Auth token","reason":"token_unknown","docs":"https://docs.tas.scharber.com/aiqg/auth"}}`))
+}
+
+// rejectAccountSuspended emits 403 for a TAS-Auth bearer that resolves
+// to a suspended account. Per spec request-event.md §564 we still
+// recognize the token; we reject the request before forwarding. The
+// resolved token info is logged for support to triage.
+func rejectAccountSuspended(log *logrus.Logger, w http.ResponseWriter, r *http.Request, tok *tokens.Token) {
+	fields := logrus.Fields{
+		"event":  "aiqg.account_suspended",
+		"path":   r.URL.Path,
+		"method": r.Method,
+	}
+	if tok != nil {
+		fields["aiqg_account_id"] = tok.AIQGAccountID
+		fields["tenant_id"] = tok.TenantID
+	}
+	log.WithFields(fields).Warn("AIQG request rejected — account suspended")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":{"code":"account_suspended","message":"AIQG account is currently suspended; contact support"}}`))
+}
+
+// writeResolverError emits 503 for resolver-side failures (e.g. the
+// production backend resolver can't reach the token store). 503 instead
+// of 500 because the failure is upstream-dependency unavailability, and
+// callers should retry rather than treat the request as permanently
+// broken.
+func writeResolverError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`{"error":{"code":"token_resolver_unavailable","message":"AIQG token resolver is temporarily unavailable; retry"}}`))
 }
 
 // statusCapturingResponseWriter records the HTTP status code written
