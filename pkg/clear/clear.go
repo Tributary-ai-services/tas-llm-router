@@ -71,8 +71,16 @@ type Input struct {
 	Workflow   string // CLEAR workflow type (rag, agentic, code_generation, ...)
 	HTTPStatus int    // 0 means gateway never wrote a response
 
+	// From the routing decision + vendor response. Vendor/Model drive
+	// pricing lookup; the *int token counts distinguish "not captured"
+	// (nil — vendor didn't return usage) from "captured as zero"
+	// (e.g. policy_blocked emitted no completion).
+	Vendor           string
+	Model            string
+	PromptTokens     *int
+	CompletionTokens *int
+
 	// Future-slice inputs (left for forward compatibility):
-	//   PromptTokens, CompletionTokens *int       // Cost
 	//   ResponseBodyValid              *bool      // Efficacy structural
 	//   ComplianceFindingCount         *int       // Assurance
 	//   RetryObserved                  *bool      // Reliability
@@ -91,7 +99,8 @@ type Input struct {
 func Compute(in Input) *Scores {
 	s := &Scores{
 		Latency: scoreLatency(in),
-		// Cost/Efficacy/Assurance/Reliability remain nil for MVP.
+		Cost:    scoreCost(in),
+		// Efficacy/Assurance/Reliability remain nil — future slices.
 	}
 	s.Composite = composite(s)
 	if s.Composite != nil {

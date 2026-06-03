@@ -127,7 +127,7 @@ func TestComputeMVPHappyPath(t *testing.T) {
 		t.Errorf("Latency=%v want=100", s.Latency)
 	}
 	if s.Cost != nil {
-		t.Errorf("Cost should be nil in MVP (not yet plumbed), got %d", *s.Cost)
+		t.Errorf("Cost should be nil when no vendor/model/tokens supplied, got %d", *s.Cost)
 	}
 	if s.Efficacy != nil {
 		t.Errorf("Efficacy should be nil in MVP")

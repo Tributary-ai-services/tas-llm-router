@@ -137,6 +137,11 @@ type ResponseEvent struct {
 	// Embedded timing block — see event-timestamps.md
 	EventTimestamps instrumentation.Snapshot `json:"event_timestamps"`
 
+	// Embedded token-accounting block — see token-accounting.md.
+	// Omitted when the vendor returned no usage data (UsageSet=false
+	// on the routing snapshot) — distinct from "0 tokens used".
+	TokenAccounting *TokenAccounting `json:"token_accounting,omitempty"`
+
 	// CLEAR scores — populated by pkg/clear.Compute(). A nil *Scores
 	// (rather than a *Scores with all-nil dimension fields) means the
 	// scorer wasn't run at all, which today only happens on the noop
@@ -147,6 +152,25 @@ type ResponseEvent struct {
 	// Versioning
 	ScoringVersion string `json:"scoring_version"`
 	GatewayVersion string `json:"gateway_version"`
+}
+
+// TokenAccounting carries the vendor-reported token counts and the
+// gateway-computed dollar costs. Mirrors aether-shared/data-models/aiqg/
+// token-accounting.md.
+//
+// Dollar costs are zero when the vendor:model pair isn't in the
+// pkg/clear pricing table — distinct from "request used zero tokens"
+// (in which case the *Tokens fields are zero too). The
+// ModelPricingVersion stamps the pricing-table revision used so a
+// Spark re-score job can identify rows scored under stale rates.
+type TokenAccounting struct {
+	PromptTokens        int     `json:"prompt_tokens"`
+	CompletionTokens    int     `json:"completion_tokens"`
+	TotalTokens         int     `json:"total_tokens"`
+	InputCostUSD        float64 `json:"input_cost_usd"`
+	OutputCostUSD       float64 `json:"output_cost_usd"`
+	TotalCostUSD        float64 `json:"total_cost_usd"`
+	ModelPricingVersion string  `json:"model_pricing_version,omitempty"`
 }
 
 // Status enum values for ResponseEvent.Status.

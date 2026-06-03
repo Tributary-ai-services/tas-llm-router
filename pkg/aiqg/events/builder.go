@@ -38,6 +38,15 @@ type RoutingView struct {
 	Model        string
 	Streaming    bool
 	StreamingSet bool
+
+	// Token usage from the vendor response (stamped by handlers via
+	// middleware.StampTokenUsage). UsageSet distinguishes "vendor
+	// returned 0 tokens" (a legitimate value for content_filter
+	// finish-reason) from "vendor never returned a usage block"
+	// (events omit TokenAccounting entirely in the latter case).
+	PromptTokens     int
+	CompletionTokens int
+	UsageSet         bool
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -159,6 +168,38 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		LifecycleState:            LifecyclePairedWithResponse,
 	}
 
+	// Build the clear.Input once; reuse for the embedded TokenAccounting
+	// dollar cost so Scores and the per-event accounting agree on prices.
+	clearInput := clear.Input{
+		EndToEndMs:        snap.EndToEndMs,
+		GatewayOverheadMs: snap.GatewayOverheadMs,
+		VendorTTFTMs:      snap.VendorTTFTMs,
+		Workflow:          headers.Workflow,
+		HTTPStatus:        opts.HTTPStatus,
+		Vendor:            routing.Vendor,
+		Model:             routing.Model,
+	}
+	var tokenAcct *TokenAccounting
+	if routing.UsageSet {
+		prompt := routing.PromptTokens
+		completion := routing.CompletionTokens
+		clearInput.PromptTokens = &prompt
+		clearInput.CompletionTokens = &completion
+		inputRate, outputRate, priced := clear.LookupPricing(routing.Vendor, routing.Model)
+		ta := &TokenAccounting{
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			TotalTokens:      prompt + completion,
+		}
+		if priced {
+			ta.InputCostUSD = (float64(prompt) / 1000.0) * inputRate
+			ta.OutputCostUSD = (float64(completion) / 1000.0) * outputRate
+			ta.TotalCostUSD = ta.InputCostUSD + ta.OutputCostUSD
+			ta.ModelPricingVersion = clear.PricingVersion
+		}
+		tokenAcct = ta
+	}
+
 	respEvent := ResponseEvent{
 		ResponseEventID:   respID,
 		RequestEventID:    reqID,
@@ -172,15 +213,10 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		ChunkCount:        snap.ChunkCount,
 		ContentChunkCount: snap.ContentChunkCount,
 		EventTimestamps:   snap,
-		CLEAR: clear.Compute(clear.Input{
-			EndToEndMs:        snap.EndToEndMs,
-			GatewayOverheadMs: snap.GatewayOverheadMs,
-			VendorTTFTMs:      snap.VendorTTFTMs,
-			Workflow:          headers.Workflow,
-			HTTPStatus:        opts.HTTPStatus,
-		}),
-		ScoringVersion: ScoringVersion,
-		GatewayVersion: GatewayVersion,
+		TokenAccounting:   tokenAcct,
+		CLEAR:             clear.Compute(clearInput),
+		ScoringVersion:    ScoringVersion,
+		GatewayVersion:    GatewayVersion,
 	}
 
 	reqEnv := RequestEnvelope{
