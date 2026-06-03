@@ -79,7 +79,7 @@ func TestBuild_RoundTrip(t *testing.T) {
 		Model:        "gpt-4o-mini",
 		Streaming:    true,
 		StreamingSet: true,
-	}, c.Snapshot(), BuildOptions{
+	}, TokenView{}, c.Snapshot(), BuildOptions{
 		HTTPStatus: 200,
 		Region:     "us-east",
 	})
@@ -190,7 +190,7 @@ func TestBuild_EmptySnapshot(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.RemoteAddr = "10.0.0.5:1234"
 
-	reqEnv, respEnv := Build(r, AIQGHeadersView{}, RoutingView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 0})
+	reqEnv, respEnv := Build(r, AIQGHeadersView{}, RoutingView{}, TokenView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 0})
 
 	if reqEnv.Data.LifecycleState != LifecyclePairedWithResponse {
 		t.Errorf("lifecycle_state default missing")
@@ -210,7 +210,7 @@ func TestBuild_XForwardedFor(t *testing.T) {
 	r.RemoteAddr = "10.0.0.5:1234"
 	r.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
 
-	reqEnv, _ := Build(r, AIQGHeadersView{}, RoutingView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
+	reqEnv, _ := Build(r, AIQGHeadersView{}, RoutingView{}, TokenView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
 	if reqEnv.Data.SourceIP != "203.0.113.7" {
 		t.Errorf("source_ip=%q (XFF first-entry not picked)", reqEnv.Data.SourceIP)
 	}
@@ -221,7 +221,7 @@ func TestBuild_XForwardedFor(t *testing.T) {
 func TestEnvelopeMarshalsToCloudEventsShape(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	r.RemoteAddr = "10.0.0.5:80"
-	reqEnv, respEnv := Build(r, AIQGHeadersView{}, RoutingView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
+	reqEnv, respEnv := Build(r, AIQGHeadersView{}, RoutingView{}, TokenView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
 
 	for _, env := range []any{reqEnv, respEnv} {
 		b, err := json.Marshal(env)
@@ -259,7 +259,7 @@ func TestBuild_StreamingPrecedence(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, c.url, nil)
 			r.RemoteAddr = "10.0.0.5:80"
-			reqEnv, _ := Build(r, AIQGHeadersView{}, c.view, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
+			reqEnv, _ := Build(r, AIQGHeadersView{}, c.view, TokenView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
 			if reqEnv.Data.Streaming != c.want {
 				t.Errorf("Streaming=%v want=%v", reqEnv.Data.Streaming, c.want)
 			}
@@ -274,13 +274,13 @@ func TestBuild_VendorModelPassthrough(t *testing.T) {
 	r.RemoteAddr = "10.0.0.5:80"
 
 	// Populated case
-	reqEnv, _ := Build(r, AIQGHeadersView{}, RoutingView{Vendor: "anthropic", Model: "claude-3-7-sonnet"}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
+	reqEnv, _ := Build(r, AIQGHeadersView{}, RoutingView{Vendor: "anthropic", Model: "claude-3-7-sonnet"}, TokenView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
 	if reqEnv.Data.Vendor != "anthropic" || reqEnv.Data.Model != "claude-3-7-sonnet" {
 		t.Errorf("vendor/model not passed through: %q / %q", reqEnv.Data.Vendor, reqEnv.Data.Model)
 	}
 
 	// Empty case
-	reqEnv2, _ := Build(r, AIQGHeadersView{}, RoutingView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
+	reqEnv2, _ := Build(r, AIQGHeadersView{}, RoutingView{}, TokenView{}, instrumentation.Snapshot{}, BuildOptions{HTTPStatus: 200})
 	if reqEnv2.Data.Vendor != "" || reqEnv2.Data.Model != "" {
 		t.Errorf("vendor/model not empty: %q / %q", reqEnv2.Data.Vendor, reqEnv2.Data.Model)
 	}

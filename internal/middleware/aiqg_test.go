@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
 
 // silentLogger returns a logger that discards output — keeps test
@@ -355,6 +358,201 @@ func TestAIQG_EmitsPairedEvents(t *testing.T) {
 	}
 	if respEnv.Data.Status != events.StatusSuccess {
 		t.Errorf("status=%q", respEnv.Data.Status)
+	}
+}
+
+// A configured Resolver enriches the event with tenant_id /
+// aiqg_account_id / tas_auth_token_id when the bearer resolves.
+func TestAIQG_ResolverEnrichesEvent(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	resolver := tokens.NewMapResolver([]tokens.ConfigToken{
+		{
+			TokenID:       "tok_uuid_1",
+			Token:         "tas_qg_live_abc",
+			TenantID:      "tenant-a",
+			AIQGAccountID: "account-a",
+			SourceApp:     "billing-api-prod",
+		},
+	})
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{
+		Strict:   true,
+		Logger:   silentLogger(),
+		Emitter:  em,
+		Resolver: resolver,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk-customer")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if em.Len() != 1 {
+		t.Fatalf("emit count=%d want=1", em.Len())
+	}
+	d := em.Requests()[0].Data
+	if d.TenantID != "tenant-a" {
+		t.Errorf("TenantID=%q", d.TenantID)
+	}
+	if d.AIQGAccountID != "account-a" {
+		t.Errorf("AIQGAccountID=%q", d.AIQGAccountID)
+	}
+	if d.TASAuthTokenID != "tok_uuid_1" {
+		t.Errorf("TASAuthTokenID=%q", d.TASAuthTokenID)
+	}
+	// SourceApp falls back to the token claim when no header was sent.
+	if d.SourceApp != "billing-api-prod" {
+		t.Errorf("SourceApp=%q want=billing-api-prod (token claim fallback)", d.SourceApp)
+	}
+
+	// Response event also carries the denormalized IDs.
+	rd := em.Responses()[0].Data
+	if rd.TenantID != "tenant-a" || rd.AIQGAccountID != "account-a" {
+		t.Errorf("response denorm IDs not populated: tenant=%q account=%q", rd.TenantID, rd.AIQGAccountID)
+	}
+}
+
+// TAS-Source-App header wins over the token's source_app claim per spec §80.
+func TestAIQG_SourceAppHeaderOverridesTokenClaim(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	resolver := tokens.NewMapResolver([]tokens.ConfigToken{
+		{Token: "tas_qg_live_abc", TenantID: "t1", AIQGAccountID: "a1", SourceApp: "token-claim-app"},
+	})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: resolver})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	req.Header.Set("TAS-Source-App", "header-override-app")
+	rec := httptest.NewRecorder()
+	mw(&echoHandler{}).ServeHTTP(rec, req)
+
+	d := em.Requests()[0].Data
+	if d.SourceApp != "header-override-app" {
+		t.Errorf("SourceApp=%q; header should win over token claim", d.SourceApp)
+	}
+}
+
+// Unknown token → 401 with reason=token_unknown; no event emitted.
+func TestAIQG_UnknownTokenReturns401AndEmitsNothing(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	resolver := tokens.NewMapResolver([]tokens.ConfigToken{
+		{Token: "tas_qg_live_known", TenantID: "t1", AIQGAccountID: "a1"},
+	})
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: resolver})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_unknown")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code=%d want=401", rec.Code)
+	}
+	if next.called {
+		t.Errorf("downstream called on unknown token")
+	}
+	if em.Len() != 0 {
+		t.Errorf("emit count=%d want=0 (pre-validation auth failure per spec §273)", em.Len())
+	}
+
+	var body struct {
+		Error struct {
+			Code   string `json:"code"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Error.Reason != "token_unknown" {
+		t.Errorf("error.reason=%q want=token_unknown", body.Error.Reason)
+	}
+}
+
+// Suspended account → 403 with code=account_suspended; no event emitted.
+func TestAIQG_SuspendedAccountReturns403(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	resolver := tokens.NewMapResolver([]tokens.ConfigToken{
+		{Token: "tas_qg_live_suspended", TenantID: "t1", AIQGAccountID: "a1", Suspended: true},
+	})
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: resolver})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_suspended")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d want=403", rec.Code)
+	}
+	if next.called {
+		t.Errorf("downstream called on suspended account")
+	}
+	if em.Len() != 0 {
+		t.Errorf("emit count=%d want=0", em.Len())
+	}
+	if !strings.Contains(rec.Body.String(), "account_suspended") {
+		t.Errorf("body missing code: %s", rec.Body.String())
+	}
+}
+
+// Resolver errors (e.g. backend store unavailable) → 503, no emit.
+type errResolver struct{ err error }
+
+func (e errResolver) Resolve(_ context.Context, _ string) (*tokens.Token, error) {
+	return nil, e.err
+}
+
+func TestAIQG_ResolverErrorReturns503(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	resolver := errResolver{err: errors.New("backend down")}
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: resolver})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_anything")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(&echoHandler{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want=503", rec.Code)
+	}
+	if em.Len() != 0 {
+		t.Errorf("emit on resolver error")
+	}
+}
+
+// No-resolver config (incremental rollout) accepts any TAS-Auth as
+// opaque; events emit with empty tenant fields.
+func TestAIQG_NoResolverAcceptsAnyToken(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	mw := NewAIQG(AIQGConfig{
+		Strict:   true,
+		Logger:   silentLogger(),
+		Emitter:  em,
+		Resolver: nil, // no resolver configured
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_anything")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(&echoHandler{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d want=200 (no-resolver path should accept)", rec.Code)
+	}
+	if em.Len() != 1 {
+		t.Fatalf("emit count=%d want=1", em.Len())
+	}
+	d := em.Requests()[0].Data
+	if d.TenantID != "" || d.AIQGAccountID != "" || d.TASAuthTokenID != "" {
+		t.Errorf("expected empty tenant fields without resolver, got tenant=%q account=%q tokenID=%q",
+			d.TenantID, d.AIQGAccountID, d.TASAuthTokenID)
 	}
 }
 
