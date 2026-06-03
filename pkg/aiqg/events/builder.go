@@ -47,6 +47,14 @@ type RoutingView struct {
 	PromptTokens     int
 	CompletionTokens int
 	UsageSet         bool
+
+	// Gatekeeper scan results. Inbound/Outbound are per-severity
+	// counts ("low"/"medium"/"high"/"critical" → int). ScanRan
+	// distinguishes "scan ran, no findings" from "scan never ran"
+	// — events emit AssuranceSummary only when ScanRan is true.
+	InboundFindings  map[string]int
+	OutboundFindings map[string]int
+	ScanRan          bool
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -171,13 +179,16 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 	// Build the clear.Input once; reuse for the embedded TokenAccounting
 	// dollar cost so Scores and the per-event accounting agree on prices.
 	clearInput := clear.Input{
-		EndToEndMs:        snap.EndToEndMs,
-		GatewayOverheadMs: snap.GatewayOverheadMs,
-		VendorTTFTMs:      snap.VendorTTFTMs,
-		Workflow:          headers.Workflow,
-		HTTPStatus:        opts.HTTPStatus,
-		Vendor:            routing.Vendor,
-		Model:             routing.Model,
+		EndToEndMs:                 snap.EndToEndMs,
+		GatewayOverheadMs:          snap.GatewayOverheadMs,
+		VendorTTFTMs:               snap.VendorTTFTMs,
+		Workflow:                   headers.Workflow,
+		HTTPStatus:                 opts.HTTPStatus,
+		Vendor:                     routing.Vendor,
+		Model:                      routing.Model,
+		AssuranceScanRan:           routing.ScanRan,
+		InboundFindingsBySeverity:  routing.InboundFindings,
+		OutboundFindingsBySeverity: routing.OutboundFindings,
 	}
 	var tokenAcct *TokenAccounting
 	if routing.UsageSet {
@@ -200,6 +211,15 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		tokenAcct = ta
 	}
 
+	var assuranceSummary *AssuranceSummary
+	if routing.ScanRan {
+		assuranceSummary = &AssuranceSummary{
+			InboundFindings:  routing.InboundFindings,
+			OutboundFindings: routing.OutboundFindings,
+			WorstSeverity:    worstSeverityIn(routing.InboundFindings, routing.OutboundFindings),
+		}
+	}
+
 	respEvent := ResponseEvent{
 		ResponseEventID:   respID,
 		RequestEventID:    reqID,
@@ -214,6 +234,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		ContentChunkCount: snap.ContentChunkCount,
 		EventTimestamps:   snap,
 		TokenAccounting:   tokenAcct,
+		Assurance:         assuranceSummary,
 		CLEAR:             clear.Compute(clearInput),
 		ScoringVersion:    ScoringVersion,
 		GatewayVersion:    GatewayVersion,
@@ -280,6 +301,20 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// worstSeverityIn returns the highest severity present across either
+// the inbound or outbound finding-count maps. Empty string means no
+// findings recorded. Mirrors the bucketing in pkg/clear's
+// scoreAssurance so the AssuranceSummary surfaces the same severity
+// the score was derived from.
+func worstSeverityIn(in, out map[string]int) string {
+	for _, sev := range []string{"critical", "high", "medium", "low"} {
+		if in[sev] > 0 || out[sev] > 0 {
+			return sev
+		}
+	}
+	return ""
 }
 
 // isStreaming inspects the request to decide whether it asked for a

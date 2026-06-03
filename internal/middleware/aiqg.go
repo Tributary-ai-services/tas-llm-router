@@ -228,6 +228,9 @@ func routingView(r *Routing) events.RoutingView {
 		PromptTokens:     s.PromptTokens,
 		CompletionTokens: s.CompletionTokens,
 		UsageSet:         s.UsageSet,
+		InboundFindings:  s.InboundFindings,
+		OutboundFindings: s.OutboundFindings,
+		ScanRan:          s.ScanRan,
 	}
 }
 

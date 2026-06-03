@@ -80,9 +80,17 @@ type Input struct {
 	PromptTokens     *int
 	CompletionTokens *int
 
+	// From the Gatekeeper scan. AssuranceScanRan distinguishes "scan
+	// ran, no findings" (the Healthy=100 case) from "scan didn't run"
+	// (the nil case — typically a non-AIQG path or a Gatekeeper-
+	// disabled deployment). The maps are keyed by severity strings:
+	// "low" / "medium" / "high" / "critical".
+	AssuranceScanRan           bool
+	InboundFindingsBySeverity  map[string]int
+	OutboundFindingsBySeverity map[string]int
+
 	// Future-slice inputs (left for forward compatibility):
 	//   ResponseBodyValid              *bool      // Efficacy structural
-	//   ComplianceFindingCount         *int       // Assurance
 	//   RetryObserved                  *bool      // Reliability
 }
 
@@ -98,9 +106,10 @@ type Input struct {
 // type alias.
 func Compute(in Input) *Scores {
 	s := &Scores{
-		Latency: scoreLatency(in),
-		Cost:    scoreCost(in),
-		// Efficacy/Assurance/Reliability remain nil — future slices.
+		Latency:   scoreLatency(in),
+		Cost:      scoreCost(in),
+		Assurance: scoreAssurance(in),
+		// Efficacy/Reliability remain nil — future slices.
 	}
 	s.Composite = composite(s)
 	if s.Composite != nil {

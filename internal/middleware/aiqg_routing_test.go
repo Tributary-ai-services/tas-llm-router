@@ -128,6 +128,68 @@ func TestRouting_StampTokenUsageZeroIsValid(t *testing.T) {
 	}
 }
 
+// StampGatekeeperFindings: ScanRan flips true even on empty counts,
+// per-direction max-aggregates, and direction param selects target map.
+func TestRouting_StampGatekeeperFindings(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+
+	if r.Snapshot().ScanRan {
+		t.Errorf("ScanRan=true before any stamp")
+	}
+
+	// Empty counts: scan ran, no findings — ScanRan flips true.
+	StampGatekeeperFindings(ctx, GatekeeperDirectionInbound, map[string]int{})
+	if !r.Snapshot().ScanRan {
+		t.Errorf("ScanRan should be true after empty inbound stamp")
+	}
+
+	// Stamp inbound findings.
+	StampGatekeeperFindings(ctx, GatekeeperDirectionInbound, map[string]int{"medium": 2, "high": 1})
+	s := r.Snapshot()
+	if s.InboundFindings["medium"] != 2 || s.InboundFindings["high"] != 1 {
+		t.Errorf("inbound stamps: %v", s.InboundFindings)
+	}
+	if len(s.OutboundFindings) != 0 {
+		t.Errorf("outbound should be empty: %v", s.OutboundFindings)
+	}
+
+	// Stamp outbound findings, separately.
+	StampGatekeeperFindings(ctx, GatekeeperDirectionOutbound, map[string]int{"critical": 1})
+	s2 := r.Snapshot()
+	if s2.OutboundFindings["critical"] != 1 {
+		t.Errorf("outbound stamp: %v", s2.OutboundFindings)
+	}
+
+	// Subsequent inbound stamp with HIGHER counts wins (max-aggregate).
+	StampGatekeeperFindings(ctx, GatekeeperDirectionInbound, map[string]int{"medium": 5})
+	if r.Snapshot().InboundFindings["medium"] != 5 {
+		t.Errorf("max-aggregate failed")
+	}
+	// LOWER counts ignored.
+	StampGatekeeperFindings(ctx, GatekeeperDirectionInbound, map[string]int{"medium": 1})
+	if r.Snapshot().InboundFindings["medium"] != 5 {
+		t.Errorf("lower count overwrote higher")
+	}
+}
+
+// Snapshot must return a copy — mutating it should not race future stamps.
+func TestRouting_SnapshotIsCopy(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+	StampGatekeeperFindings(ctx, GatekeeperDirectionInbound, map[string]int{"low": 1})
+	s := r.Snapshot()
+	s.InboundFindings["low"] = 999
+	if r.Snapshot().InboundFindings["low"] == 999 {
+		t.Errorf("Snapshot returned live map, not a copy")
+	}
+}
+
+func TestRouting_StampFindings_NilSafe(t *testing.T) {
+	// No collector in ctx — must not panic.
+	StampGatekeeperFindings(context.Background(), GatekeeperDirectionInbound, map[string]int{"high": 1})
+}
+
 func TestRouting_ConcurrentStamps(t *testing.T) {
 	r := NewRouting()
 	ctx := WithRouting(context.Background(), r)
