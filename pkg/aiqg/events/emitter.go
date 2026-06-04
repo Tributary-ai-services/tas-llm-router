@@ -43,6 +43,11 @@ type LogEmitter struct {
 
 // Emit logs both envelopes at INFO with the CloudEvents type as a field
 // for downstream filtering (LogQL: `{...} | json | type="com.tas.aiqg.request.v1"`).
+//
+// Top-level fields are promoted via WithFields so LogQL can query them
+// directly (e.g. `{...} | json | clear_composite > 75`) without
+// double-parsing the embedded `payload` string. The payload itself is
+// kept verbatim for consumers that want the full envelope.
 func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseEnvelope) error {
 	if e.Logger == nil {
 		return nil
@@ -55,13 +60,32 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 	if err != nil {
 		return err
 	}
-	e.Logger.WithFields(logrus.Fields{
+
+	reqFields := logrus.Fields{
 		"ce_type":          req.Type,
 		"ce_id":            req.ID,
 		"request_event_id": req.Data.RequestEventID,
 		"payload":          string(reqJSON),
-	}).Info("aiqg request event")
-	e.Logger.WithFields(logrus.Fields{
+		// Routing + attribution — empty strings stay empty in JSON but
+		// LogQL can still filter on them when populated.
+		"vendor":           req.Data.Vendor,
+		"model":            req.Data.Model,
+		"endpoint":         req.Data.Endpoint,
+		"workflow":         req.Data.Workflow,
+		"streaming":        req.Data.Streaming,
+		"region":           req.Data.Region,
+		"tenant_id":        req.Data.TenantID,
+		"aiqg_account_id":  req.Data.AIQGAccountID,
+		"source_app":       req.Data.SourceApp,
+		"dry_run":          req.Data.DryRun,
+		"gateway_version":  req.Data.GatewayVersion,
+	}
+	if req.Data.PolicyBundle != "" {
+		reqFields["policy_bundle"] = req.Data.PolicyBundle
+	}
+	e.Logger.WithFields(reqFields).Info("aiqg request event")
+
+	respFields := logrus.Fields{
 		"ce_type":           resp.Type,
 		"ce_id":             resp.ID,
 		"response_event_id": resp.Data.ResponseEventID,
@@ -69,8 +93,51 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		"http_status":       resp.Data.HTTPStatus,
 		"status":            resp.Data.Status,
 		"chunk_count":       resp.Data.ChunkCount,
+		"streamed":          resp.Data.Streamed,
+		"finish_reason":     resp.Data.FinishReason,
+		"tenant_id":         resp.Data.TenantID,
+		"aiqg_account_id":   resp.Data.AIQGAccountID,
+		"gateway_version":   resp.Data.GatewayVersion,
+		"scoring_version":   resp.Data.ScoringVersion,
 		"payload":           string(respJSON),
-	}).Info("aiqg response event")
+	}
+	// Token accounting — nil-safe; either fully populated or omitted.
+	if ta := resp.Data.TokenAccounting; ta != nil {
+		respFields["prompt_tokens"] = ta.PromptTokens
+		respFields["completion_tokens"] = ta.CompletionTokens
+		respFields["total_tokens"] = ta.TotalTokens
+		respFields["total_cost_usd"] = ta.TotalCostUSD
+	}
+	// CLEAR scores — pointer-fielded; promote each non-nil dimension.
+	if c := resp.Data.CLEAR; c != nil {
+		if c.Cost != nil {
+			respFields["clear_cost"] = *c.Cost
+		}
+		if c.Latency != nil {
+			respFields["clear_latency"] = *c.Latency
+		}
+		if c.Efficacy != nil {
+			respFields["clear_efficacy"] = *c.Efficacy
+		}
+		if c.Assurance != nil {
+			respFields["clear_assurance"] = *c.Assurance
+		}
+		if c.Reliability != nil {
+			respFields["clear_reliability"] = *c.Reliability
+		}
+		if c.Composite != nil {
+			respFields["clear_composite"] = *c.Composite
+		}
+	}
+	// Assurance summary — counts always emit, worst severity when set.
+	if a := resp.Data.Assurance; a != nil {
+		respFields["assurance_inbound_count"] = a.InboundCount
+		respFields["assurance_outbound_count"] = a.OutboundCount
+		if a.WorstSeverity != "" {
+			respFields["assurance_worst_severity"] = a.WorstSeverity
+		}
+	}
+	e.Logger.WithFields(respFields).Info("aiqg response event")
 	return nil
 }
 
