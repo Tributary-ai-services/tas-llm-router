@@ -19,8 +19,18 @@ RUN go mod download
 # Copy source code
 COPY tas-llm-router/ .
 
-# Build with nohs tag (regexp engine, no CGO/Hyperscan needed)
-RUN CGO_ENABLED=0 GOOS=linux go build -tags nohs -a -installsuffix cgo -o llm-router ./cmd/llm-router/main.go
+# Build-time version stamp for AIQG events. The events package reads
+# this via -ldflags "-X .../events.GatewayVersion=<value>" so emitted
+# events carry a stable identifier (git short-SHA) instead of the
+# baked-in "dev" default. Default kept as "dev" so unset builds still
+# produce a meaningful value.
+ARG GATEWAY_VERSION=dev
+
+# Build with nohs tag (regexp engine, no CGO/Hyperscan needed).
+# -ldflags overrides pkg/aiqg/events.GatewayVersion at link time.
+RUN CGO_ENABLED=0 GOOS=linux go build -tags nohs -a -installsuffix cgo \
+    -ldflags "-X github.com/tributary-ai/llm-router-waf/pkg/aiqg/events.GatewayVersion=${GATEWAY_VERSION}" \
+    -o llm-router ./cmd/llm-router/main.go
 
 # Runtime stage
 FROM alpine:latest
