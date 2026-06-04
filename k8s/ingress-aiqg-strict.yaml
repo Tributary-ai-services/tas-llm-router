@@ -1,0 +1,50 @@
+# Customer-facing AIQG ingress per build-vs-reuse §7.3.
+# Routes gateway.aiqg.tas.io to the strict-mode Deployment, which
+# 401s any request missing TAS-Auth or Authorization.
+#
+# Uses the in-cluster tas-ca-issuer (per CLAUDE.md memory) rather
+# than letsencrypt-prod because this is currently a dev / internal-
+# DNS-only endpoint. Switch to letsencrypt-prod when external DNS +
+# real customer access lands.
+#
+# DNS: gateway.aiqg.tas.io must resolve to the NGINX LoadBalancer IP
+# (192.168.68.240 per CLAUDE.md memory). Wildcard *.tas.scharber.com
+# already covers `tas.scharber.com` hosts; this uses a separate
+# subdomain so a new DNS record may be needed (or wildcard for
+# *.aiqg.tas.scharber.com depending on issuer).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-router-aiqg-ingress
+  namespace: tas-llm-router
+  labels:
+    app: llm-router-aiqg
+    aiqg-mode: strict
+  annotations:
+    cert-manager.io/cluster-issuer: "tas-ca-issuer"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    # Tighter rate limit on the customer-facing surface — internal
+    # callers stay on the existing llm-router.tas.scharber.com host
+    # with its higher cap.
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - gateway.aiqg.tas.scharber.com
+    secretName: llm-router-aiqg-tls
+  rules:
+  - host: gateway.aiqg.tas.scharber.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: llm-router-aiqg
+            port:
+              number: 8086

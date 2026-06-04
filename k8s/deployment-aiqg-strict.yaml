@@ -1,0 +1,140 @@
+# Customer-facing strict-mode Deployment for the AIQG gateway.
+#
+# Same binary as the internal Deployment; the only behavioral
+# difference is AIQG_STRICT=true via the env override below, which
+# flips the Path A middleware into "401 on missing TAS-Auth or
+# Authorization" mode (per build-vs-reuse §7.3 strict resolution).
+#
+# Shares the same llm-router-config ConfigMap (via envFrom) and the
+# same llm-router-secret API-keys Secret. The AIQG_STRICT override
+# in env: takes precedence over the ConfigMap value (which is false
+# for the internal Deployment).
+#
+# Token-resolver Secret (llm-router-aiqg-tokens) is mounted optional;
+# until populated, even strict mode accepts any TAS-Auth as opaque
+# per the documented incremental-rollout path (PRs #22, #26).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-router-aiqg
+  namespace: tas-llm-router
+  labels:
+    app: llm-router-aiqg
+    aiqg-mode: strict
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: llm-router-aiqg
+  template:
+    metadata:
+      labels:
+        app: llm-router-aiqg
+        aiqg-mode: strict
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8086"
+        prometheus.io/path: "/metrics"
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z postgres-shared.tas-shared 5432; do echo waiting for postgres; sleep 2; done']
+      - name: wait-for-redis
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z redis-shared.tas-shared 6379; do echo waiting for redis; sleep 2; done']
+
+      containers:
+      - name: llm-router
+        image: llm-router:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8086
+          name: http
+          protocol: TCP
+
+        envFrom:
+        - configMapRef:
+            name: llm-router-config
+        - secretRef:
+            name: llm-router-secret
+
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        # Strict-mode override — wins over the AIQG_STRICT value in
+        # the ConfigMap (which is "false" for the internal Deployment).
+        - name: AIQG_STRICT
+          value: "true"
+        # Shared token store with the internal Deployment.
+        - name: AIQG_TOKENS_FILE
+          value: /app/secrets/aiqg/aiqg-tokens.yaml
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8086
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8086
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /app/cache
+        - name: aiqg-tokens
+          mountPath: /app/secrets/aiqg
+          readOnly: true
+
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: aiqg-tokens
+        secret:
+          secretName: llm-router-aiqg-tokens
+          optional: true
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values: ["llm-router-aiqg"]
+              topologyKey: kubernetes.io/hostname
