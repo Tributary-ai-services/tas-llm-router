@@ -12,6 +12,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
+	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 )
 
 func TestStatusFromHTTP(t *testing.T) {
@@ -306,6 +307,160 @@ func TestLogEmitter(t *testing.T) {
 
 	// Nil logger must not panic.
 	(&LogEmitter{Logger: nil}).Emit(context.Background(), reqEnv, respEnv)
+}
+
+// fieldCapture is a logrus hook that captures every emitted Entry's
+// Data map for inspection. Used to verify the top-level field
+// promotions on LogEmitter.
+type fieldCapture struct {
+	entries []map[string]any
+}
+
+func (f *fieldCapture) Levels() []logrus.Level { return logrus.AllLevels }
+func (f *fieldCapture) Fire(e *logrus.Entry) error {
+	row := map[string]any{"msg": e.Message}
+	for k, v := range e.Data {
+		row[k] = v
+	}
+	f.entries = append(f.entries, row)
+	return nil
+}
+
+// Field-promotion test: nested values should ride as top-level logrus
+// fields so LogQL can filter on them directly without parsing payload.
+func TestLogEmitter_PromotesNestedFields(t *testing.T) {
+	cap := &fieldCapture{}
+	l := logrus.New()
+	l.SetOutput(testWriter{t})
+	l.AddHook(cap)
+	e := &LogEmitter{Logger: l}
+
+	cost, latency, composite := int16(80), int16(95), int16(88)
+	reqEnv := RequestEnvelope{
+		Type: TypeRequest, ID: "req-1",
+		Data: RequestEvent{
+			RequestEventID: "req-1",
+			Vendor:         "openai",
+			Model:          "gpt-4o-mini",
+			Endpoint:       "/v1/chat/completions",
+			Workflow:       "rag",
+			TenantID:       "tenant-a",
+			AIQGAccountID:  "account-a",
+			SourceApp:      "billing",
+			Streaming:      true,
+			DryRun:         false,
+			GatewayVersion: "aiqg-v5.5+test",
+			PolicyBundle:   "prod-strict",
+		},
+	}
+	respEnv := ResponseEnvelope{
+		Type: TypeResponse, ID: "resp-1",
+		Data: ResponseEvent{
+			ResponseEventID: "resp-1",
+			RequestEventID:  "req-1",
+			Status:          StatusSuccess,
+			HTTPStatus:      200,
+			Streamed:        true,
+			ChunkCount:      42,
+			FinishReason:    "stop",
+			TenantID:        "tenant-a",
+			AIQGAccountID:   "account-a",
+			GatewayVersion:  "aiqg-v5.5+test",
+			ScoringVersion:  "clear-v0.1-mvp",
+			TokenAccounting: &TokenAccounting{
+				PromptTokens:     100,
+				CompletionTokens: 200,
+				TotalTokens:      300,
+				TotalCostUSD:     0.0012,
+			},
+			Assurance: &AssuranceSummary{
+				InboundCount:  2,
+				OutboundCount: 0,
+				WorstSeverity: "medium",
+			},
+		},
+	}
+	// Wire a clear.Scores manually — events imports pkg/clear so this
+	// avoids re-importing it in the test by spinning up a minimal one.
+	// We rely on the LogEmitter's nil-safe code path: if CLEAR is nil
+	// the promoted fields are simply absent. For a population test
+	// we set the field by writing the marshalled JSON; here we use
+	// a helper that constructs the Scores directly.
+	respEnv.Data.CLEAR = makeScoresForTest(&cost, &latency, &composite)
+
+	if err := e.Emit(context.Background(), reqEnv, respEnv); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if len(cap.entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(cap.entries))
+	}
+
+	req := cap.entries[0]
+	requireField(t, req, "vendor", "openai")
+	requireField(t, req, "model", "gpt-4o-mini")
+	requireField(t, req, "workflow", "rag")
+	requireField(t, req, "tenant_id", "tenant-a")
+	requireField(t, req, "source_app", "billing")
+	requireField(t, req, "streaming", true)
+	requireField(t, req, "policy_bundle", "prod-strict")
+
+	resp := cap.entries[1]
+	requireField(t, resp, "status", StatusSuccess)
+	requireField(t, resp, "streamed", true)
+	requireField(t, resp, "finish_reason", "stop")
+	requireField(t, resp, "prompt_tokens", 100)
+	requireField(t, resp, "total_tokens", 300)
+	requireField(t, resp, "total_cost_usd", 0.0012)
+	requireField(t, resp, "clear_cost", int16(80))
+	requireField(t, resp, "clear_latency", int16(95))
+	requireField(t, resp, "clear_composite", int16(88))
+	requireField(t, resp, "assurance_inbound_count", 2)
+	requireField(t, resp, "assurance_outbound_count", 0)
+	requireField(t, resp, "assurance_worst_severity", "medium")
+}
+
+// Empty/nil nested structs leave their promoted fields absent without
+// panicking — important because not every request has TokenAccounting,
+// CLEAR, or Assurance populated.
+func TestLogEmitter_NilNestedStructs(t *testing.T) {
+	cap := &fieldCapture{}
+	l := logrus.New()
+	l.SetOutput(testWriter{t})
+	l.AddHook(cap)
+	e := &LogEmitter{Logger: l}
+
+	if err := e.Emit(context.Background(),
+		RequestEnvelope{Type: TypeRequest, ID: "r"},
+		ResponseEnvelope{Type: TypeResponse, ID: "s", Data: ResponseEvent{Status: StatusGatewayError}},
+	); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	resp := cap.entries[1]
+	// CLEAR / TokenAccounting / Assurance all nil — promoted fields absent.
+	for _, absent := range []string{
+		"clear_cost", "clear_composite", "prompt_tokens", "total_cost_usd",
+		"assurance_inbound_count", "assurance_worst_severity",
+	} {
+		if _, ok := resp[absent]; ok {
+			t.Errorf("field %q should be absent when nested struct is nil", absent)
+		}
+	}
+}
+
+func requireField(t *testing.T, fields map[string]any, key string, want any) {
+	t.Helper()
+	got, ok := fields[key]
+	if !ok {
+		t.Errorf("field %q missing", key)
+		return
+	}
+	if got != want {
+		t.Errorf("field %q = %v (%T), want %v (%T)", key, got, got, want, want)
+	}
+}
+
+func makeScoresForTest(cost, latency, composite *int16) *clear.Scores {
+	return &clear.Scores{Cost: cost, Latency: latency, Composite: composite}
 }
 
 func TestMemoryEmitter(t *testing.T) {
