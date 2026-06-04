@@ -737,6 +737,50 @@ func TestAIQG_ContentFilterScoresEfficacy0(t *testing.T) {
 	}
 }
 
+// Retry metadata stamped by the handler reaches CLEAR.Reliability.
+// Clean first try → 100. Validates the four-stamp wire-up of the
+// final CLEAR dimension.
+func TestAIQG_RetryMetadataStampedReachesReliability(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampRetryMetadata(r.Context(), 1, false) // clean first try
+		w.WriteHeader(http.StatusOK)
+	})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	rd := em.Responses()[0].Data
+	if rd.CLEAR.Reliability == nil || *rd.CLEAR.Reliability != 100 {
+		t.Errorf("Reliability=%v want=100", rd.CLEAR.Reliability)
+	}
+}
+
+// Retry + fallback degrades Reliability.
+func TestAIQG_RetryWithFallbackDegradesReliability(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampRetryMetadata(r.Context(), 2, true) // 1 retry + fallback = 50
+		w.WriteHeader(http.StatusOK)
+	})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	rd := em.Responses()[0].Data
+	if rd.CLEAR.Reliability == nil || *rd.CLEAR.Reliability != 50 {
+		t.Errorf("Reliability=%v want=50", rd.CLEAR.Reliability)
+	}
+}
+
 // Vendor/Model stamps made by the downstream handler must reach the
 // emitted event. Proves the Routing sidecar (attached by middleware) +
 // the deferred snapshot read both work end-to-end.
@@ -822,7 +866,7 @@ func TestAIQG_EmittedEventCarriesCLEARScores(t *testing.T) {
 		t.Errorf("CLEAR.Assurance should be nil when no scan stamped, got %d", *respEnv.Data.CLEAR.Assurance)
 	}
 	if respEnv.Data.CLEAR.Reliability != nil {
-		t.Errorf("CLEAR.Reliability should be nil at MVP (retry detection not built)")
+		t.Errorf("CLEAR.Reliability should be nil when no retry metadata stamped, got %d", *respEnv.Data.CLEAR.Reliability)
 	}
 	if respEnv.Data.ScoringVersion == "" {
 		t.Errorf("ScoringVersion must be present even with partial scoring")

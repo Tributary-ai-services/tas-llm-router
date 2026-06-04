@@ -232,6 +232,9 @@ func routingView(r *Routing) events.RoutingView {
 		OutboundFindings: s.OutboundFindings,
 		ScanRan:          s.ScanRan,
 		FinishReason:     s.FinishReason,
+		AttemptCount:     s.AttemptCount,
+		FallbackUsed:     s.FallbackUsed,
+		RetrySet:         s.RetrySet,
 	}
 }
 

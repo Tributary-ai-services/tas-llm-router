@@ -228,6 +228,42 @@ func TestRouting_StampFinishReason_NilSafe(t *testing.T) {
 	StampFinishReason(context.Background(), "stop") // no panic
 }
 
+func TestRouting_StampRetryMetadata(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+
+	if r.Snapshot().RetrySet {
+		t.Errorf("RetrySet true before stamp")
+	}
+
+	StampRetryMetadata(ctx, 2, true)
+	s := r.Snapshot()
+	if !s.RetrySet || s.AttemptCount != 2 || !s.FallbackUsed {
+		t.Errorf("after stamp: %#v", s)
+	}
+
+	// First-write-wins.
+	StampRetryMetadata(ctx, 99, false)
+	if r.Snapshot().AttemptCount != 2 {
+		t.Errorf("not idempotent")
+	}
+}
+
+// attemptCount=0 is a sentinel for "router didn't surface metadata" —
+// stamp must no-op so RetrySet stays false and Reliability stays nil.
+func TestRouting_StampRetryMetadata_ZeroIsNoop(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+	StampRetryMetadata(ctx, 0, false)
+	if r.Snapshot().RetrySet {
+		t.Errorf("RetrySet=true after attemptCount=0 stamp")
+	}
+}
+
+func TestRouting_StampRetryMetadata_NilSafe(t *testing.T) {
+	StampRetryMetadata(context.Background(), 1, false) // no panic
+}
+
 func TestRouting_ConcurrentStamps(t *testing.T) {
 	r := NewRouting()
 	ctx := WithRouting(context.Background(), r)

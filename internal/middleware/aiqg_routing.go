@@ -41,6 +41,12 @@ type Routing struct {
 	// "tool_calls" / "function_call". Empty string means unset (no
 	// vendor response). First-write-wins like the other stampers.
 	finishReason string
+
+	// Routing-layer retry metadata for the MVP Reliability proxy.
+	// attemptCount=0 means unset; 1 = clean first try.
+	attemptCount int
+	fallbackUsed bool
+	retrySet     bool
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -80,6 +86,13 @@ type RoutingSnapshot struct {
 	// the vendor never returned one (gateway-blocked, streaming
 	// truncation).
 	FinishReason string
+
+	// Routing-layer retry signals (from types.RouterMetadata).
+	// RetrySet distinguishes "router didn't surface metadata" (no
+	// score) from "1 attempt, no fallback" (Healthy score).
+	AttemptCount int
+	FallbackUsed bool
+	RetrySet     bool
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -100,6 +113,9 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		OutboundFindings: copyCounts(r.outboundFindings),
 		ScanRan:          r.scanRan,
 		FinishReason:     r.finishReason,
+		AttemptCount:     r.attemptCount,
+		FallbackUsed:     r.fallbackUsed,
+		RetrySet:         r.retrySet,
 	}
 }
 
@@ -222,6 +238,33 @@ func StampFinishReason(ctx context.Context, reason string) {
 	defer r.mu.Unlock()
 	if r.finishReason == "" {
 		r.finishReason = reason
+	}
+}
+
+// StampRetryMetadata records the routing layer's per-request retry
+// outcome — attempt count and whether a cross-provider fallback fired.
+// Drives the MVP Reliability score. First-write-wins; subsequent calls
+// are ignored so the authoritative end-of-request value sticks.
+//
+// Calling with attemptCount=0 is treated as a no-op (the routing layer
+// didn't surface metadata for this request) so RetrySet stays false
+// and Reliability stays nil. Pass attemptCount>=1 once the router
+// returns metadata, even if no retries fired (1 = clean first try,
+// which scores 100).
+func StampRetryMetadata(ctx context.Context, attemptCount int, fallbackUsed bool) {
+	if attemptCount <= 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.retrySet {
+		r.attemptCount = attemptCount
+		r.fallbackUsed = fallbackUsed
+		r.retrySet = true
 	}
 }
 

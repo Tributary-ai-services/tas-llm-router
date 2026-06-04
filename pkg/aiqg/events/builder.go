@@ -60,6 +60,14 @@ type RoutingView struct {
 	// to populate ResponseEvent.FinishReason (taking precedence
 	// over the BuildOptions value) and to drive clear.Efficacy.
 	FinishReason string
+
+	// Routing-layer retry signals from types.RouterMetadata. Drive
+	// the MVP Reliability score (a gateway-fulfillment proxy for
+	// the spec's pass@k). RetrySet=false means the routing layer
+	// didn't surface metadata and Reliability stays nil.
+	AttemptCount int
+	FallbackUsed bool
+	RetrySet     bool
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -204,6 +212,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		InboundFindingsBySeverity:  routing.InboundFindings,
 		OutboundFindingsBySeverity: routing.OutboundFindings,
 		FinishReason:               finishReason,
+		AttemptCount:               routing.AttemptCount,
+		FallbackUsed:               routing.FallbackUsed,
 	}
 	var tokenAcct *TokenAccounting
 	if routing.UsageSet {
