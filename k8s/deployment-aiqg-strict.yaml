@@ -85,18 +85,26 @@ spec:
         - name: AIQG_TOKENS_FILE
           value: /app/secrets/aiqg/aiqg-tokens.yaml
 
+        # tcpSocket (not httpGet /health) matches the live internal
+        # Deployment pattern. The /health endpoint legitimately returns
+        # 503 in some configurations (Gatekeeper degraded, upstream
+        # checks failing) which kills the liveness probe; tcpSocket
+        # only checks that the process is binding the port. The
+        # /health endpoint itself remains available for ad-hoc probing.
         livenessProbe:
-          httpGet:
-            path: /health
+          tcpSocket:
             port: 8086
           initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         readinessProbe:
-          httpGet:
-            path: /health
+          tcpSocket:
             port: 8086
-          initialDelaySeconds: 5
+          initialDelaySeconds: 10
           periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
 
         securityContext:
           runAsNonRoot: true
