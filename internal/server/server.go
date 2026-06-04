@@ -18,7 +18,10 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Server represents the HTTP server
@@ -50,6 +53,20 @@ type ServerConfig struct {
 	Security       *middleware.SecurityMiddlewareConfig `yaml:"security"`
 	Validation     *middleware.ValidationConfig         `yaml:"validation"`
 	AIQG           *AIQGServerConfig                    `yaml:"aiqg"`
+}
+
+// aiqgMetricsAdapter implements events.EmitMetricsRecorder by
+// delegating to pkg/aiqg/metrics. Defined here (in internal/server)
+// because pkg/aiqg/events deliberately avoids importing prometheus
+// directly — this is the seam where the dep crosses.
+type aiqgMetricsAdapter struct{}
+
+func (aiqgMetricsAdapter) ObserveEmit(emitter string, start time.Time, errPtr *error) {
+	metrics.ObserveEmit(emitter, start, errPtr)
+}
+
+func (aiqgMetricsAdapter) RecordEvent(resp events.ResponseEnvelope) {
+	metrics.RecordEvent(resp)
 }
 
 // AIQGServerConfig configures the AIQG ingress wire-up.
@@ -109,6 +126,12 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 	// collector + parsed headers attached to ctx, paired CloudEvents
 	// emitted on response completion via LogEmitter → logrus → Loki.
 	if config.AIQG != nil && config.AIQG.Enabled {
+		// Wire the AIQG events package to push per-emit metrics into the
+		// pkg/aiqg/metrics registry. The events package keeps its
+		// recorder interface so it doesn't take a prometheus dep
+		// directly; this server-side adapter is the bridge.
+		events.MetricsRecorder = aiqgMetricsAdapter{}
+
 		server.aiqgEmitter = &events.LogEmitter{Logger: logger}
 
 		// Build the token resolver when tokens are configured. Without
@@ -240,8 +263,12 @@ func (s *Server) setupRoutes() *mux.Router {
 	// Health check endpoint (no /v1 prefix)
 	r.HandleFunc("/health", s.handleHealthCheck).Methods("GET")
 
-	// Metrics endpoint for Prometheus scraping
+	// Metrics endpoint for Prometheus scraping (legacy hand-rolled).
 	r.HandleFunc("/metrics", s.handleMetrics).Methods("GET")
+
+	// AIQG metrics endpoint — separate registry served via promhttp.
+	// Scraped independently by Prometheus per shared-monitoring config.
+	r.Handle("/aiqg/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{})).Methods("GET")
 
 	// Swagger UI documentation endpoints
 	s.setupSwaggerRoutes(r)

@@ -4,9 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
+
+// EmitMetricsRecorder is the minimal interface emitters use to push
+// per-emit metrics. Lives here (not in pkg/aiqg/metrics) so this
+// package doesn't take a build-time dep on prometheus client_golang
+// just to instrument. Production wires pkg/aiqg/metrics; tests can
+// inject a no-op or capture-recorder.
+type EmitMetricsRecorder interface {
+	ObserveEmit(emitter string, start time.Time, errPtr *error)
+	RecordEvent(resp ResponseEnvelope)
+}
+
+// MetricsRecorder is the active recorder. Nil means metrics are
+// silently dropped — useful for tests and for non-AIQG callers that
+// happen to use these types. Wire production via
+// events.MetricsRecorder = metricsAdapter{} at server startup.
+var MetricsRecorder EmitMetricsRecorder
+
+func recordEmit(emitter string, start time.Time, errPtr *error, resp ResponseEnvelope) {
+	if MetricsRecorder == nil {
+		return
+	}
+	MetricsRecorder.ObserveEmit(emitter, start, errPtr)
+	MetricsRecorder.RecordEvent(resp)
+}
 
 // Emitter publishes paired (request, response) AIQG events. The pair
 // is emitted atomically from the caller's perspective — concrete
@@ -28,7 +53,9 @@ type Emitter interface {
 // emitter is unconfigured — caller-side code should not have to nil-check.
 type NoopEmitter struct{}
 
-// Emit returns nil. Always.
+// Emit returns nil. Always. Intentionally not instrumented — noop
+// emitter is the "AIQG disabled" path and shouldn't register as
+// traffic in the metrics.
 func (NoopEmitter) Emit(_ context.Context, _ RequestEnvelope, _ ResponseEnvelope) error {
 	return nil
 }
@@ -48,16 +75,19 @@ type LogEmitter struct {
 // directly (e.g. `{...} | json | clear_composite > 75`) without
 // double-parsing the embedded `payload` string. The payload itself is
 // kept verbatim for consumers that want the full envelope.
-func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseEnvelope) error {
+func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseEnvelope) (err error) {
+	defer recordEmit("log", time.Now(), &err, resp)
 	if e.Logger == nil {
 		return nil
 	}
-	reqJSON, err := json.Marshal(req)
-	if err != nil {
+	reqJSON, mErr := json.Marshal(req)
+	if mErr != nil {
+		err = mErr
 		return err
 	}
-	respJSON, err := json.Marshal(resp)
-	if err != nil {
+	respJSON, mErr := json.Marshal(resp)
+	if mErr != nil {
+		err = mErr
 		return err
 	}
 
@@ -150,7 +180,8 @@ type MemoryEmitter struct {
 }
 
 // Emit appends both envelopes to the internal slices.
-func (e *MemoryEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseEnvelope) error {
+func (e *MemoryEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseEnvelope) (err error) {
+	defer recordEmit("memory", time.Now(), &err, resp)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.requests = append(e.requests, req)
