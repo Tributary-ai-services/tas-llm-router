@@ -69,6 +69,48 @@ func (aiqgMetricsAdapter) RecordEvent(resp events.ResponseEnvelope) {
 	metrics.RecordEvent(resp)
 }
 
+// buildAIQGEmitter constructs the Emitter per the configured type.
+//   "" or "log" → LogEmitter (default; no infra required)
+//   "kafka"     → KafkaEmitter only
+//   "both"      → MultiEmitter fanning to log + kafka
+// Unknown values fall back to log with a warning so a typo doesn't
+// crash the deployment.
+func buildAIQGEmitter(cfg *AIQGServerConfig, logger *logrus.Logger) (events.Emitter, error) {
+	logEmitter := &events.LogEmitter{Logger: logger}
+
+	switch cfg.EmitterType {
+	case "", "log":
+		return logEmitter, nil
+
+	case "kafka":
+		ke, err := events.NewKafkaEmitter(cfg.Kafka.Brokers, cfg.Kafka.Topic)
+		if err != nil {
+			return nil, err
+		}
+		logger.WithFields(logrus.Fields{
+			"brokers": cfg.Kafka.Brokers,
+			"topic":   cfg.Kafka.Topic,
+		}).Info("AIQG Kafka emitter wired")
+		return ke, nil
+
+	case "both":
+		ke, err := events.NewKafkaEmitter(cfg.Kafka.Brokers, cfg.Kafka.Topic)
+		if err != nil {
+			return nil, err
+		}
+		logger.WithFields(logrus.Fields{
+			"brokers": cfg.Kafka.Brokers,
+			"topic":   cfg.Kafka.Topic,
+		}).Info("AIQG MultiEmitter (log + kafka) wired")
+		return &events.MultiEmitter{Emitters: []events.Emitter{logEmitter, ke}}, nil
+
+	default:
+		logger.WithField("emitter_type", cfg.EmitterType).
+			Warn("unknown AIQG emitter_type; falling back to log emitter")
+		return logEmitter, nil
+	}
+}
+
 // AIQGServerConfig configures the AIQG ingress wire-up.
 //
 // In permissive mode (Strict=false), the middleware mounts on the three
@@ -91,6 +133,26 @@ type AIQGServerConfig struct {
 	// resolver is wired — tokens stay opaque and events carry empty
 	// tenant fields. Suitable for incremental rollout.
 	Tokens []tokens.ConfigToken `yaml:"tokens"`
+
+	// EmitterType selects how AIQG events are published:
+	//   "log"   — logrus → Loki (default; works without infra)
+	//   "kafka" — sarama SyncProducer → Kafka topic (durable, partitioned)
+	//   "both"  — MultiEmitter fans out to both
+	// Empty string defaults to "log" so existing deployments stay on
+	// the current path without explicit config.
+	EmitterType string `yaml:"emitter_type"`
+
+	// Kafka block — read when EmitterType is "kafka" or "both".
+	// Brokers takes a list ("host:9092,host:9092") via env override.
+	Kafka AIQGKafkaConfig `yaml:"kafka"`
+}
+
+// AIQGKafkaConfig configures the Kafka emitter. Brokers + topic are
+// the minimum; production tuning (compression, idempotence) is set
+// inside NewKafkaEmitter.
+type AIQGKafkaConfig struct {
+	Brokers []string `yaml:"brokers"`
+	Topic   string   `yaml:"topic"`
 }
 
 // NewServer creates a new server instance
@@ -132,7 +194,12 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		// directly; this server-side adapter is the bridge.
 		events.MetricsRecorder = aiqgMetricsAdapter{}
 
-		server.aiqgEmitter = &events.LogEmitter{Logger: logger}
+		// Select emitter per config. Default = log (matches prior behavior).
+		emitter, err := buildAIQGEmitter(config.AIQG, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build AIQG emitter: %w", err)
+		}
+		server.aiqgEmitter = emitter
 
 		// Build the token resolver when tokens are configured. Without
 		// a resolver the middleware accepts any TAS-Auth bearer but
@@ -204,7 +271,24 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Flush + close any Kafka producer underneath the AIQG emitter
+	// chain. Walks the MultiEmitter to find KafkaEmitter instances.
+	closeAIQGEmitter(s.aiqgEmitter, s.logger)
+
 	return s.httpServer.Shutdown(ctx)
+}
+
+func closeAIQGEmitter(em events.Emitter, log *logrus.Logger) {
+	switch e := em.(type) {
+	case *events.KafkaEmitter:
+		if err := e.Close(); err != nil {
+			log.WithError(err).Error("Failed to close AIQG Kafka emitter")
+		}
+	case *events.MultiEmitter:
+		for _, inner := range e.Emitters {
+			closeAIQGEmitter(inner, log)
+		}
+	}
 }
 
 // setupRoutes configures all HTTP routes

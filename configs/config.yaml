@@ -169,3 +169,14 @@ aiqg:
   #     aiqg_account_id: "account-a"
   #     source_app: "billing-api-prod"
   #     suspended: false
+
+  # Emitter sink for AIQG events. Env override: AIQG_EMITTER_TYPE.
+  #   "log"   — logrus → Loki (default; works without infra)
+  #   "kafka" — sarama SyncProducer → Kafka topic (durable, partitioned)
+  #   "both"  — fan out to both (transitional / debugging)
+  emitter_type: "log"
+  # Kafka broker config, used when emitter_type is "kafka" or "both".
+  # Env overrides: AIQG_KAFKA_BROKERS (comma-separated), AIQG_KAFKA_TOPIC.
+  kafka:
+    brokers: []
+    topic: ""

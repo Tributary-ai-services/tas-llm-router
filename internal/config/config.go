@@ -42,6 +42,23 @@ type AIQGConfig struct {
 	Strict  bool                  `yaml:"strict"`
 	Region  string                `yaml:"region"`
 	Tokens  []AIQGTokenConfig     `yaml:"tokens"`
+
+	// EmitterType selects the AIQG event sink: "log" (default,
+	// Loki via logrus), "kafka", or "both". Env override:
+	// AIQG_EMITTER_TYPE.
+	EmitterType string `yaml:"emitter_type"`
+
+	// Kafka broker + topic when EmitterType is "kafka" or "both".
+	// Env overrides: AIQG_KAFKA_BROKERS (comma-separated),
+	// AIQG_KAFKA_TOPIC.
+	Kafka AIQGKafkaConfig `yaml:"kafka"`
+}
+
+// AIQGKafkaConfig configures the Kafka emitter. Defined here (not in
+// internal/server) so the YAML loader doesn't import server packages.
+type AIQGKafkaConfig struct {
+	Brokers []string `yaml:"brokers"`
+	Topic   string   `yaml:"topic"`
 }
 
 // AIQGTokenConfig is the in-memory MVP token entry. Mirrors
@@ -403,6 +420,16 @@ func (c *Config) loadFromEnv() {
 	if region := os.Getenv("AIQG_REGION"); region != "" {
 		c.AIQG.Region = region
 	}
+	if et := os.Getenv("AIQG_EMITTER_TYPE"); et != "" {
+		c.AIQG.EmitterType = et
+	}
+	if brokers := os.Getenv("AIQG_KAFKA_BROKERS"); brokers != "" {
+		// Comma-separated list (matches the Kafka client convention).
+		c.AIQG.Kafka.Brokers = splitCommaTrim(brokers)
+	}
+	if topic := os.Getenv("AIQG_KAFKA_TOPIC"); topic != "" {
+		c.AIQG.Kafka.Topic = topic
+	}
 	// AIQG_TOKENS_FILE points to a separate YAML file containing the
 	// token list (typically mounted from a Kubernetes Secret so the
 	// list never sits in a ConfigMap). When set + readable, the file's
@@ -419,6 +446,48 @@ func (c *Config) loadFromEnv() {
 			fmt.Fprintf(os.Stderr, "warning: AIQG_TOKENS_FILE=%q could not be loaded: %v\n", path, err)
 		}
 	}
+}
+
+// splitCommaTrim parses a comma-separated list, trimming whitespace
+// around each entry and dropping empties. Used for env-var lists like
+// AIQG_KAFKA_BROKERS where the convention is `host1:9092,host2:9092`.
+func splitCommaTrim(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range splitOnComma(s) {
+		if t := trimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// Small stdlib indirections kept tight to avoid pulling strings into
+// the config import surface unnecessarily.
+func splitOnComma(s string) []string {
+	out := []string{}
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	out = append(out, s[start:])
+	return out
+}
+
+func trimSpace(s string) string {
+	start, end := 0, len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
 }
 
 // loadAIQGTokensFromFile reads a tokens file and replaces c.AIQG.Tokens
@@ -532,9 +601,14 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		return nil
 	}
 	out := &server.AIQGServerConfig{
-		Enabled: c.AIQG.Enabled,
-		Strict:  c.AIQG.Strict,
-		Region:  c.AIQG.Region,
+		Enabled:     c.AIQG.Enabled,
+		Strict:      c.AIQG.Strict,
+		Region:      c.AIQG.Region,
+		EmitterType: c.AIQG.EmitterType,
+		Kafka: server.AIQGKafkaConfig{
+			Brokers: c.AIQG.Kafka.Brokers,
+			Topic:   c.AIQG.Kafka.Topic,
+		},
 	}
 	if len(c.AIQG.Tokens) > 0 {
 		out.Tokens = make([]tokens.ConfigToken, len(c.AIQG.Tokens))
