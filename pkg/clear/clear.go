@@ -94,9 +94,15 @@ type Input struct {
 	// truncation, vendor outage) — Efficacy stays nil in that case.
 	FinishReason string
 
+	// Routing-layer retry signals for the MVP Reliability proxy
+	// (see pkg/clear/reliability.go). AttemptCount of 0 means the
+	// signal wasn't captured; 1 means clean first try.
+	AttemptCount int
+	FallbackUsed bool
+
 	// Future-slice inputs (left for forward compatibility):
 	//   ResponseBodyValid *bool // Efficacy structural-validity sub-metric
-	//   RetryObserved     *bool // Reliability
+	//   ConversationTurnRetry *bool // Reliability cross-request signal
 }
 
 // Compute runs every dimension scorer against in and returns the
@@ -111,11 +117,11 @@ type Input struct {
 // type alias.
 func Compute(in Input) *Scores {
 	s := &Scores{
-		Latency:   scoreLatency(in),
-		Cost:      scoreCost(in),
-		Assurance: scoreAssurance(in),
-		Efficacy:  scoreEfficacy(in),
-		// Reliability remains nil — future slice.
+		Latency:     scoreLatency(in),
+		Cost:        scoreCost(in),
+		Assurance:   scoreAssurance(in),
+		Efficacy:    scoreEfficacy(in),
+		Reliability: scoreReliability(in),
 	}
 	s.Composite = composite(s)
 	if s.Composite != nil {

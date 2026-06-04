@@ -449,6 +449,9 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
 	}
+	if metadata != nil {
+		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
+	}
 
 	// Add routing metadata to response
 	if resp.RouterMetadata == nil {
@@ -475,6 +478,14 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+
+	// AIQG: stamp the routing-layer retry metadata (drives the MVP
+	// Reliability score). For streaming the metadata is fixed at this
+	// point — the retry chain ran fully before StreamCompletion was
+	// invoked, so the AttemptCount + FallbackUsed are final.
+	if metadata != nil {
+		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
+	}
 
 	// Send routing metadata as first chunk
 	metadataChunk := &types.ChatChunk{
@@ -571,6 +582,9 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
 	}
+	if metadata != nil {
+		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
+	}
 
 	// Add routing metadata to response
 	resp.RouterMetadata = metadata
@@ -615,6 +629,14 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+
+	// AIQG: stamp the routing-layer retry metadata (drives the MVP
+	// Reliability score). For streaming the metadata is fixed at this
+	// point — the retry chain ran fully before StreamCompletion was
+	// invoked, so the AttemptCount + FallbackUsed are final.
+	if metadata != nil {
+		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
+	}
 
 	// Send routing metadata as first chunk
 	metadataChunk := &types.ChatChunk{
