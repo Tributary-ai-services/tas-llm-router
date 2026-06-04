@@ -562,10 +562,14 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 		}
 	}
 
-	// AIQG: stamp the vendor-reported token usage (same as the non-retry
-	// path) so the response event carries TokenAccounting + Cost score.
+	// AIQG: stamp the vendor-reported token usage + finish_reason
+	// (same as the non-retry path) so the response event carries
+	// TokenAccounting + Cost + Efficacy scores.
 	if resp.Usage != nil {
 		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
+	if len(resp.Choices) > 0 {
+		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
 	}
 
 	// Add routing metadata to response
