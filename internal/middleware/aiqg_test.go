@@ -638,6 +638,62 @@ func TestAIQG_GatekeeperFindingsStampedReachEventAndAssurance(t *testing.T) {
 	}
 }
 
+// Clean scan emits AssuranceSummary with concrete count=0 (not just
+// the omitempty-stripped {}). Dashboards need a slice-able number.
+func TestAIQG_CleanScanEmitsExplicitCounts(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampGatekeeperFindings(r.Context(), GatekeeperDirectionInbound, map[string]int{})
+		StampGatekeeperFindings(r.Context(), GatekeeperDirectionOutbound, map[string]int{})
+		w.WriteHeader(http.StatusOK)
+	})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	a := em.Responses()[0].Data.Assurance
+	if a == nil {
+		t.Fatalf("AssuranceSummary nil")
+	}
+	if a.InboundCount != 0 || a.OutboundCount != 0 {
+		t.Errorf("clean scan counts: in=%d out=%d (want 0/0)", a.InboundCount, a.OutboundCount)
+	}
+	// JSON marshalling must produce the int fields, even with value 0
+	// (omitempty would strip the maps but NOT named int fields per
+	// Go's encoding/json semantics for typed int).
+	js, _ := json.Marshal(a)
+	if !strings.Contains(string(js), `"inbound_count":0`) {
+		t.Errorf("inbound_count should always emit, got %s", js)
+	}
+}
+
+// Counts populate correctly from findings.
+func TestAIQG_AssuranceCountsSumFindings(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampGatekeeperFindings(r.Context(), GatekeeperDirectionInbound, map[string]int{"low": 3, "medium": 2})
+		StampGatekeeperFindings(r.Context(), GatekeeperDirectionOutbound, map[string]int{"high": 1})
+		w.WriteHeader(http.StatusOK)
+	})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	a := em.Responses()[0].Data.Assurance
+	if a.InboundCount != 5 {
+		t.Errorf("InboundCount=%d want=5 (3+2)", a.InboundCount)
+	}
+	if a.OutboundCount != 1 {
+		t.Errorf("OutboundCount=%d want=1", a.OutboundCount)
+	}
+}
+
 // Clean scan (ScanRan=true, no findings) → Assurance = 100, summary
 // emitted with empty maps + no worst severity.
 func TestAIQG_CleanScanScoresAssurance100(t *testing.T) {

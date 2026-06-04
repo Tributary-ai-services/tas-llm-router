@@ -239,6 +239,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 	var assuranceSummary *AssuranceSummary
 	if routing.ScanRan {
 		assuranceSummary = &AssuranceSummary{
+			InboundCount:     sumCounts(routing.InboundFindings),
+			OutboundCount:    sumCounts(routing.OutboundFindings),
 			InboundFindings:  routing.InboundFindings,
 			OutboundFindings: routing.OutboundFindings,
 			WorstSeverity:    worstSeverityIn(routing.InboundFindings, routing.OutboundFindings),
@@ -326,6 +328,18 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// sumCounts totals the values in a per-severity count map. Used to
+// populate AssuranceSummary.InboundCount / OutboundCount so dashboards
+// have a concrete number to aggregate even on clean scans (where the
+// per-severity maps would be stripped by omitempty).
+func sumCounts(m map[string]int) int {
+	total := 0
+	for _, v := range m {
+		total += v
+	}
+	return total
 }
 
 // worstSeverityIn returns the highest severity present across either
