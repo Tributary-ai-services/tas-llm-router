@@ -89,9 +89,14 @@ type Input struct {
 	InboundFindingsBySeverity  map[string]int
 	OutboundFindingsBySeverity map[string]int
 
+	// Vendor finish_reason for Efficacy scoring. Empty string means
+	// the vendor never returned one (gateway-blocked, streaming
+	// truncation, vendor outage) — Efficacy stays nil in that case.
+	FinishReason string
+
 	// Future-slice inputs (left for forward compatibility):
-	//   ResponseBodyValid              *bool      // Efficacy structural
-	//   RetryObserved                  *bool      // Reliability
+	//   ResponseBodyValid *bool // Efficacy structural-validity sub-metric
+	//   RetryObserved     *bool // Reliability
 }
 
 // Compute runs every dimension scorer against in and returns the
@@ -109,7 +114,8 @@ func Compute(in Input) *Scores {
 		Latency:   scoreLatency(in),
 		Cost:      scoreCost(in),
 		Assurance: scoreAssurance(in),
-		// Efficacy/Reliability remain nil — future slices.
+		Efficacy:  scoreEfficacy(in),
+		// Reliability remains nil — future slice.
 	}
 	s.Composite = composite(s)
 	if s.Composite != nil {

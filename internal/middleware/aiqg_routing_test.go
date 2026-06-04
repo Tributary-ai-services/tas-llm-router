@@ -190,6 +190,44 @@ func TestRouting_StampFindings_NilSafe(t *testing.T) {
 	StampGatekeeperFindings(context.Background(), GatekeeperDirectionInbound, map[string]int{"high": 1})
 }
 
+func TestRouting_StampFinishReason(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+
+	if r.Snapshot().FinishReason != "" {
+		t.Errorf("FinishReason not empty before stamping")
+	}
+
+	StampFinishReason(ctx, "stop")
+	if got := r.Snapshot().FinishReason; got != "stop" {
+		t.Errorf("FinishReason=%q want=stop", got)
+	}
+
+	// First-write-wins.
+	StampFinishReason(ctx, "length")
+	if got := r.Snapshot().FinishReason; got != "stop" {
+		t.Errorf("FinishReason=%q want=stop (idempotent)", got)
+	}
+}
+
+// Empty-string stamps are no-ops (so an early loop iteration that hasn't
+// seen the final chunk's finish_reason doesn't accidentally lock in "").
+func TestRouting_StampFinishReasonEmptyIsNoop(t *testing.T) {
+	r := NewRouting()
+	ctx := WithRouting(context.Background(), r)
+
+	StampFinishReason(ctx, "")
+	StampFinishReason(ctx, "")
+	StampFinishReason(ctx, "stop") // first real value wins
+	if got := r.Snapshot().FinishReason; got != "stop" {
+		t.Errorf("FinishReason=%q want=stop", got)
+	}
+}
+
+func TestRouting_StampFinishReason_NilSafe(t *testing.T) {
+	StampFinishReason(context.Background(), "stop") // no panic
+}
+
 func TestRouting_ConcurrentStamps(t *testing.T) {
 	r := NewRouting()
 	ctx := WithRouting(context.Background(), r)

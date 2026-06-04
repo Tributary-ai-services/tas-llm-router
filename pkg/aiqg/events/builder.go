@@ -55,6 +55,11 @@ type RoutingView struct {
 	InboundFindings  map[string]int
 	OutboundFindings map[string]int
 	ScanRan          bool
+
+	// Vendor finish_reason captured from the response. Used both
+	// to populate ResponseEvent.FinishReason (taking precedence
+	// over the BuildOptions value) and to drive clear.Efficacy.
+	FinishReason string
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -176,6 +181,15 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		LifecycleState:            LifecyclePairedWithResponse,
 	}
 
+	// Routing's FinishReason wins over BuildOptions.FinishReason when
+	// both are set — the routing sidecar is the authoritative path
+	// (handler-stamped); BuildOptions.FinishReason exists for tests
+	// and synthetic events.
+	finishReason := opts.FinishReason
+	if routing.FinishReason != "" {
+		finishReason = routing.FinishReason
+	}
+
 	// Build the clear.Input once; reuse for the embedded TokenAccounting
 	// dollar cost so Scores and the per-event accounting agree on prices.
 	clearInput := clear.Input{
@@ -189,6 +203,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		AssuranceScanRan:           routing.ScanRan,
 		InboundFindingsBySeverity:  routing.InboundFindings,
 		OutboundFindingsBySeverity: routing.OutboundFindings,
+		FinishReason:               finishReason,
 	}
 	var tokenAcct *TokenAccounting
 	if routing.UsageSet {
@@ -228,7 +243,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		CompleteAt:        completeAt,
 		Status:            status,
 		HTTPStatus:        opts.HTTPStatus,
-		FinishReason:      opts.FinishReason,
+		FinishReason:      finishReason,
 		Streamed:          snap.ChunkCount > 0,
 		ChunkCount:        snap.ChunkCount,
 		ContentChunkCount: snap.ContentChunkCount,

@@ -1,0 +1,63 @@
+package clear
+
+import "testing"
+
+func TestScoreEfficacy_FinishReasonMap(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   Score
+		hasVal bool
+	}{
+		{"stop", 100, true},
+		{"tool_calls", 100, true},
+		{"function_call", 100, true},
+		{"length", 60, true},
+		{"content_filter", 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.reason, func(t *testing.T) {
+			s := scoreEfficacy(Input{HTTPStatus: 200, FinishReason: c.reason})
+			if s == nil {
+				t.Fatalf("nil for %q", c.reason)
+			}
+			if *s != c.want {
+				t.Errorf("%q → %d, want %d", c.reason, *s, c.want)
+			}
+		})
+	}
+}
+
+// Empty finish_reason → nil (vendor didn't return one). Distinct from
+// any of the documented values.
+func TestScoreEfficacy_EmptyIsNil(t *testing.T) {
+	if s := scoreEfficacy(Input{HTTPStatus: 200, FinishReason: ""}); s != nil {
+		t.Errorf("empty FinishReason should produce nil, got %d", *s)
+	}
+}
+
+// Unknown finish_reason (emerging vendor value we haven't mapped yet)
+// → nil rather than a guess. Lets dashboards surface the unmapped
+// value and prompt a code update.
+func TestScoreEfficacy_UnknownIsNil(t *testing.T) {
+	for _, r := range []string{"end_turn", "max_tokens", "unknown_value", "STOP"} { // STOP — case matters
+		if s := scoreEfficacy(Input{HTTPStatus: 200, FinishReason: r}); s != nil {
+			t.Errorf("unknown %q should produce nil, got %d", r, *s)
+		}
+	}
+}
+
+// HTTPStatus=0 (gateway-blocked) — no vendor response, no finish_reason
+// signal, nil score.
+func TestScoreEfficacy_GatewayBlocked(t *testing.T) {
+	if s := scoreEfficacy(Input{HTTPStatus: 0, FinishReason: "stop"}); s != nil {
+		t.Errorf("HTTPStatus=0 should nil out, got %d", *s)
+	}
+}
+
+// Compute end-to-end: FinishReason wires through.
+func TestCompute_PopulatesEfficacy(t *testing.T) {
+	s := Compute(Input{HTTPStatus: 200, FinishReason: "length"})
+	if s.Efficacy == nil || *s.Efficacy != 60 {
+		t.Errorf("Efficacy=%v want=60", s.Efficacy)
+	}
+}
