@@ -13,6 +13,12 @@ resources:
 - deployment.yaml
 - service.yaml
 - ingress.yaml
+# Customer-facing strict-mode AIQG ingress (build-vs-reuse §7.3).
+# Same image, AIQG_STRICT=true override, separate Service + Ingress
+# at gateway.aiqg.tas.scharber.com.
+- deployment-aiqg-strict.yaml
+- service-aiqg-strict.yaml
+- ingress-aiqg-strict.yaml
 
 commonLabels:
   app.kubernetes.io/name: llm-router

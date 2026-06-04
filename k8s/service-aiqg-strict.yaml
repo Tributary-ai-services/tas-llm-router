@@ -1,0 +1,19 @@
+# Service for the strict-mode customer-facing AIQG Deployment.
+# Routed to from the gateway.aiqg.tas.io Ingress only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-router-aiqg
+  namespace: tas-llm-router
+  labels:
+    app: llm-router-aiqg
+    aiqg-mode: strict
+spec:
+  type: ClusterIP
+  selector:
+    app: llm-router-aiqg
+  ports:
+  - name: http
+    port: 8086
+    targetPort: 8086
+    protocol: TCP
