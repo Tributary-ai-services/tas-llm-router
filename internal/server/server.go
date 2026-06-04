@@ -570,6 +570,19 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 				s.writeErrorResponse(w, http.StatusForbidden, "response blocked by content policy")
 				return
 			}
+
+			// AIQG: project outbound findings to per-severity counts
+			// and stamp on the routing sidecar. Same pattern as the
+			// inbound stamp in handleChatCompletion. Empty counts
+			// still stamp so the outbound side participates in the
+			// AssuranceSummary even on a clean scan.
+			if result != nil && result.ScanResult != nil {
+				counts := map[string]int{}
+				for _, f := range result.ScanResult.Findings {
+					counts[string(f.Severity)]++
+				}
+				middleware.StampGatekeeperFindings(r.Context(), middleware.GatekeeperDirectionOutbound, counts)
+			}
 		}
 	}
 
