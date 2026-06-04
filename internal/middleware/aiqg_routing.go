@@ -36,6 +36,11 @@ type Routing struct {
 	inboundFindings  map[string]int
 	outboundFindings map[string]int
 	scanRan          bool
+
+	// Vendor finish_reason — "stop" / "length" / "content_filter" /
+	// "tool_calls" / "function_call". Empty string means unset (no
+	// vendor response). First-write-wins like the other stampers.
+	finishReason string
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -70,6 +75,11 @@ type RoutingSnapshot struct {
 	InboundFindings  map[string]int
 	OutboundFindings map[string]int
 	ScanRan          bool
+
+	// Vendor finish_reason captured from the response. Empty when
+	// the vendor never returned one (gateway-blocked, streaming
+	// truncation).
+	FinishReason string
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -89,6 +99,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		InboundFindings:  copyCounts(r.inboundFindings),
 		OutboundFindings: copyCounts(r.outboundFindings),
 		ScanRan:          r.scanRan,
+		FinishReason:     r.finishReason,
 	}
 }
 
@@ -191,6 +202,26 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens int) {
 		r.promptTokens = promptTokens
 		r.completionTokens = completionTokens
 		r.usageSet = true
+	}
+}
+
+// StampFinishReason records the vendor-reported finish_reason on the
+// routing sidecar. First-write-wins: the streaming path may stamp
+// from each chunk's choice.FinishReason (only the last chunk
+// typically populates it), but if a later fallback path tries to
+// stamp again the first authoritative value wins.
+func StampFinishReason(ctx context.Context, reason string) {
+	if reason == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finishReason == "" {
+		r.finishReason = reason
 	}
 }
 

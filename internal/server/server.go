@@ -439,11 +439,15 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// AIQG: stamp the vendor-reported token usage onto the routing
-	// sidecar so the response event carries TokenAccounting + the
-	// clear.Cost dimension scores. No-op outside AIQG mode.
+	// AIQG: stamp the vendor-reported token usage + finish_reason
+	// onto the routing sidecar so the response event carries
+	// TokenAccounting + the clear.Cost / clear.Efficacy dimension
+	// scores. No-ops outside AIQG mode.
 	if resp.Usage != nil {
 		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
+	if len(resp.Choices) > 0 {
+		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
 	}
 
 	// Add routing metadata to response
@@ -487,12 +491,20 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 
 	// Stream chunks
 	for chunk := range chunks {
-		// AIQG: stamp vendor token usage from the final chunk. OpenAI
-		// emits this on the last chunk when stream_options.include_usage
-		// is set; Anthropic carries it in message_delta. StampTokenUsage
-		// is first-write-wins so safe to call on every chunk.
+		// AIQG: stamp vendor token usage + finish_reason from the
+		// final chunk. OpenAI emits Usage on the last chunk when
+		// stream_options.include_usage is set; Anthropic carries it
+		// in message_delta. FinishReason lives on the per-choice
+		// delta typically on the second-to-last chunk. Both stampers
+		// are first-write-wins so safe to call on every chunk.
 		if chunk.Usage != nil {
 			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+		}
+		for _, c := range chunk.Choices {
+			if c.FinishReason != "" {
+				middleware.StampFinishReason(r.Context(), c.FinishReason)
+				break
+			}
 		}
 
 		data, err := json.Marshal(chunk)
@@ -615,12 +627,20 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 
 	// Stream chunks
 	for chunk := range chunks {
-		// AIQG: stamp vendor token usage from the final chunk. OpenAI
-		// emits this on the last chunk when stream_options.include_usage
-		// is set; Anthropic carries it in message_delta. StampTokenUsage
-		// is first-write-wins so safe to call on every chunk.
+		// AIQG: stamp vendor token usage + finish_reason from the
+		// final chunk. OpenAI emits Usage on the last chunk when
+		// stream_options.include_usage is set; Anthropic carries it
+		// in message_delta. FinishReason lives on the per-choice
+		// delta typically on the second-to-last chunk. Both stampers
+		// are first-write-wins so safe to call on every chunk.
 		if chunk.Usage != nil {
 			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+		}
+		for _, c := range chunk.Choices {
+			if c.FinishReason != "" {
+				middleware.StampFinishReason(r.Context(), c.FinishReason)
+				break
+			}
 		}
 
 		data, err := json.Marshal(chunk)

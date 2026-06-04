@@ -690,6 +690,53 @@ func TestAIQG_NoScanLeavesAssuranceNil(t *testing.T) {
 	}
 }
 
+// finish_reason stamped by the handler reaches both ResponseEvent.
+// FinishReason and CLEAR.Efficacy.
+func TestAIQG_FinishReasonStampedReachesEventAndEfficacy(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampFinishReason(r.Context(), "stop")
+		w.WriteHeader(http.StatusOK)
+	})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	rd := em.Responses()[0].Data
+	if rd.FinishReason != "stop" {
+		t.Errorf("FinishReason=%q want=stop", rd.FinishReason)
+	}
+	if rd.CLEAR.Efficacy == nil || *rd.CLEAR.Efficacy != 100 {
+		t.Errorf("CLEAR.Efficacy=%v want=100", rd.CLEAR.Efficacy)
+	}
+}
+
+// content_filter → Efficacy 0; the request still emits an event with
+// status=success (HTTP 200) but Efficacy registers the policy block.
+func TestAIQG_ContentFilterScoresEfficacy0(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampFinishReason(r.Context(), "content_filter")
+		w.WriteHeader(http.StatusOK)
+	})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	rd := em.Responses()[0].Data
+	if rd.CLEAR.Efficacy == nil || *rd.CLEAR.Efficacy != 0 {
+		t.Errorf("CLEAR.Efficacy=%v want=0", rd.CLEAR.Efficacy)
+	}
+}
+
 // Vendor/Model stamps made by the downstream handler must reach the
 // emitted event. Proves the Routing sidecar (attached by middleware) +
 // the deferred snapshot read both work end-to-end.
@@ -769,7 +816,7 @@ func TestAIQG_EmittedEventCarriesCLEARScores(t *testing.T) {
 		t.Errorf("CLEAR.Cost should be nil when no usage stamped, got %d", *respEnv.Data.CLEAR.Cost)
 	}
 	if respEnv.Data.CLEAR.Efficacy != nil {
-		t.Errorf("CLEAR.Efficacy should be nil at MVP (response body not captured)")
+		t.Errorf("CLEAR.Efficacy should be nil when no finish_reason stamped, got %d", *respEnv.Data.CLEAR.Efficacy)
 	}
 	if respEnv.Data.CLEAR.Assurance != nil {
 		t.Errorf("CLEAR.Assurance should be nil when no scan stamped, got %d", *respEnv.Data.CLEAR.Assurance)
