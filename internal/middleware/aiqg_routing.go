@@ -29,6 +29,13 @@ type Routing struct {
 	promptTokens     int
 	completionTokens int
 	usageSet         bool
+
+	// Gatekeeper findings — counts per severity per direction. The
+	// scanRan flag distinguishes "scan ran, no findings" (Healthy
+	// Assurance) from "scan didn't run" (no Assurance score at all).
+	inboundFindings  map[string]int
+	outboundFindings map[string]int
+	scanRan          bool
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -56,9 +63,18 @@ type RoutingSnapshot struct {
 	PromptTokens     int
 	CompletionTokens int
 	UsageSet         bool
+
+	// Gatekeeper scan results, severity-count maps per direction.
+	// ScanRan distinguishes "scan ran, no findings" from "scan never
+	// ran" — the latter means Assurance scoring is skipped entirely.
+	InboundFindings  map[string]int
+	OutboundFindings map[string]int
+	ScanRan          bool
 }
 
 // Snapshot returns a read-only view of the current routing state.
+// Finding maps are copied so the caller can mutate without racing
+// future stamps.
 func (r *Routing) Snapshot() RoutingSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -70,7 +86,21 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		PromptTokens:     r.promptTokens,
 		CompletionTokens: r.completionTokens,
 		UsageSet:         r.usageSet,
+		InboundFindings:  copyCounts(r.inboundFindings),
+		OutboundFindings: copyCounts(r.outboundFindings),
+		ScanRan:          r.scanRan,
 	}
+}
+
+func copyCounts(in map[string]int) map[string]int {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 type routingCtxKey struct{}
@@ -161,5 +191,43 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens int) {
 		r.promptTokens = promptTokens
 		r.completionTokens = completionTokens
 		r.usageSet = true
+	}
+}
+
+// Direction selects which side of the Gatekeeper scan a finding came
+// from. Both directions land on the same Routing sidecar and feed the
+// per-request Assurance score; dashboards can separate them via the
+// embedded AssuranceSummary.
+const (
+	GatekeeperDirectionInbound  = "inbound"
+	GatekeeperDirectionOutbound = "outbound"
+)
+
+// StampGatekeeperFindings records the per-severity count of findings
+// surfaced by a Gatekeeper scan. Direction selects inbound or outbound;
+// passing an empty severityCounts map is treated as "scan ran, no
+// findings" — ScanRan flips true so Assurance scores as Healthy=100
+// rather than nil-not-scored. Subsequent calls for the same direction
+// accumulate (max-per-severity) so multiple scan stages in the same
+// direction don't accidentally clobber each other.
+func StampGatekeeperFindings(ctx context.Context, direction string, severityCounts map[string]int) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scanRan = true
+	target := &r.inboundFindings
+	if direction == GatekeeperDirectionOutbound {
+		target = &r.outboundFindings
+	}
+	if *target == nil {
+		*target = make(map[string]int, len(severityCounts))
+	}
+	for sev, count := range severityCounts {
+		if count > (*target)[sev] {
+			(*target)[sev] = count
+		}
 	}
 }

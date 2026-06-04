@@ -142,6 +142,13 @@ type ResponseEvent struct {
 	// on the routing snapshot) — distinct from "0 tokens used".
 	TokenAccounting *TokenAccounting `json:"token_accounting,omitempty"`
 
+	// Compact Gatekeeper scan summary. Full tag_set integration is a
+	// later slice; for MVP this carries the per-severity counts +
+	// derived worst severity so dashboards can slice Assurance scoring
+	// by direction. Omitted when no scan ran (e.g. internal pass-
+	// through traffic or Gatekeeper-disabled deployments).
+	Assurance *AssuranceSummary `json:"assurance,omitempty"`
+
 	// CLEAR scores — populated by pkg/clear.Compute(). A nil *Scores
 	// (rather than a *Scores with all-nil dimension fields) means the
 	// scorer wasn't run at all, which today only happens on the noop
@@ -171,6 +178,18 @@ type TokenAccounting struct {
 	OutputCostUSD       float64 `json:"output_cost_usd"`
 	TotalCostUSD        float64 `json:"total_cost_usd"`
 	ModelPricingVersion string  `json:"model_pricing_version,omitempty"`
+}
+
+// AssuranceSummary is the lightweight per-event view of Gatekeeper
+// scan output. The full tag_set + per-NIST-characteristic breakdown
+// belongs on its own embedded sub-document (deferred slice — see
+// aether-shared/data-models/aiqg/tag-set.md). This summary keeps the
+// event payload small while still letting Spark/dashboards segment
+// by severity and direction.
+type AssuranceSummary struct {
+	InboundFindings  map[string]int `json:"inbound_findings,omitempty"`
+	OutboundFindings map[string]int `json:"outbound_findings,omitempty"`
+	WorstSeverity    string         `json:"worst_severity,omitempty"`
 }
 
 // Status enum values for ResponseEvent.Status.

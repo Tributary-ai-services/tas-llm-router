@@ -364,6 +364,17 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			} else {
 				w.Header().Set("X-TAS-Scan-Status", "violations")
 			}
+
+			// AIQG: project Gatekeeper findings into per-severity
+			// counts and stamp onto the routing sidecar. Drives the
+			// CLEAR.Assurance score and the AssuranceSummary on the
+			// emitted event. Empty counts still flip ScanRan true so
+			// Assurance scores as Healthy=100 rather than nil.
+			counts := map[string]int{}
+			for _, f := range result.ScanResult.Findings {
+				counts[string(f.Severity)]++
+			}
+			middleware.StampGatekeeperFindings(r.Context(), middleware.GatekeeperDirectionInbound, counts)
 		}
 	}
 

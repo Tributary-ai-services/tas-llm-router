@@ -601,6 +601,95 @@ func TestAIQG_TokenUsageStampedReachesEventAndCost(t *testing.T) {
 	}
 }
 
+// Gatekeeper findings stamped by the handler must produce both a
+// CLEAR.Assurance score and an AssuranceSummary on the response event.
+func TestAIQG_GatekeeperFindingsStampedReachEventAndAssurance(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampGatekeeperFindings(r.Context(), GatekeeperDirectionInbound, map[string]int{"medium": 2})
+		StampGatekeeperFindings(r.Context(), GatekeeperDirectionOutbound, map[string]int{})
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	if em.Len() != 1 {
+		t.Fatalf("emit count=%d want=1", em.Len())
+	}
+	rd := em.Responses()[0].Data
+
+	if rd.Assurance == nil {
+		t.Fatalf("Assurance summary nil")
+	}
+	if rd.Assurance.InboundFindings["medium"] != 2 {
+		t.Errorf("InboundFindings: %v", rd.Assurance.InboundFindings)
+	}
+	if rd.Assurance.WorstSeverity != "medium" {
+		t.Errorf("WorstSeverity=%q want=medium", rd.Assurance.WorstSeverity)
+	}
+	if rd.CLEAR.Assurance == nil || *rd.CLEAR.Assurance != 80 {
+		t.Errorf("CLEAR.Assurance=%v want=80 (medium bucket)", rd.CLEAR.Assurance)
+	}
+}
+
+// Clean scan (ScanRan=true, no findings) → Assurance = 100, summary
+// emitted with empty maps + no worst severity.
+func TestAIQG_CleanScanScoresAssurance100(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StampGatekeeperFindings(r.Context(), GatekeeperDirectionInbound, map[string]int{})
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(stampingHandler).ServeHTTP(rec, req)
+
+	rd := em.Responses()[0].Data
+	if rd.CLEAR.Assurance == nil || *rd.CLEAR.Assurance != 100 {
+		t.Errorf("clean scan Assurance=%v want=100", rd.CLEAR.Assurance)
+	}
+	if rd.Assurance == nil {
+		t.Fatalf("Assurance summary nil despite ScanRan=true")
+	}
+	if rd.Assurance.WorstSeverity != "" {
+		t.Errorf("WorstSeverity=%q want empty on clean scan", rd.Assurance.WorstSeverity)
+	}
+}
+
+// No-scan path (handler never stamps Gatekeeper findings) → Assurance
+// score nil + Assurance summary omitted. Distinct from clean scan.
+func TestAIQG_NoScanLeavesAssuranceNil(t *testing.T) {
+	em := &events.MemoryEmitter{}
+	noStampHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	req.Header.Set("Authorization", "Bearer sk")
+	rec := httptest.NewRecorder()
+	mw(noStampHandler).ServeHTTP(rec, req)
+
+	rd := em.Responses()[0].Data
+	if rd.CLEAR.Assurance != nil {
+		t.Errorf("Assurance=%d want nil when no scan ran", *rd.CLEAR.Assurance)
+	}
+	if rd.Assurance != nil {
+		t.Errorf("AssuranceSummary should be omitted when no scan ran")
+	}
+}
+
 // Vendor/Model stamps made by the downstream handler must reach the
 // emitted event. Proves the Routing sidecar (attached by middleware) +
 // the deferred snapshot read both work end-to-end.
@@ -683,7 +772,7 @@ func TestAIQG_EmittedEventCarriesCLEARScores(t *testing.T) {
 		t.Errorf("CLEAR.Efficacy should be nil at MVP (response body not captured)")
 	}
 	if respEnv.Data.CLEAR.Assurance != nil {
-		t.Errorf("CLEAR.Assurance should be nil at MVP (Gatekeeper not integrated)")
+		t.Errorf("CLEAR.Assurance should be nil when no scan stamped, got %d", *respEnv.Data.CLEAR.Assurance)
 	}
 	if respEnv.Data.CLEAR.Reliability != nil {
 		t.Errorf("CLEAR.Reliability should be nil at MVP (retry detection not built)")
