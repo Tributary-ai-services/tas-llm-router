@@ -186,7 +186,15 @@ type TokenAccounting struct {
 // aether-shared/data-models/aiqg/tag-set.md). This summary keeps the
 // event payload small while still letting Spark/dashboards segment
 // by severity and direction.
+//
+// InboundCount / OutboundCount are total finding counts per direction.
+// They always emit (no `omitempty`) — zero is a meaningful value
+// ("scan ran, found nothing") and dashboards need a concrete number
+// to aggregate. The per-severity maps stay omitempty so a clean scan
+// doesn't bloat the event payload with empty objects.
 type AssuranceSummary struct {
+	InboundCount     int            `json:"inbound_count"`
+	OutboundCount    int            `json:"outbound_count"`
 	InboundFindings  map[string]int `json:"inbound_findings,omitempty"`
 	OutboundFindings map[string]int `json:"outbound_findings,omitempty"`
 	WorstSeverity    string         `json:"worst_severity,omitempty"`
