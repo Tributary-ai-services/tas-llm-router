@@ -1,9 +1,11 @@
 module github.com/tributary-ai/llm-router-waf
 
-go 1.25.0
+go 1.24.0
+
+toolchain go1.24.4
 
 require (
-	github.com/IBM/sarama v1.50.1
+	github.com/IBM/sarama v1.46.3
 	github.com/Tributary-ai-services/Gatekeeper v0.0.0-00010101000000-000000000000
 	github.com/anthropics/anthropic-sdk-go v1.7.0
 	github.com/getkin/kin-openapi v0.133.0
@@ -35,9 +37,12 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/eapache/go-resiliency v1.7.0 // indirect
+	github.com/eapache/go-xerial-snappy v0.0.0-20230731223053-c322873962e3 // indirect
+	github.com/eapache/queue v1.1.0 // indirect
 	github.com/flier/gohs v1.2.3 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
+	github.com/golang/snappy v0.0.4 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
@@ -65,8 +70,8 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/woodsbury/decimal128 v1.3.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/crypto v0.46.0 // indirect
+	golang.org/x/net v0.48.0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
