@@ -128,8 +128,10 @@ fmt: ## Format code
 ##@ Docker & Containerization
 
 .PHONY: docker-build
-docker-build: ## Build Docker image
-	docker build -f docker/Dockerfile -t ${DOCKER_IMAGE}:${VERSION} .
+docker-build: ## Build Docker image (stamps AIQG events.GatewayVersion with git SHA)
+	docker build -f docker/Dockerfile \
+		--build-arg GATEWAY_VERSION=${GIT_COMMIT} \
+		-t ${DOCKER_IMAGE}:${VERSION} .
 	docker tag ${DOCKER_IMAGE}:${VERSION} ${DOCKER_IMAGE}:latest
 
 .PHONY: docker-run
