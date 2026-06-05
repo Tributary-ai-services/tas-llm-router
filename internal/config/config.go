@@ -52,6 +52,18 @@ type AIQGConfig struct {
 	// Env overrides: AIQG_KAFKA_BROKERS (comma-separated),
 	// AIQG_KAFKA_TOPIC.
 	Kafka AIQGKafkaConfig `yaml:"kafka"`
+
+	// Dashboard backend integration. When both DashboardURL +
+	// DashboardInternalAuthToken are set, the AIQG middleware uses
+	// an HTTP DashboardResolver against aiqg-dashboard-be's
+	// /internal/auth/validate endpoint instead of the in-memory
+	// Tokens list. The Tokens list becomes a bootstrap fallback.
+	//
+	// Env overrides:
+	//   AIQG_DASHBOARD_URL
+	//   AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN
+	DashboardURL               string `yaml:"dashboard_url"`
+	DashboardInternalAuthToken string `yaml:"dashboard_internal_auth_token"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Defined here (not in
@@ -430,6 +442,12 @@ func (c *Config) loadFromEnv() {
 	if topic := os.Getenv("AIQG_KAFKA_TOPIC"); topic != "" {
 		c.AIQG.Kafka.Topic = topic
 	}
+	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
+		c.AIQG.DashboardURL = u
+	}
+	if t := os.Getenv("AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN"); t != "" {
+		c.AIQG.DashboardInternalAuthToken = t
+	}
 	// AIQG_TOKENS_FILE points to a separate YAML file containing the
 	// token list (typically mounted from a Kubernetes Secret so the
 	// list never sits in a ConfigMap). When set + readable, the file's
@@ -601,10 +619,12 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		return nil
 	}
 	out := &server.AIQGServerConfig{
-		Enabled:     c.AIQG.Enabled,
-		Strict:      c.AIQG.Strict,
-		Region:      c.AIQG.Region,
-		EmitterType: c.AIQG.EmitterType,
+		Enabled:                    c.AIQG.Enabled,
+		Strict:                     c.AIQG.Strict,
+		Region:                     c.AIQG.Region,
+		EmitterType:                c.AIQG.EmitterType,
+		DashboardURL:               c.AIQG.DashboardURL,
+		DashboardInternalAuthToken: c.AIQG.DashboardInternalAuthToken,
 		Kafka: server.AIQGKafkaConfig{
 			Brokers: c.AIQG.Kafka.Brokers,
 			Topic:   c.AIQG.Kafka.Topic,
