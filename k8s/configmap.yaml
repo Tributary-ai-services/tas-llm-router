@@ -83,3 +83,9 @@ data:
   AIQG_ENABLED: "true"
   AIQG_STRICT: "false"
   AIQG_REGION: "us-east"
+  # When set, the AIQG middleware uses a DashboardResolver (HTTP
+  # client of aiqg-dashboard-be's /internal/auth/validate) instead of
+  # the K8s-Secret-mounted token list. The Internal-Auth shared
+  # secret comes from llm-router-secret (out-of-band managed) as
+  # AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN.
+  AIQG_DASHBOARD_URL: "http://aiqg-dashboard-be.aiqg.svc.cluster.local:8095"
