@@ -180,3 +180,16 @@ aiqg:
   kafka:
     brokers: []
     topic: ""
+
+  # Dashboard backend integration. When BOTH dashboard_url +
+  # dashboard_internal_auth_token are set, the AIQG middleware uses
+  # a DashboardResolver (HTTP client of aiqg-dashboard-be's
+  # /internal/auth/validate endpoint) INSTEAD of the in-memory
+  # `tokens:` list above. The Tokens list becomes a bootstrap
+  # fallback for when the dashboard-be is degraded at startup.
+  #
+  # Env overrides:
+  #   AIQG_DASHBOARD_URL
+  #   AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN
+  dashboard_url: ""
+  dashboard_internal_auth_token: ""

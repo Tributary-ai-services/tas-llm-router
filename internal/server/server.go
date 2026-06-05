@@ -127,12 +127,21 @@ type AIQGServerConfig struct {
 	Strict  bool   `yaml:"strict"`
 	Region  string `yaml:"region"`
 
-	// Tokens is the MVP in-memory token store. Production deployments
-	// swap to a dashboard-backend resolver via a separate config knob
-	// (TBD when aiqg-dashboard-be ships). Empty/omitted means no
-	// resolver is wired — tokens stay opaque and events carry empty
-	// tenant fields. Suitable for incremental rollout.
+	// Tokens is the MVP in-memory token store. Used as a fallback
+	// when DashboardURL is unset OR when the dashboard-be is
+	// degraded at startup. Empty/omitted means no MapResolver is
+	// built — events emit with empty tenant fields per the original
+	// incremental-rollout path.
 	Tokens []tokens.ConfigToken `yaml:"tokens"`
+
+	// Dashboard backend integration. When DashboardURL +
+	// DashboardInternalAuthToken are both set, the AIQG middleware
+	// uses a DashboardResolver (HTTP client of
+	// POST /internal/auth/validate) instead of the in-memory
+	// MapResolver. This is the production path; the Secret-mounted
+	// Tokens list becomes a bootstrap fallback only.
+	DashboardURL               string `yaml:"dashboard_url"`
+	DashboardInternalAuthToken string `yaml:"dashboard_internal_auth_token"`
 
 	// EmitterType selects how AIQG events are published:
 	//   "log"   — logrus → Loki (default; works without infra)
@@ -201,15 +210,31 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		}
 		server.aiqgEmitter = emitter
 
-		// Build the token resolver when tokens are configured. Without
-		// a resolver the middleware accepts any TAS-Auth bearer but
-		// emits events with empty tenant fields — useful for an early
-		// rollout where the token store hasn't shipped yet.
+		// Build the token resolver. Priority:
+		//   1. DashboardResolver (HTTP client of aiqg-dashboard-be) —
+		//      production path, lets ops manage tokens through the
+		//      dashboard UI instead of redeploying the Secret.
+		//   2. MapResolver from the K8s Secret — bootstrap / fallback
+		//      for when dashboard-be isn't yet reachable.
+		//   3. Nil — middleware accepts any bearer as opaque, events
+		//      carry empty tenant fields (incremental-rollout path).
 		var resolver tokens.Resolver
-		if len(config.AIQG.Tokens) > 0 {
+		switch {
+		case config.AIQG.DashboardURL != "" && config.AIQG.DashboardInternalAuthToken != "":
+			dr, err := tokens.NewDashboardResolver(config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build AIQG DashboardResolver: %w", err)
+			}
+			resolver = dr
+			logger.WithField("dashboard_url", config.AIQG.DashboardURL).
+				Info("AIQG token resolver: DashboardResolver (HTTP client of aiqg-dashboard-be)")
+		case len(config.AIQG.Tokens) > 0:
 			mr := tokens.NewMapResolver(config.AIQG.Tokens)
 			resolver = mr
-			logger.WithField("token_count", mr.Len()).Info("AIQG token resolver loaded (in-memory)")
+			logger.WithField("token_count", mr.Len()).
+				Info("AIQG token resolver: MapResolver (K8s Secret) — set aiqg.dashboard_url to switch to the dashboard-be HTTP resolver")
+		default:
+			logger.Info("AIQG token resolver: none — events emit with empty tenant fields")
 		}
 
 		server.aiqgMiddleware = middleware.NewAIQG(middleware.AIQGConfig{
