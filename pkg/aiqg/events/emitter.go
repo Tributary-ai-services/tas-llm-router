@@ -129,6 +129,11 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		"aiqg_account_id":   resp.Data.AIQGAccountID,
 		"gateway_version":   resp.Data.GatewayVersion,
 		"scoring_version":   resp.Data.ScoringVersion,
+		// Workflow is on the RequestEvent in the schema, but copy it
+		// onto the response log line too so per-workflow dashboard
+		// queries can filter the response stream directly (e.g.
+		// {namespace="tas-llm-router"} | json | workflow="code_generation").
+		"workflow":          req.Data.Workflow,
 		"payload":           string(respJSON),
 	}
 	// Token accounting — nil-safe; either fully populated or omitted.

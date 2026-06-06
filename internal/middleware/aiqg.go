@@ -235,6 +235,7 @@ func routingView(r *Routing) events.RoutingView {
 		AttemptCount:     s.AttemptCount,
 		FallbackUsed:     s.FallbackUsed,
 		RetrySet:         s.RetrySet,
+		Workflow:         s.Workflow,
 	}
 }
 

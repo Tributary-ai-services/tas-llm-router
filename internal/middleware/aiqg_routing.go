@@ -47,6 +47,13 @@ type Routing struct {
 	attemptCount int
 	fallbackUsed bool
 	retrySet     bool
+
+	// Auto-classified workflow string (rag / code_generation / etc.)
+	// from internal/workflow.Classify. Empty when classification was
+	// skipped or returned no match. The events package uses this as a
+	// fallback when the TAS-Workflow header was NOT supplied —
+	// header value always wins to preserve customer intent.
+	workflow string
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -93,6 +100,11 @@ type RoutingSnapshot struct {
 	AttemptCount int
 	FallbackUsed bool
 	RetrySet     bool
+
+	// Auto-classified workflow from internal/workflow.Classify.
+	// Empty when not classified; events.Build uses this as a
+	// fallback when the TAS-Workflow header wasn't sent.
+	Workflow string
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -116,6 +128,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		AttemptCount:     r.attemptCount,
 		FallbackUsed:     r.fallbackUsed,
 		RetrySet:         r.retrySet,
+		Workflow:         r.workflow,
 	}
 }
 
@@ -164,6 +177,27 @@ func StampVendor(ctx context.Context, vendor string) {
 	defer r.mu.Unlock()
 	if r.vendor == "" {
 		r.vendor = vendor
+	}
+}
+
+// StampWorkflow records the auto-classified workflow string (rag,
+// code_generation, etc.) for the request. Always loses to the
+// TAS-Workflow header — the events.Build path prefers the header
+// value when set. First write wins. Empty string is a no-op so the
+// classifier can call this unconditionally without overwriting a
+// later, better-informed classification.
+func StampWorkflow(ctx context.Context, workflow string) {
+	if workflow == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.workflow == "" {
+		r.workflow = workflow
 	}
 }
 
