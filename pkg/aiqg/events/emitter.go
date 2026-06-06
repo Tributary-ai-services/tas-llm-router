@@ -138,6 +138,15 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		respFields["total_tokens"] = ta.TotalTokens
 		respFields["total_cost_usd"] = ta.TotalCostUSD
 	}
+	// Promote end_to_end_ms so LogQL can unwrap it directly — needed
+	// for the dashboard /reports/preview p50/p95 latency queries.
+	// Without this, latency is only reachable by parsing the embedded
+	// `payload` JSON, which LogQL handles awkwardly. Skipped when nil
+	// (request never completed) so dashboards distinguish "not
+	// captured" from "captured as zero".
+	if ms := resp.Data.EventTimestamps.EndToEndMs; ms != nil {
+		respFields["end_to_end_ms"] = *ms
+	}
 	// CLEAR scores — pointer-fielded; promote each non-nil dimension.
 	if c := resp.Data.CLEAR; c != nil {
 		if c.Cost != nil {
