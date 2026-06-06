@@ -171,9 +171,14 @@ func scoreLatency(in Input) *Score {
 // domain-specific guidance (§2.2.1: 3s customer-support, 30s code-gen)
 // and extended for the workflow enum in workflow-classification.md §1.1.
 //
-// The unknown / unmapped case returns 10s — the median of the explicit
-// thresholds, chosen so a misclassified workflow scores conservatively
-// in the middle rather than passing or failing trivially.
+// The unknown / unmapped case returns 3s — same as single_turn_qa, the
+// most common shape of unclassified traffic (OpenAI-compatible chat
+// completions without a workflow hint). Tightened from 10s on
+// 2026-06-06 after dashboard testing showed every sub-target request
+// scored 100, collapsing the chart to a flat line. A misclassified
+// long-running workflow now scores worse than its actual SLA would
+// permit, which is the right way to fail: operators notice and
+// re-classify.
 func slaMsForWorkflow(workflow string) int64 {
 	switch workflow {
 	case "single_turn_qa":
@@ -189,7 +194,7 @@ func slaMsForWorkflow(workflow string) int64 {
 	case "agentic":
 		return 30000
 	default:
-		return 10000
+		return 3000
 	}
 }
 

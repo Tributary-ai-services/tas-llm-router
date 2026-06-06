@@ -64,26 +64,27 @@ func TestDollarCost(t *testing.T) {
 
 func TestScoreCost_Curve(t *testing.T) {
 	// Boundary checks for the documented curve points using gpt-4o-mini
-	// rates. We feed prompt-only tokens (output rate 4× input) so the
-	// math stays predictable: cost = prompt_tokens × 0.00015/1000.
+	// rates ($0.00015 / 1k input). The curve was tightened one decade
+	// on 2026-06-06 so realistic LLM costs (~$0.0005) score below 100.
+	// cost = prompt_tokens × 0.00015 / 1000.
 	//
-	//   cost $0.001   → 100  → need promptTokens ≈ 6,667
-	//   cost $0.01    → 75   → ≈ 66,667
-	//   cost $0.10    → 50   → ≈ 666,667
-	//   cost $1.00    → 25   → ≈ 6,666,667
-	//   cost $10+     → 0    → ≥ 66,666,667
+	//   cost $0.0001  → 100  → need promptTokens ≈ 667
+	//   cost $0.001   → 75   → ≈ 6,667
+	//   cost $0.01    → 50   → ≈ 66,667
+	//   cost $0.10    → 25   → ≈ 666,667
+	//   cost $1.00+   → 0    → ≥ 6,666,667
 	cases := []struct {
 		name   string
 		prompt int
 		wantLo Score
 		wantHi Score
 	}{
-		{"sub_001_dollar_clamps_to_100", 100, 100, 100},
-		{"around_001_dollar", 6667, 99, 100},
-		{"around_01_dollar", 66_667, 74, 76},
-		{"around_10_cents", 666_667, 49, 51},
-		{"around_1_dollar", 6_666_667, 24, 26},
-		{"around_10_dollars_clamps_to_0", 66_666_667, 0, 1},
+		{"sub_0001_dollar_clamps_to_100", 100, 100, 100},
+		{"around_0001_dollar", 667, 99, 100},
+		{"around_001_dollar", 6_667, 74, 76},
+		{"around_01_dollar", 66_667, 49, 51},
+		{"around_10_cents", 666_667, 24, 26},
+		{"around_1_dollar_clamps_to_0", 6_666_667, 0, 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -146,15 +147,19 @@ func TestCompute_PopulatesCostAndComposite(t *testing.T) {
 	if s.Cost == nil {
 		t.Fatalf("Cost nil despite vendor/model/tokens")
 	}
-	// 1k+0.5k for gpt-4o-mini = $0.00045 → ~$0.0005, well in Healthy.
-	if *s.Cost < 90 {
-		t.Errorf("Cost=%d, expected >=90 for cheap request", *s.Cost)
+	// 1k+0.5k for gpt-4o-mini = $0.00045. Under the tightened
+	// 2026-06-06 curve this maps to Score ≈ 83 (Healthy band but
+	// no longer pinned to 100). Old curve placed this at 100.
+	if *s.Cost < 75 || *s.Cost > 95 {
+		t.Errorf("Cost=%d, expected ~83 (Healthy band but below 100) for $0.00045 request", *s.Cost)
 	}
 	if s.Composite == nil {
 		t.Fatalf("Composite nil")
 	}
-	// (Latency + Cost) / 2 ≈ (100 + ~108-clamped-to-100) / 2 = 100
-	if *s.Composite != 100 {
-		t.Errorf("Composite=%d want=100", *s.Composite)
+	// Composite is now (Latency=100 + Cost≈83) / 2 ≈ 91. Healthy
+	// but visible signal — the chart will actually move when this
+	// dimension shifts.
+	if *s.Composite < 85 || *s.Composite > 95 {
+		t.Errorf("Composite=%d want ~91 (Healthy band)", *s.Composite)
 	}
 }

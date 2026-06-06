@@ -82,20 +82,21 @@ func DollarCost(vendor, model string, promptTokens, completionTokens int) (cost 
 }
 
 // scoreCost converts the request's USD cost into a 0-100 score with a
-// logarithmic curve. The boundary points are chosen so the score maps
-// to source-spec §2.1.3's Healthy / Marginal / Failing tiers at round
-// cost values:
+// logarithmic curve. Tightened on 2026-06-06 by shifting the reference
+// point one decade — modern small-context LLM calls (~$0.0005) were
+// pegged at 100 under the old reference, so the chart never showed
+// cost pressure for normal traffic. The new curve:
 //
-//	$0.001 / request → 100 (Healthy)
-//	$0.01  / request → 75  (Healthy / Marginal boundary)
-//	$0.10  / request → 50  (Marginal / Failing boundary)
-//	$1.00  / request → 25
-//	$10+   / request → 0
+//	$0.0001 / request → 100 (Healthy)
+//	$0.001  / request → 75  (typical small chat — now visible signal)
+//	$0.01   / request → 50  (Marginal / Failing boundary)
+//	$0.10   / request → 25
+//	$1.00+  / request → 0
 //
-// Formula: score = 100 − 25 × log10(cost_usd × 1000), clamped to [0,100].
-// The 25-per-decade slope spans 4 orders of magnitude — wide enough to
-// distinguish a $0.001 classifier call from a $1 long-context summary
-// without collapsing every score into the same band.
+// Formula: score = 100 − 25 × log10(cost_usd × 10000), clamped to [0,100].
+// Same 25-per-decade slope as before; just shifted left by one decade
+// so the Healthy/Marginal/Failing bands cover the cost ranges actually
+// observed in production rather than the spec's pre-LLM-era examples.
 //
 // Returns nil when:
 //   - HTTPStatus is 0 (gateway-blocked; cost is meaningless)
@@ -128,7 +129,7 @@ func scoreCost(in Input) *Score {
 		s := Score(100)
 		return &s
 	}
-	score := 100.0 - 25.0*math.Log10(cost*1000.0)
+	score := 100.0 - 25.0*math.Log10(cost*10000.0)
 	switch {
 	case score > 100:
 		score = 100
