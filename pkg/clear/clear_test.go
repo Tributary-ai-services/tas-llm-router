@@ -24,9 +24,12 @@ func TestSLAMap(t *testing.T) {
 		{"summarization", 15000},
 		{"code_generation", 30000},
 		{"agentic", 30000},
-		{"", 10000},        // unknown → median default
-		{"unknown", 10000}, // explicit unknown → same
-		{"misspelled_workflow_name", 10000},
+		// Unknown workflow → 3s (was 10s). Tightened 2026-06-06 so
+		// unclassified small-context chat requests produce visible
+		// latency signal instead of clamping to 100.
+		{"", 3000},
+		{"unknown", 3000},
+		{"misspelled_workflow_name", 3000},
 	}
 	for _, c := range cases {
 		if got := slaMsForWorkflow(c.workflow); got != c.want {
