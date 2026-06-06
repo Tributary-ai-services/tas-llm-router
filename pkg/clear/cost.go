@@ -8,7 +8,7 @@ import "math"
 //
 // Format: `pricing-vYYYY-MM-DD` reflecting the publication date of the
 // rates encoded in modelPricing.
-const PricingVersion = "pricing-v2026-06-01"
+const PricingVersion = "pricing-v2026-06-05"
 
 // modelPricingEntry is the input/output rate pair for one vendor:model.
 // Rates are USD per 1,000 tokens (matches source-spec §2.1.3's CNA/CPS
@@ -34,7 +34,18 @@ var modelPricing = map[string]modelPricingEntry{
 	"openai:gpt-4-turbo":           {InputCostPer1K: 0.01000, OutputCostPer1K: 0.03000},
 	"openai:gpt-3.5-turbo":         {InputCostPer1K: 0.00050, OutputCostPer1K: 0.00150},
 
-	// Anthropic
+	// Anthropic — Claude 4.x family (current TAS deployment, see
+	// tas-llm-router/configs/config.yaml). Keep rates in sync with that
+	// file; the config and this table can drift independently because
+	// the config doesn't feed the scorer (the table is the
+	// authoritative source for CLEAR.Cost).
+	"anthropic:claude-opus-4-6":            {InputCostPer1K: 0.01500, OutputCostPer1K: 0.07500},
+	"anthropic:claude-sonnet-4-6":          {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
+	"anthropic:claude-haiku-4-5-20251001":  {InputCostPer1K: 0.00080, OutputCostPer1K: 0.00400},
+
+	// Anthropic — Claude 3.x family (legacy, kept for replay /
+	// historical re-scoring; remove once Spark re-score has caught up
+	// to the 4.x cutover).
 	"anthropic:claude-3-7-sonnet-20250219": {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
 	"anthropic:claude-3-5-sonnet-20241022": {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
 	"anthropic:claude-3-5-haiku-20241022":  {InputCostPer1K: 0.00080, OutputCostPer1K: 0.00400},
