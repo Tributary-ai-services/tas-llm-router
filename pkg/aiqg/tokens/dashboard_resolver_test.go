@@ -161,10 +161,18 @@ func TestDashboardResolver_EmptyBearer_ShortCircuits(t *testing.T) {
 	}
 }
 
+// The HTTP timeout caps the AIQG request hot path. 5s would be
+// painful (every cold dashboard-be replica wakeup blocks a customer
+// LLM call for 5s); sub-200ms would 503 on legitimate cold-pool
+// queries. Lock the bound here so a future "just bump it" doesn't
+// silently degrade tail latency.
 func TestDashboardResolver_TimeoutBoundsHotPath(t *testing.T) {
 	r, _ := NewDashboardResolver("http://x", "y")
-	if r.HTTP.Timeout > time.Second {
-		t.Errorf("DashboardResolver timeout=%v should be sub-second (this is on the hot path)", r.HTTP.Timeout)
+	if r.HTTP.Timeout > 3*time.Second {
+		t.Errorf("DashboardResolver timeout=%v too generous — capped at 3s for hot-path responsiveness", r.HTTP.Timeout)
+	}
+	if r.HTTP.Timeout < 500*time.Millisecond {
+		t.Errorf("DashboardResolver timeout=%v too tight — cold dashboard-be replicas need ≥500ms", r.HTTP.Timeout)
 	}
 }
 

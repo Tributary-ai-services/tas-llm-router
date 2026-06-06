@@ -25,9 +25,16 @@ import (
 //	5xx / network errors → generic error → middleware emits 503
 //	      "token_resolver_unavailable" to the customer
 //
-// Tight 500ms HTTP timeout — this call is on the hot path of every
-// AIQG request. If dashboard-be is degraded, we'd rather fail fast
-// and surface the 503 to the customer than hold open a request slot.
+// 2s HTTP timeout — this call is on the hot path of every AIQG
+// request, but the original 500ms budget was too tight: a cold
+// dashboard-be replica (BestEffort QoS, fresh PG connection pool)
+// could need ~500-1000ms just to round-trip the validate call,
+// returning 503 token_resolver_unavailable to the customer even
+// though dashboard-be was healthy. Bumped on 2026-06-06 after
+// observed 503s on production smoke traffic. Keep-alive on the
+// shared http.Transport keeps subsequent calls fast (~5-15ms in
+// cluster), so the 2s ceiling only applies to first-after-rollout
+// requests.
 type DashboardResolver struct {
 	HTTP              *http.Client
 	BaseURL           string
@@ -51,11 +58,11 @@ func NewDashboardResolver(baseURL, internalAuthToken string) (*DashboardResolver
 	}
 	return &DashboardResolver{
 		HTTP: &http.Client{
-			// Short timeout — this is on every AIQG request's hot path.
-			// If the dashboard-be is degraded the upstream middleware
-			// returns 503 to the customer, which is the right signal:
-			// retry, don't block.
-			Timeout: 500 * time.Millisecond,
+			// 2s — see the DashboardResolver doc comment for the
+			// "why bumped from 500ms" rationale. Steady-state cluster
+			// roundtrip is ~5-15ms; this only really applies to the
+			// first call after a dashboard-be replica wakes up.
+			Timeout: 2 * time.Second,
 		},
 		BaseURL:           baseURL,
 		InternalAuthToken: internalAuthToken,
