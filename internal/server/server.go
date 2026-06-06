@@ -14,6 +14,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
+	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
@@ -455,6 +456,10 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// sidecar so the response event carries them. No-op outside AIQG mode.
 	middleware.StampModel(r.Context(), req.Model)
 	middleware.StampStreaming(r.Context(), req.Stream)
+	// AIQG: heuristically classify the workflow from request shape so
+	// the CLEAR latency scorer uses a sensible SLA when the caller
+	// didn't send a TAS-Workflow header. Empty result is a no-op.
+	middleware.StampWorkflow(r.Context(), workflow.Classify(&req))
 
 	// Gatekeeper: check bypass token
 	scanBypassed := false

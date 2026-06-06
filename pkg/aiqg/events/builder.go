@@ -68,6 +68,12 @@ type RoutingView struct {
 	AttemptCount int
 	FallbackUsed bool
 	RetrySet     bool
+
+	// Auto-classified workflow from internal/workflow.Classify.
+	// Used as a fallback when the TAS-Workflow header isn't set —
+	// the header always wins because it represents the customer's
+	// explicit declaration of intent.
+	Workflow string
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -178,7 +184,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		IsAIQGMode:                true,
 		DryRun:                    headers.DryRun,
 		TraceReturned:             headers.Trace,
-		Workflow:                  headers.Workflow,
+		Workflow:                  preferredWorkflow(headers.Workflow, routing.Workflow),
 		PolicyNames:               headers.Policy,
 		PolicyBundle:              headers.PolicyBundle,
 		// SourceApp override from header was already captured above; the
@@ -204,7 +210,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		EndToEndMs:                 snap.EndToEndMs,
 		GatewayOverheadMs:          snap.GatewayOverheadMs,
 		VendorTTFTMs:               snap.VendorTTFTMs,
-		Workflow:                   headers.Workflow,
+		Workflow:                   preferredWorkflow(headers.Workflow, routing.Workflow),
 		HTTPStatus:                 opts.HTTPStatus,
 		Vendor:                     routing.Vendor,
 		Model:                      routing.Model,
@@ -373,4 +379,16 @@ func isStreaming(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// preferredWorkflow picks the customer-supplied workflow over the
+// auto-classified value when both are present. Customer intent wins
+// because the classifier is heuristic and may miscategorize legitimate
+// edge cases (a single_turn_qa that happens to contain code blocks,
+// for instance). An empty header falls through to the classifier.
+func preferredWorkflow(headerVal, classified string) string {
+	if headerVal != "" {
+		return headerVal
+	}
+	return classified
 }
