@@ -14,6 +14,22 @@ func TestLookupPricing_Known(t *testing.T) {
 	}
 }
 
+// Regression for the empty-CLEAR-chart bug: the Claude 4.x family is
+// what TAS actually serves, but the pricing table only knew about the
+// 3.x line. Cost dropped to nil on every real request and the
+// composite chart never moved.
+func TestLookupPricing_Claude4xCovered(t *testing.T) {
+	for _, model := range []string{
+		"claude-haiku-4-5-20251001",
+		"claude-sonnet-4-6",
+		"claude-opus-4-6",
+	} {
+		if _, _, ok := LookupPricing("anthropic", model); !ok {
+			t.Errorf("anthropic:%s should be priced (it's in configs/config.yaml)", model)
+		}
+	}
+}
+
 func TestLookupPricing_UnknownReturnsFalse(t *testing.T) {
 	for _, c := range []struct{ vendor, model string }{
 		{"openai", "gpt-99-imaginary"},

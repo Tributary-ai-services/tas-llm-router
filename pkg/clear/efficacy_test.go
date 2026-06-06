@@ -6,13 +6,19 @@ func TestScoreEfficacy_FinishReasonMap(t *testing.T) {
 	cases := []struct {
 		reason string
 		want   Score
-		hasVal bool
 	}{
-		{"stop", 100, true},
-		{"tool_calls", 100, true},
-		{"function_call", 100, true},
-		{"length", 60, true},
-		{"content_filter", 0, true},
+		// OpenAI vocabulary
+		{"stop", 100},
+		{"tool_calls", 100},
+		{"function_call", 100},
+		{"length", 60},
+		{"content_filter", 0},
+
+		// Anthropic vocabulary (normalized onto the same table)
+		{"end_turn", 100},
+		{"stop_sequence", 100},
+		{"tool_use", 100},
+		{"max_tokens", 60},
 	}
 	for _, c := range cases {
 		t.Run(c.reason, func(t *testing.T) {
@@ -38,8 +44,12 @@ func TestScoreEfficacy_EmptyIsNil(t *testing.T) {
 // Unknown finish_reason (emerging vendor value we haven't mapped yet)
 // → nil rather than a guess. Lets dashboards surface the unmapped
 // value and prompt a code update.
+//
+// "STOP" (uppercase) is the Google Gemini convention — not yet
+// normalized, kept here as a forward-compat reminder that the next
+// vendor wiring needs to extend normalizeFinishReason.
 func TestScoreEfficacy_UnknownIsNil(t *testing.T) {
-	for _, r := range []string{"end_turn", "max_tokens", "unknown_value", "STOP"} { // STOP — case matters
+	for _, r := range []string{"unknown_value", "STOP", "MAX_TOKENS", "SAFETY"} {
 		if s := scoreEfficacy(Input{HTTPStatus: 200, FinishReason: r}); s != nil {
 			t.Errorf("unknown %q should produce nil, got %d", r, *s)
 		}
