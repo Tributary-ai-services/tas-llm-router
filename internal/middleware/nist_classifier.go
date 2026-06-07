@@ -41,13 +41,18 @@ const (
 // audit. When a new matcher lands in Gatekeeper, add a row here
 // in the same PR so findings never silently fall into nistOther.
 var nistByPatternID = map[string]string{
-	// AIQG quality matchers (Gatekeeper#8). Bloated context and
+	// AIQG quality matchers (Gatekeeper#8 + #9). Bloated context and
 	// refusal both surface as Valid & Reliable failures — degraded
 	// input quality drives degraded output. Role-claim is a soft
 	// prompt injection → Secure & Resilient.
-	"aiqg-bloated-context": NISTValidReliable,
-	"aiqg-refusal":         NISTValidReliable,
-	"aiqg-role-claim":      NISTSecureResilient,
+	"aiqg-bloated-context":     NISTValidReliable,
+	"aiqg-refusal":             NISTValidReliable,
+	"aiqg-role-claim":          NISTSecureResilient,
+	// Outbound quality matchers (Gatekeeper#9). All three signal
+	// degraded model output → Valid & Reliable.
+	"aiqg-repetition":          NISTValidReliable,
+	"aiqg-hallucination-hedge": NISTValidReliable,
+	"aiqg-malformed-output":    NISTValidReliable,
 
 	// Credential exposure — leaked secrets are a privacy issue
 	// (someone's secret in an LLM transcript = data leak).
