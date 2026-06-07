@@ -54,6 +54,13 @@ var nistByPatternID = map[string]string{
 	"aiqg-hallucination-hedge": NISTValidReliable,
 	"aiqg-malformed-output":    NISTValidReliable,
 
+	// Safety / policy matchers (Gatekeeper#10). Populate the Safe
+	// characteristic — until this PR landed it was always 0 on the
+	// Day-1 Report Trustworthiness panel.
+	"aiqg-harm-request":            NISTSafe,
+	"aiqg-credential-solicitation": NISTSafe,
+	"aiqg-explicit-jailbreak":      NISTSafe,
+
 	// Credential exposure — leaked secrets are a privacy issue
 	// (someone's secret in an LLM transcript = data leak).
 	"cred-api-key":          NISTPrivacyEnhanced,
