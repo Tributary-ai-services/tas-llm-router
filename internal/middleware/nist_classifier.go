@@ -61,6 +61,13 @@ var nistByPatternID = map[string]string{
 	"aiqg-credential-solicitation": NISTSafe,
 	"aiqg-explicit-jailbreak":      NISTSafe,
 
+	// Inbound input-quality antipatterns (Gatekeeper#11). Vague /
+	// overloaded / unbounded prompts produce unreliable outputs
+	// regardless of intent → Valid & Reliable.
+	"aiqg-vague-prompt":         NISTValidReliable,
+	"aiqg-instruction-stuffing": NISTValidReliable,
+	"aiqg-unbounded-loop":       NISTValidReliable,
+
 	// Credential exposure — leaked secrets are a privacy issue
 	// (someone's secret in an LLM transcript = data leak).
 	"cred-api-key":          NISTPrivacyEnhanced,
