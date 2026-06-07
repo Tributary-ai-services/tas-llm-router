@@ -54,6 +54,12 @@ type Routing struct {
 	// fallback when the TAS-Workflow header was NOT supplied —
 	// header value always wins to preserve customer intent.
 	workflow string
+
+	// NIST AI RMF characteristic → finding count for this request.
+	// Driven by MapPatternToNIST in nist_classifier.go. Keyed by the
+	// NIST<Characteristic> constants. Direction-agnostic — Section 5
+	// of the Day-1 Report shows the aggregate, not in/out split.
+	nistFindings map[string]int
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -105,6 +111,11 @@ type RoutingSnapshot struct {
 	// Empty when not classified; events.Build uses this as a
 	// fallback when the TAS-Workflow header wasn't sent.
 	Workflow string
+
+	// NIST AI RMF characteristic → finding count for this request.
+	// Direction-agnostic aggregate; Day-1 Report Section 5 renders
+	// these per-characteristic. Nil when no findings.
+	NISTFindings map[string]int
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -129,6 +140,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		FallbackUsed:     r.fallbackUsed,
 		RetrySet:         r.retrySet,
 		Workflow:         r.workflow,
+		NISTFindings:     copyCounts(r.nistFindings),
 	}
 }
 
@@ -337,5 +349,29 @@ func StampGatekeeperFindings(ctx context.Context, direction string, severityCoun
 		if count > (*target)[sev] {
 			(*target)[sev] = count
 		}
+	}
+}
+
+// StampNISTFindings accumulates per-NIST-characteristic finding
+// counts onto the routing sidecar. Direction-agnostic — Section 5
+// of the Day-1 Report shows the request-wide aggregate. Counts are
+// SUMMED across calls (vs StampGatekeeperFindings which takes the
+// max) because inbound+outbound findings of the same characteristic
+// are distinct events, not the same event reported twice.
+func StampNISTFindings(ctx context.Context, nistCounts map[string]int) {
+	if len(nistCounts) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.nistFindings == nil {
+		r.nistFindings = make(map[string]int, len(nistCounts))
+	}
+	for k, v := range nistCounts {
+		r.nistFindings[k] += v
 	}
 }

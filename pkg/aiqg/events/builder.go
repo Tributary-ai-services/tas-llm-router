@@ -74,6 +74,12 @@ type RoutingView struct {
 	// the header always wins because it represents the customer's
 	// explicit declaration of intent.
 	Workflow string
+
+	// NIST AI RMF characteristic → count for this request. Stamped
+	// by the middleware after each scan call. Surfaces on the
+	// AssuranceSummary so the Day-1 Report Trustworthiness section
+	// can render per-characteristic findings.
+	NISTFindings map[string]int
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -250,6 +256,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			InboundFindings:  routing.InboundFindings,
 			OutboundFindings: routing.OutboundFindings,
 			WorstSeverity:    worstSeverityIn(routing.InboundFindings, routing.OutboundFindings),
+			NISTFindings:     routing.NISTFindings,
 		}
 	}
 

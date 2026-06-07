@@ -510,12 +510,18 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			// counts and stamp onto the routing sidecar. Drives the
 			// CLEAR.Assurance score and the AssuranceSummary on the
 			// emitted event. Empty counts still flip ScanRan true so
-			// Assurance scores as Healthy=100 rather than nil.
+			// Assurance scores as Healthy=100 rather than nil. Also
+			// computes per-NIST-AI-RMF-characteristic counts so the
+			// Day-1 Report Trustworthiness section can break findings
+			// down by characteristic, not just severity.
 			counts := map[string]int{}
+			nistCounts := map[string]int{}
 			for _, f := range result.ScanResult.Findings {
 				counts[string(f.Severity)]++
+				nistCounts[middleware.MapPatternToNIST(f.PatternID)]++
 			}
 			middleware.StampGatekeeperFindings(r.Context(), middleware.GatekeeperDirectionInbound, counts)
+			middleware.StampNISTFindings(r.Context(), nistCounts)
 		}
 	}
 
@@ -716,13 +722,18 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 			// and stamp on the routing sidecar. Same pattern as the
 			// inbound stamp in handleChatCompletion. Empty counts
 			// still stamp so the outbound side participates in the
-			// AssuranceSummary even on a clean scan.
+			// AssuranceSummary even on a clean scan. Per-NIST-
+			// characteristic counts get stamped alongside, summed
+			// with any inbound NIST counts already on the snapshot.
 			if result != nil && result.ScanResult != nil {
 				counts := map[string]int{}
+				nistCounts := map[string]int{}
 				for _, f := range result.ScanResult.Findings {
 					counts[string(f.Severity)]++
+					nistCounts[middleware.MapPatternToNIST(f.PatternID)]++
 				}
 				middleware.StampGatekeeperFindings(r.Context(), middleware.GatekeeperDirectionOutbound, counts)
+				middleware.StampNISTFindings(r.Context(), nistCounts)
 			}
 		}
 	}

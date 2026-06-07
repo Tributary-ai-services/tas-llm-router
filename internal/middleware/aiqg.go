@@ -236,6 +236,7 @@ func routingView(r *Routing) events.RoutingView {
 		FallbackUsed:     s.FallbackUsed,
 		RetrySet:         s.RetrySet,
 		Workflow:         s.Workflow,
+		NISTFindings:     s.NISTFindings,
 	}
 }
 

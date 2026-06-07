@@ -180,6 +180,12 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		if a.WorstSeverity != "" {
 			respFields["assurance_worst_severity"] = a.WorstSeverity
 		}
+		// Promote NIST AI RMF per-characteristic counts as flat
+		// top-level fields so LogQL can sum_over_time them directly
+		// in the Day-1 Report Trustworthiness query.
+		for k, v := range a.NISTFindings {
+			respFields["nist_"+k] = v
+		}
 	}
 	e.Logger.WithFields(respFields).Info("aiqg response event")
 	return nil
