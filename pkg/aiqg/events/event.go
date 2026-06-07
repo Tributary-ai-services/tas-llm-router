@@ -198,6 +198,12 @@ type AssuranceSummary struct {
 	InboundFindings  map[string]int `json:"inbound_findings,omitempty"`
 	OutboundFindings map[string]int `json:"outbound_findings,omitempty"`
 	WorstSeverity    string         `json:"worst_severity,omitempty"`
+	// NISTFindings buckets findings by NIST AI RMF characteristic
+	// (secure_resilient / privacy_enhanced / valid_reliable / safe).
+	// Computed from per-finding pattern IDs via
+	// middleware.MapPatternToNIST. Drives the Day-1 Report
+	// Trustworthiness section. omitempty when no findings.
+	NISTFindings map[string]int `json:"nist_findings,omitempty"`
 }
 
 // Status enum values for ResponseEvent.Status.
