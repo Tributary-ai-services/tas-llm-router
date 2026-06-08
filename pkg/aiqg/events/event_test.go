@@ -245,10 +245,10 @@ func TestEnvelopeMarshalsToCloudEventsShape(t *testing.T) {
 // when StreamingSet=true; otherwise the heuristic wins.
 func TestBuild_StreamingPrecedence(t *testing.T) {
 	cases := []struct {
-		name      string
-		url       string
-		view      RoutingView
-		want      bool
+		name string
+		url  string
+		view RoutingView
+		want bool
 	}{
 		{"url_says_yes_view_unset", "/v1/chat/completions?stream=true", RoutingView{}, true},
 		{"url_says_no_view_unset", "/v1/chat/completions", RoutingView{}, false},
@@ -358,6 +358,8 @@ func TestLogEmitter_PromotesNestedFields(t *testing.T) {
 		Data: ResponseEvent{
 			ResponseEventID: "resp-1",
 			RequestEventID:  "req-1",
+			Vendor:          "openai",
+			Model:           "gpt-4o-mini",
 			Status:          StatusSuccess,
 			HTTPStatus:      200,
 			Streamed:        true,
@@ -408,6 +410,10 @@ func TestLogEmitter_PromotesNestedFields(t *testing.T) {
 	requireField(t, resp, "status", StatusSuccess)
 	requireField(t, resp, "streamed", true)
 	requireField(t, resp, "finish_reason", "stop")
+	// Vendor/model are denormalized onto the response event and promoted
+	// onto its log line so dashboards group cost/tokens by vendor/model.
+	requireField(t, resp, "vendor", "openai")
+	requireField(t, resp, "model", "gpt-4o-mini")
 	requireField(t, resp, "prompt_tokens", 100)
 	requireField(t, resp, "total_tokens", 300)
 	requireField(t, resp, "total_cost_usd", 0.0012)

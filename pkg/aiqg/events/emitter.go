@@ -98,17 +98,17 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		"payload":          string(reqJSON),
 		// Routing + attribution — empty strings stay empty in JSON but
 		// LogQL can still filter on them when populated.
-		"vendor":           req.Data.Vendor,
-		"model":            req.Data.Model,
-		"endpoint":         req.Data.Endpoint,
-		"workflow":         req.Data.Workflow,
-		"streaming":        req.Data.Streaming,
-		"region":           req.Data.Region,
-		"tenant_id":        req.Data.TenantID,
-		"aiqg_account_id":  req.Data.AIQGAccountID,
-		"source_app":       req.Data.SourceApp,
-		"dry_run":          req.Data.DryRun,
-		"gateway_version":  req.Data.GatewayVersion,
+		"vendor":          req.Data.Vendor,
+		"model":           req.Data.Model,
+		"endpoint":        req.Data.Endpoint,
+		"workflow":        req.Data.Workflow,
+		"streaming":       req.Data.Streaming,
+		"region":          req.Data.Region,
+		"tenant_id":       req.Data.TenantID,
+		"aiqg_account_id": req.Data.AIQGAccountID,
+		"source_app":      req.Data.SourceApp,
+		"dry_run":         req.Data.DryRun,
+		"gateway_version": req.Data.GatewayVersion,
 	}
 	if req.Data.PolicyBundle != "" {
 		reqFields["policy_bundle"] = req.Data.PolicyBundle
@@ -133,15 +133,16 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		// onto the response log line too so per-workflow dashboard
 		// queries can filter the response stream directly (e.g.
 		// {namespace="tas-llm-router"} | json | workflow="code_generation").
-		"workflow":          req.Data.Workflow,
-		// Vendor/model live on the RequestEvent, but copy them onto the
-		// response log line too so dashboards can group cost/tokens by
-		// vendor/model directly off the response stream (e.g.
-		// sum by (vendor) (sum_over_time(... | unwrap total_cost_usd))).
-		// Empty strings stay empty in JSON but LogQL filters when populated.
-		"vendor":            req.Data.Vendor,
-		"model":             req.Data.Model,
-		"payload":           string(respJSON),
+		"workflow": req.Data.Workflow,
+		// Vendor/model are denormalized onto the ResponseEvent itself
+		// (builder.go), so promote them from the response — dashboards
+		// group cost/tokens by vendor/model directly off the response
+		// stream (e.g. sum by (vendor) (sum_over_time(... | unwrap
+		// total_cost_usd))). Empty strings stay empty in JSON but LogQL
+		// filters when populated.
+		"vendor":  resp.Data.Vendor,
+		"model":   resp.Data.Model,
+		"payload": string(respJSON),
 	}
 	// Token accounting — nil-safe; either fully populated or omitted.
 	if ta := resp.Data.TokenAccounting; ta != nil {

@@ -122,6 +122,14 @@ type ResponseEvent struct {
 	TenantID        string `json:"tenant_id,omitempty"`
 	AIQGAccountID   string `json:"aiqg_account_id,omitempty"`
 
+	// Routing attribution — denormalized from the request's routing
+	// decision so the response event is self-describing: per-vendor and
+	// per-model cost/token dashboards read these directly off the
+	// response stream, and they survive a lost request event (see
+	// response-event.md KI-2). Same values as the paired RequestEvent.
+	Vendor string `json:"vendor,omitempty"`
+	Model  string `json:"model,omitempty"`
+
 	// Outcome
 	CompleteAt      time.Time `json:"complete_at"`
 	Status          string    `json:"status"` // success | vendor_error | gateway_error | policy_blocked | client_disconnect | timeout
@@ -224,12 +232,12 @@ const (
 
 // Lifecycle state enum values for RequestEvent.LifecycleState.
 const (
-	LifecycleReceived            = "received"
-	LifecycleValidated           = "validated"
-	LifecyclePolicyResolved      = "policy_resolved"
-	LifecycleForwarded           = "forwarded"
-	LifecyclePairedWithResponse  = "paired_with_response"
-	LifecycleArchived            = "archived"
+	LifecycleReceived           = "received"
+	LifecycleValidated          = "validated"
+	LifecyclePolicyResolved     = "policy_resolved"
+	LifecycleForwarded          = "forwarded"
+	LifecyclePairedWithResponse = "paired_with_response"
+	LifecycleArchived           = "archived"
 )
 
 // StatusFromHTTP maps an HTTP status code to the spec's status enum.
