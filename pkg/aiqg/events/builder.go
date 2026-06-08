@@ -80,6 +80,10 @@ type RoutingView struct {
 	// AssuranceSummary so the Day-1 Report Trustworthiness section
 	// can render per-characteristic findings.
 	NISTFindings map[string]int
+
+	// Gatekeeper pattern_id → count for this request. Drives the
+	// /api/v1/metrics/tags endpoint. Nil when no findings.
+	TagFindings map[string]int
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -257,6 +261,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			OutboundFindings: routing.OutboundFindings,
 			WorstSeverity:    worstSeverityIn(routing.InboundFindings, routing.OutboundFindings),
 			NISTFindings:     routing.NISTFindings,
+			TagFindings:      routing.TagFindings,
 		}
 	}
 

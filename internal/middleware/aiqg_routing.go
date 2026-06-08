@@ -60,6 +60,11 @@ type Routing struct {
 	// NIST<Characteristic> constants. Direction-agnostic — Section 5
 	// of the Day-1 Report shows the aggregate, not in/out split.
 	nistFindings map[string]int
+
+	// Gatekeeper pattern_id → count for this request. Powers the
+	// /api/v1/metrics/tags endpoint (which shows "what matchers are
+	// firing most often for this tenant"). Direction-agnostic.
+	tagFindings map[string]int
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -116,6 +121,10 @@ type RoutingSnapshot struct {
 	// Direction-agnostic aggregate; Day-1 Report Section 5 renders
 	// these per-characteristic. Nil when no findings.
 	NISTFindings map[string]int
+
+	// Gatekeeper pattern_id → count for this request. Nil when no
+	// findings. Drives /api/v1/metrics/tags.
+	TagFindings map[string]int
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -141,6 +150,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		RetrySet:         r.retrySet,
 		Workflow:         r.workflow,
 		NISTFindings:     copyCounts(r.nistFindings),
+		TagFindings:      copyCounts(r.tagFindings),
 	}
 }
 
@@ -373,5 +383,26 @@ func StampNISTFindings(ctx context.Context, nistCounts map[string]int) {
 	}
 	for k, v := range nistCounts {
 		r.nistFindings[k] += v
+	}
+}
+
+// StampTagFindings accumulates per-pattern_id finding counts.
+// Same SUM semantic as NIST — inbound+outbound counts of the same
+// matcher are distinct findings, not the same one reported twice.
+func StampTagFindings(ctx context.Context, tagCounts map[string]int) {
+	if len(tagCounts) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tagFindings == nil {
+		r.tagFindings = make(map[string]int, len(tagCounts))
+	}
+	for k, v := range tagCounts {
+		r.tagFindings[k] += v
 	}
 }

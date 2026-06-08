@@ -237,6 +237,7 @@ func routingView(r *Routing) events.RoutingView {
 		RetrySet:         s.RetrySet,
 		Workflow:         s.Workflow,
 		NISTFindings:     s.NISTFindings,
+		TagFindings:      s.TagFindings,
 	}
 }
 

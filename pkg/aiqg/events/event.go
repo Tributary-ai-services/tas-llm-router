@@ -204,6 +204,12 @@ type AssuranceSummary struct {
 	// middleware.MapPatternToNIST. Drives the Day-1 Report
 	// Trustworthiness section. omitempty when no findings.
 	NISTFindings map[string]int `json:"nist_findings,omitempty"`
+
+	// TagFindings buckets findings by Gatekeeper pattern_id
+	// (aiqg-role-claim, pii-email, …). Drives /api/v1/metrics/tags
+	// — "what matchers are firing most often for this tenant".
+	// omitempty when no findings.
+	TagFindings map[string]int `json:"tag_findings,omitempty"`
 }
 
 // Status enum values for ResponseEvent.Status.
