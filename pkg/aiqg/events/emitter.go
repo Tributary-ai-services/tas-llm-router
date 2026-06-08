@@ -134,6 +134,13 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		// queries can filter the response stream directly (e.g.
 		// {namespace="tas-llm-router"} | json | workflow="code_generation").
 		"workflow":          req.Data.Workflow,
+		// Vendor/model live on the RequestEvent, but copy them onto the
+		// response log line too so dashboards can group cost/tokens by
+		// vendor/model directly off the response stream (e.g.
+		// sum by (vendor) (sum_over_time(... | unwrap total_cost_usd))).
+		// Empty strings stay empty in JSON but LogQL filters when populated.
+		"vendor":            req.Data.Vendor,
+		"model":             req.Data.Model,
 		"payload":           string(respJSON),
 	}
 	// Token accounting — nil-safe; either fully populated or omitted.
@@ -185,6 +192,13 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		// in the Day-1 Report Trustworthiness query.
 		for k, v := range a.NISTFindings {
 			respFields["nist_"+k] = v
+		}
+		// Promote per-pattern_id counts as `tag_<sanitized>` fields.
+		// Hyphens become underscores because LogQL labels need to be
+		// valid identifiers. /api/v1/metrics/tags performs the same
+		// replacement when building its queries.
+		for k, v := range a.TagFindings {
+			respFields["tag_"+sanitizeTagKey(k)] = v
 		}
 	}
 	e.Logger.WithFields(respFields).Info("aiqg response event")
@@ -242,4 +256,22 @@ func (e *MemoryEmitter) Reset() {
 	defer e.mu.Unlock()
 	e.requests = nil
 	e.responses = nil
+}
+
+// sanitizeTagKey converts a Gatekeeper pattern_id ("aiqg-role-claim",
+// "pii-ssn") into a Loki-label-safe identifier (hyphens become
+// underscores). Kept in this package because the matching reverse
+// lookup lives client-side in aiqg-dashboard-be's /metrics/tags
+// handler — they MUST agree on the mapping.
+func sanitizeTagKey(s string) string {
+	var b []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '-' {
+			b = append(b, '_')
+			continue
+		}
+		b = append(b, c)
+	}
+	return string(b)
 }

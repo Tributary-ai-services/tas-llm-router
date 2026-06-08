@@ -516,12 +516,15 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			// down by characteristic, not just severity.
 			counts := map[string]int{}
 			nistCounts := map[string]int{}
+			tagCounts := map[string]int{}
 			for _, f := range result.ScanResult.Findings {
 				counts[string(f.Severity)]++
 				nistCounts[middleware.MapPatternToNIST(f.PatternID)]++
+				tagCounts[f.PatternID]++
 			}
 			middleware.StampGatekeeperFindings(r.Context(), middleware.GatekeeperDirectionInbound, counts)
 			middleware.StampNISTFindings(r.Context(), nistCounts)
+			middleware.StampTagFindings(r.Context(), tagCounts)
 		}
 	}
 
@@ -728,12 +731,15 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 			if result != nil && result.ScanResult != nil {
 				counts := map[string]int{}
 				nistCounts := map[string]int{}
+				tagCounts := map[string]int{}
 				for _, f := range result.ScanResult.Findings {
 					counts[string(f.Severity)]++
 					nistCounts[middleware.MapPatternToNIST(f.PatternID)]++
+					tagCounts[f.PatternID]++
 				}
 				middleware.StampGatekeeperFindings(r.Context(), middleware.GatekeeperDirectionOutbound, counts)
 				middleware.StampNISTFindings(r.Context(), nistCounts)
+				middleware.StampTagFindings(r.Context(), tagCounts)
 			}
 		}
 	}
