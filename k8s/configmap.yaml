@@ -89,3 +89,13 @@ data:
   # secret comes from llm-router-secret (out-of-band managed) as
   # AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN.
   AIQG_DASHBOARD_URL: "http://aiqg-dashboard-be.aiqg.svc.cluster.local:8095"
+
+  # AIQG event sink. "both" fans paired CloudEvents to logrus
+  # (→ Loki, the existing read path used by aiqg-dashboard-be) AND
+  # to Kafka topic tas.aiqg.events.v1 (consumed by the Spark
+  # aggregator that materializes the aiqg.event_metrics hypertable
+  # in TimescaleDB). Keeping the Loki path live during the
+  # TimescaleDB cutover is the rollback escape hatch.
+  AIQG_EMITTER_TYPE: "both"
+  AIQG_KAFKA_BROKERS: "kafka-shared.tas-shared:9092"
+  AIQG_KAFKA_TOPIC: "tas.aiqg.events.v1"
