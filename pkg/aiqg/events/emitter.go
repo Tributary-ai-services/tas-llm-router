@@ -151,14 +151,39 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		respFields["total_tokens"] = ta.TotalTokens
 		respFields["total_cost_usd"] = ta.TotalCostUSD
 	}
-	// Promote end_to_end_ms so LogQL can unwrap it directly — needed
-	// for the dashboard /reports/preview p50/p95 latency queries.
-	// Without this, latency is only reachable by parsing the embedded
-	// `payload` JSON, which LogQL handles awkwardly. Skipped when nil
-	// (request never completed) so dashboards distinguish "not
-	// captured" from "captured as zero".
-	if ms := resp.Data.EventTimestamps.EndToEndMs; ms != nil {
+	// Promote the timing decomposition so LogQL can unwrap each
+	// component directly. instrumentation.Snapshot captures the full
+	// breakdown — gateway ingress → vendor TTFB → vendor TTFT →
+	// vendor generation → gateway egress — but only end_to_end_ms
+	// reaches dashboards unless we surface the rest here. Phase 2.3
+	// (latency decomposition card) consumes these fields.
+	//
+	// Every duration is *int64; nil means "not captured" (skipped) so
+	// dashboards distinguish "no data" from "0 ms".
+	ts := resp.Data.EventTimestamps
+	if ms := ts.EndToEndMs; ms != nil {
 		respFields["end_to_end_ms"] = *ms
+	}
+	if ms := ts.GatewayIngressMs; ms != nil {
+		respFields["gateway_ingress_ms"] = *ms
+	}
+	if ms := ts.GatewayEgressMs; ms != nil {
+		respFields["gateway_egress_ms"] = *ms
+	}
+	if ms := ts.GatewayOverheadMs; ms != nil {
+		respFields["gateway_overhead_ms"] = *ms
+	}
+	if ms := ts.VendorTTFBMs; ms != nil {
+		respFields["vendor_ttfb_ms"] = *ms
+	}
+	if ms := ts.VendorTTFTMs; ms != nil {
+		respFields["vendor_ttft_ms"] = *ms
+	}
+	if ms := ts.VendorGenerationMs; ms != nil {
+		respFields["vendor_generation_ms"] = *ms
+	}
+	if ms := ts.MedianInterTokenMs; ms != nil {
+		respFields["median_inter_token_ms"] = *ms
 	}
 	// CLEAR scores — pointer-fielded; promote each non-nil dimension.
 	if c := resp.Data.CLEAR; c != nil {
