@@ -380,6 +380,20 @@ func TestLogEmitter_PromotesNestedFields(t *testing.T) {
 				OutboundCount: 0,
 				WorstSeverity: "medium",
 			},
+			// Timing decomposition — every field promoted to top-level
+			// logrus so LogQL can unwrap each component independently.
+			// Phase 2.3 latency-decomposition card on the Health Report
+			// consumes these fields.
+			EventTimestamps: instrumentation.Snapshot{
+				EndToEndMs:         ptrI64(2500),
+				GatewayIngressMs:   ptrI64(12),
+				GatewayEgressMs:    ptrI64(8),
+				GatewayOverheadMs:  ptrI64(20),
+				VendorTTFBMs:       ptrI64(180),
+				VendorTTFTMs:       ptrI64(220),
+				VendorGenerationMs: ptrI64(2260),
+				MedianInterTokenMs: ptrI64(35),
+			},
 		},
 	}
 	// Wire a clear.Scores manually — events imports pkg/clear so this
@@ -423,7 +437,23 @@ func TestLogEmitter_PromotesNestedFields(t *testing.T) {
 	requireField(t, resp, "assurance_inbound_count", 2)
 	requireField(t, resp, "assurance_outbound_count", 0)
 	requireField(t, resp, "assurance_worst_severity", "medium")
+	// Timing decomposition — every component promoted as int64 so LogQL
+	// `unwrap` works directly. nil snapshot fields stay absent (separate
+	// regression in TestLogEmitter_NilNestedStructs).
+	requireField(t, resp, "end_to_end_ms", int64(2500))
+	requireField(t, resp, "gateway_ingress_ms", int64(12))
+	requireField(t, resp, "gateway_egress_ms", int64(8))
+	requireField(t, resp, "gateway_overhead_ms", int64(20))
+	requireField(t, resp, "vendor_ttfb_ms", int64(180))
+	requireField(t, resp, "vendor_ttft_ms", int64(220))
+	requireField(t, resp, "vendor_generation_ms", int64(2260))
+	requireField(t, resp, "median_inter_token_ms", int64(35))
 }
+
+// ptrI64 returns a pointer to an int64 literal. Used only by tests
+// that need to populate Snapshot fields without spinning up a full
+// instrumentation.Collector run.
+func ptrI64(v int64) *int64 { return &v }
 
 // Empty/nil nested structs leave their promoted fields absent without
 // panicking — important because not every request has TokenAccounting,
