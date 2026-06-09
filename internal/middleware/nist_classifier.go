@@ -53,6 +53,14 @@ var nistByPatternID = map[string]string{
 	"aiqg-repetition":          NISTValidReliable,
 	"aiqg-hallucination-hedge": NISTValidReliable,
 	"aiqg-malformed-output":    NISTValidReliable,
+	// Citation marker (Gatekeeper#12, Phase 2.4). Presence of citations
+	// in a response is a positive signal for groundedness — a request
+	// that grounded its output in retrieved context is more reliable
+	// than one that didn't. Lives in Valid & Reliable for two reasons:
+	// (a) citation absence on a RAG response is the meaningful signal,
+	// and absence is an unreliability proxy; (b) keeps the Trustworthiness
+	// panel on the report scoring this as quality rather than safety.
+	"aiqg-citation-marker": NISTValidReliable,
 
 	// Safety / policy matchers (Gatekeeper#10). Populate the Safe
 	// characteristic — until this PR landed it was always 0 on the
