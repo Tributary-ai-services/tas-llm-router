@@ -95,6 +95,12 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *types.ChatRequ
 		return nil, fmt.Errorf("failed to convert request: %w", err)
 	}
 
+	// AIQG: mirror StreamCompletion — stamp forwarded + wire httptrace
+	// so the response event carries gateway_ingress_ms and
+	// vendor_ttfb_ms. Both are no-ops outside AIQG mode.
+	instrumentation.StampForwarded(ctx)
+	ctx = instrumentation.Attach(ctx)
+
 	// Make the API call
 	resp, err := p.client.CreateChatCompletion(ctx, *openaiReq)
 	if err != nil {
@@ -118,9 +124,11 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 	// Enable streaming
 	openaiReq.Stream = true
 
-	// AIQG: stamp the moment the request is handed to the vendor client.
-	// No-op when no TimingCollector is attached to ctx (non-AIQG callers).
+	// AIQG: stamp the moment the request is handed to the vendor client
+	// and wire httptrace so GotFirstResponseByte → StampTTFB populates
+	// vendor_ttfb_ms. Both are no-ops outside AIQG mode.
 	instrumentation.StampForwarded(ctx)
+	ctx = instrumentation.Attach(ctx)
 
 	// Make the streaming API call
 	stream, err := p.client.CreateChatCompletionStream(ctx, *openaiReq)
@@ -138,6 +146,7 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 		defer stream.Close()
 		defer instrumentation.StampLastChunk(ctx)
 
+		ttftStamped := false
 		for {
 			response, err := stream.Recv()
 			if err != nil {
@@ -154,7 +163,12 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 			// generated content. hasContent below is true only when the
 			// chunk carries actual model output (content text or a
 			// tool-call argument fragment).
-			instrumentation.StampChunk(ctx, openaiChunkHasContent(&response))
+			hasContent := openaiChunkHasContent(&response)
+			if hasContent && !ttftStamped {
+				instrumentation.StampTTFT(ctx)
+				ttftStamped = true
+			}
+			instrumentation.StampChunk(ctx, hasContent)
 
 			// Convert chunk to our format
 			chunk := p.convertFromOpenAIChunk(&response, req)
