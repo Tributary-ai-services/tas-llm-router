@@ -93,6 +93,12 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *types.ChatR
 		return nil, fmt.Errorf("failed to convert request: %w", err)
 	}
 
+	// AIQG: mirror StreamCompletion — stamp forwarded + wire httptrace
+	// so the response event carries gateway_ingress_ms and
+	// vendor_ttfb_ms. Both are no-ops outside AIQG mode.
+	instrumentation.StampForwarded(ctx)
+	ctx = instrumentation.Attach(ctx)
+
 	// Make the API call
 	resp, err := p.client.Messages.New(ctx, *anthropicReq)
 	if err != nil {
@@ -113,9 +119,10 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 		return nil, fmt.Errorf("failed to convert request: %w", err)
 	}
 
-	// AIQG: stamp the moment the request is handed to the vendor client.
-	// No-op when no TimingCollector is attached to ctx.
+	// AIQG: stamp forwarded + wire httptrace so GotFirstResponseByte
+	// → StampTTFB populates vendor_ttfb_ms. Both no-ops outside AIQG mode.
 	instrumentation.StampForwarded(ctx)
+	ctx = instrumentation.Attach(ctx)
 
 	// Create the streaming request
 	stream := p.client.Messages.NewStreaming(ctx, *anthropicReq)
@@ -128,6 +135,7 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 		defer close(chunks)
 		defer instrumentation.StampLastChunk(ctx)
 
+		ttftStamped := false
 		message := anthropic.Message{}
 		for stream.Next() {
 			event := stream.Current()
@@ -144,7 +152,12 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 			// hasContent is true only for ContentBlockDelta events with
 			// non-empty TextDelta (or future tool-use delta types that
 			// carry generated arguments).
-			instrumentation.StampChunk(ctx, anthropicEventHasContent(event))
+			hasContent := anthropicEventHasContent(event)
+			if hasContent && !ttftStamped {
+				instrumentation.StampTTFT(ctx)
+				ttftStamped = true
+			}
+			instrumentation.StampChunk(ctx, hasContent)
 
 			// Convert event to our chunk format
 			chunk := p.convertStreamEvent(event, req, &message)

@@ -344,6 +344,25 @@ func (w *statusCapturingResponseWriter) status() int {
 	return w.code
 }
 
+// Flush delegates to the wrapped ResponseWriter when it implements
+// http.Flusher. Streaming response handlers (chat completions with
+// stream=true) type-assert the ResponseWriter to http.Flusher and
+// panic when the assertion fails. Without this delegation the AIQG
+// middleware silently broke all streaming traffic — confirmed via
+// a "interface conversion: *statusCapturingResponseWriter is not
+// http.Flusher" panic surfaced in Loki on 2026-06-09.
+//
+// Net/http's chunked-encoding path requires Flush to push bytes onto
+// the wire; in streaming mode every chunk handler calls Flush after
+// each Write. Without this, chunks buffer until the response ends —
+// turning a streaming response back into a non-streaming one (or
+// panicking with an unchecked type assertion).
+func (w *statusCapturingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // rejectPathA emits the strict-mode 401 response and the
 // path_a_auth_rejected audit event (per audit-log-entry.md §97). The
 // response body names the missing header so customers can self-diagnose
