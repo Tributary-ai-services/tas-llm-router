@@ -6,15 +6,45 @@ cost, latency, tag, and avoidable-cost panels light up with believable
 multi-agent traffic — and reports the **potential savings** AIQG would
 surface.
 
-It does **not** call any vendor LLM. Per-request inputs are sampled from
-eight agent profiles and scored by the **real** `pkg/clear` scorer
+It does **not** call any vendor LLM. Per-step inputs are sampled from
+eight workflow profiles and scored by the **real** `pkg/clear` scorer
 (`clear.Compute`) using the **real** pricing table (`clear.DollarCost`),
 so demo CLEAR scores and dollar costs match what the live gateway would
 produce for the same inputs. The emitted JSON matches the field shape of
 `pkg/aiqg/events/emitter.go` exactly, so the dashboard reads it
 identically to a real gateway line.
 
-## Agent traffic types (profiles)
+Traffic is generated as **agent flows**: each demo agent runs flows whose
+steps span workflow types, sharing a `flow_id` / `conversation_id` and
+linked via `step_id` / `parent_step_id` — so the per-agent rollup and the
+flow drill-down (trace waterfall) both have real structure. See
+[`docs/AIQG-AGENT-FLOW-ATTRIBUTION.md`](../../docs/AIQG-AGENT-FLOW-ATTRIBUTION.md)
+for the identity model these fields implement.
+
+## Demo agents and their flows
+
+| Agent | Flow shape (step → workflow_type) | Multi-turn |
+|---|---|---|
+| **Research Orchestrator** | planner(`agentic`) → 2–4× retrieve(`rag`) → synthesize(`summarization`) | no |
+| **Coding Copilot** | plan(`agentic`) → generate(`code_generation`) → ~40% fix-on-fail(`code_generation`) | up to 2 |
+| **Support Bot** | classify(`classification_extraction`) → answer(`single_turn_qa`) | 2–4 turns share one `conversation_id` |
+| **Data Extractor** | 3–6 sibling extraction steps(`classification_extraction`) under a root | no |
+
+A configurable number of **inferred / unattributed** flows are also
+emitted: `identity_source=inferred`, `flow_id` present (as if
+reconstructed from the session), but **no** `agent_id` / `agent_name` —
+representing uninstrumented traffic. Named flows carry
+`identity_source=header`, with a fraction `trace` (flow id arrived via a
+W3C `traceparent`: 32-hex `flow_id`, 16-hex `step_id`). `agent_id` is
+stable per agent name across runs/seeds.
+
+Agent-flow fields stamped on every step (promoted top-level for LogQL):
+`agent_id`, `agent_name`, `agent_version`, `conversation_id`, `flow_id`,
+`step_id`, `parent_step_id`, `flow_step_seq`, `identity_source`.
+
+## Workflow profiles (one per step)
+
+| Profile | workflow_type | Story it tells |
 
 | Profile | workflow_type | Story it tells |
 |---|---|---|
@@ -40,17 +70,17 @@ every pass, so a single small pass still lights up every dashboard panel
 # One pass to the default Loki, default aiqg-demo tenant, then exit.
 go run ./cmd/demo-traffic
 
-# Inspect the lines without pushing.
-go run ./cmd/demo-traffic --dry-run --per-profile 4
+# Inspect the flows without pushing.
+go run ./cmd/demo-traffic --dry-run --flows-per-agent 2
 
-# Bigger pass (30 events × 8 profiles = 240 events).
-go run ./cmd/demo-traffic --per-profile 30
+# Bigger pass (6 flows per agent + 4 unattributed flows).
+go run ./cmd/demo-traffic --flows-per-agent 6 --inferred-flows 4
 
 # Keep emitting one pass every 30s (Ctrl-C to stop).
 go run ./cmd/demo-traffic --interval 30s
 
 # Dial up the compliance/savings story for a demo.
-go run ./cmd/demo-traffic --per-profile 40 --compliance-rate 0.2 --vague-rate 0.2 --hedging-rate 0.2
+go run ./cmd/demo-traffic --flows-per-agent 10 --compliance-rate 0.2 --vague-rate 0.2 --hedging-rate 0.2
 ```
 
 ### Flags
@@ -60,7 +90,8 @@ go run ./cmd/demo-traffic --per-profile 40 --compliance-rate 0.2 --vague-rate 0.
 | `--loki-url` | `https://loki.tas.scharber.com` | Loki base URL (push API at `/loki/api/v1/push`) |
 | `--tenant-id` | aiqg-demo tenant | `tenant_id` stamped on every event (dashboard filters on it) |
 | `--account-id` | aiqg-demo account | `aiqg_account_id` |
-| `--per-profile` | `12` | events per agent profile per pass |
+| `--flows-per-agent` | `4` | flows per demo agent per pass (each flow emits several step-events) |
+| `--inferred-flows` | `3` | unattributed flows per pass (`identity_source=inferred`, no agent id) |
 | `--interval` | `0` | if `>0`, loop forever emitting one pass per interval |
 | `--seed` | `0` | RNG seed for reproducible runs (0 = time-based) |
 | `--spread` | `90` | seconds to spread a pass's events over, ending at now |
@@ -101,6 +132,12 @@ q "quantile_over_time(0.95, {namespace=\"tas-llm-router\"} |= \"aiqg response ev
 
 # Avoidable-cost: Hedging category — /metrics/cost avoidable breakdown
 q "sum_over_time({namespace=\"tas-llm-router\"} |= \"aiqg response event\" | json | tenant_id=\"$TENANT\" | (tag_aiqg_hallucination_hedge=~\"[1-9].*\" or tag_aiqg_repetition=~\"[1-9].*\") | unwrap total_cost_usd [5m])"
+
+# Per-agent cost rollup — future /api/v1/metrics/agents (agent-flow attribution)
+q "sum by (agent_id) (sum_over_time({namespace=\"tas-llm-router\"} |= \"aiqg response event\" | json | tenant_id=\"$TENANT\" | agent_id!=\"\" | unwrap total_cost_usd [15m]))"
+
+# identity_source split (header / trace / inferred) — named vs guessed flows
+q "sum by (identity_source) (count_over_time({namespace=\"tas-llm-router\"} |= \"aiqg response event\" | json | tenant_id=\"$TENANT\" | identity_source!=\"\" [15m]))"
 ```
 
 Or open the dashboard (`aiqg.tas.scharber.com`) as `aiqg-demo` and watch

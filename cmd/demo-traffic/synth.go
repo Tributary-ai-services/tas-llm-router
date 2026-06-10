@@ -15,7 +15,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/tributary-ai/llm-router-waf/pkg/clear"
@@ -31,13 +30,16 @@ type rates struct {
 }
 
 // synthResult is the per-event rollup the CLI summarizes at the end —
-// enough to report the "potential savings" headline.
+// enough to report the "potential savings" headline and per-agent/flow
+// breakdown.
 type synthResult struct {
-	Profile     string
-	CostUSD     float64
-	Composite   int
+	Profile      string
+	Agent        string // agent_name; "" for inferred/unattributed flows
+	FlowID       string // for counting distinct flows per agent
+	CostUSD      float64
+	Composite    int
 	HasComposite bool
-	Avoidable   bool    // carried at least one avoidable-cost matcher
+	Avoidable    bool    // carried at least one avoidable-cost matcher
 	AvoidableUSD float64 // cost attributed to avoidable matchers
 }
 
@@ -289,15 +291,7 @@ func sanitizeTagKey(s string) string {
 
 // uuid renders a v4-shaped identifier from the seeded source so runs
 // are reproducible under --seed.
-func (g rng) uuid() string {
-	var b [16]byte
-	for i := range b {
-		b[i] = byte(g.r.Intn(256))
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
+func (g rng) uuid() string { return uuidFromSource(g.r) }
 
 func maxInt(a, b int) int {
 	if a > b {

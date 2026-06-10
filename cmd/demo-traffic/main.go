@@ -48,7 +48,8 @@ func main() {
 		lokiURL    = flag.String("loki-url", defaultLokiURL, "Loki base URL (push API at /loki/api/v1/push)")
 		tenantID   = flag.String("tenant-id", defaultTenantID, "AIQG account tenant_id stamped on every event")
 		accountID  = flag.String("account-id", defaultAccountID, "AIQG account id (aiqg_account_id)")
-		perProfile = flag.Int("per-profile", 12, "events per agent profile per pass")
+		flowsPer   = flag.Int("flows-per-agent", 4, "flows generated per demo agent per pass (each flow emits several step-events)")
+		inferredFl = flag.Int("inferred-flows", 3, "unattributed flows per pass (identity_source=inferred, no agent id)")
 		interval   = flag.Duration("interval", 0, "if >0, loop forever emitting one pass per interval (e.g. 30s)")
 		seed       = flag.Int64("seed", 0, "RNG seed for reproducible runs (0 = time-based)")
 		dryRun     = flag.Bool("dry-run", false, "print log lines to stdout instead of pushing to Loki")
@@ -86,8 +87,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("demo-traffic: tenant=%s account=%s per-profile=%d profiles=%d seed=%d dry-run=%v\n",
-		*tenantID, *accountID, *perProfile, len(profiles), s, *dryRun)
+	fmt.Printf("demo-traffic: tenant=%s account=%s agents=%d flows-per-agent=%d inferred-flows=%d seed=%d dry-run=%v\n",
+		*tenantID, *accountID, len(personas), *flowsPer, *inferredFl, s, *dryRun)
 	if *interval <= 0 {
 		fmt.Println("mode: single pass")
 	} else {
@@ -95,7 +96,7 @@ func main() {
 	}
 
 	pass := func(now time.Time) error {
-		entries, results := buildPass(g, r, *tenantID, *accountID, *perProfile, *spreadSec, now)
+		entries, results := buildPass(g, r, *tenantID, *accountID, *flowsPer, *inferredFl, *spreadSec, now)
 		if *dryRun {
 			for _, e := range entries {
 				fmt.Println(e.Line)
@@ -133,20 +134,47 @@ func main() {
 	}
 }
 
-// buildPass synthesizes one full pass: per-profile events with the first
-// of each profile forced to carry its signature matcher. Timestamps are
-// spread across the last spreadSec seconds so the time-series panels
-// render a curve rather than a single spike.
-func buildPass(g rng, r rates, tenantID, accountID string, perProfile, spreadSec int, now time.Time) ([]lokiEntry, []synthResult) {
+// buildPass synthesizes one full pass as agent flows: each demo agent
+// runs `flowsPerAgent` flows (grouped into multi-turn conversations),
+// plus `inferredFlows` unattributed flows with no agent identity. Every
+// flow is a tree of step-events sharing flow_id/conversation_id and
+// linked via step_id/parent_step_id. The first event of each workflow
+// profile is forced to carry its signature matcher so every dashboard
+// panel still lights up in one pass. Timestamps are spread across the
+// last spreadSec seconds so the time-series panels render a curve.
+func buildPass(g rng, r rates, tenantID, accountID string, flowsPerAgent, inferredFlows, spreadSec int, now time.Time) ([]lokiEntry, []synthResult) {
 	var entries []lokiEntry
 	var results []synthResult
 	window := time.Duration(spreadSec) * time.Second
+	seenSig := map[string]bool{} // profile key → signature already forced this pass
 
-	for _, p := range profiles {
-		for i := range perProfile {
-			// Offset back from now by a random fraction of the window.
-			ts := now.Add(-time.Duration(g.r.Int63n(int64(window) + 1)))
-			fields, res := synthEvent(g, p, i == 0, r, tenantID, accountID, ts)
+	// emitFlow renders one flow's step tree. meta carries the flow-level
+	// identity (agent/conversation/flow/source); mkStepID mints each
+	// step's id (uuid for header flows, 16-hex span id for trace flows).
+	// base is the (≤ now) anchor; steps are laid out just before it so
+	// none land in the future.
+	emitFlow := func(steps []stepSpec, meta agentContext, mkStepID func() string) {
+		stepIDs := make([]string, len(steps))
+		for i := range steps {
+			stepIDs[i] = mkStepID()
+		}
+		base := now.Add(-time.Duration(g.r.Int63n(int64(window) + 1)))
+		for i, s := range steps {
+			p := profileByKey[s.Profile]
+			actx := meta
+			actx.StepID = stepIDs[i]
+			actx.FlowStepSeq = i + 1
+			if s.Parent >= 0 {
+				actx.ParentStepID = stepIDs[s.Parent]
+			}
+			ts := base.Add(-time.Duration(len(steps)-1-i) * 50 * time.Millisecond)
+
+			sig := !seenSig[p.Key]
+			seenSig[p.Key] = true
+			fields, res := synthEvent(g, p, sig, r, tenantID, accountID, ts)
+			actx.stamp(fields)
+			res.Agent = actx.AgentName
+			res.FlowID = actx.FlowID
 			line, err := marshalLine(fields)
 			if err != nil {
 				continue
@@ -155,32 +183,77 @@ func buildPass(g rng, r rates, tenantID, accountID string, perProfile, spreadSec
 			results = append(results, res)
 		}
 	}
+
+	// Named agent flows.
+	for _, persona := range personas {
+		agentID := agentIDFor(persona.Name)
+		for remaining := flowsPerAgent; remaining > 0; {
+			turns := min(g.intIn(persona.TurnsLo, persona.TurnsHi), remaining)
+			convoID := g.uuid() // one conversation shared across this run's turns
+			for range turns {
+				remaining--
+				trace := g.chance(persona.TraceProb)
+				flowID, idSrc := g.uuid(), "header"
+				if trace {
+					flowID, idSrc = g.hex(16), "trace" // 32-hex W3C trace id
+				}
+				meta := agentContext{
+					AgentID: agentID, AgentName: persona.Name, AgentVersion: persona.Version,
+					ConversationID: convoID, FlowID: flowID, IdentitySource: idSrc,
+				}
+				mkStepID := g.uuid
+				if trace {
+					mkStepID = func() string { return g.hex(8) } // 16-hex W3C span id
+				}
+				emitFlow(persona.BuildFlow(g), meta, mkStepID)
+			}
+		}
+	}
+
+	// Unattributed (inferred) flows — flow_id present (reconstructed from
+	// session), but no agent_id/agent_name.
+	for range inferredFlows {
+		persona := personas[g.r.Intn(len(personas))] // reuse a flow shape
+		meta := agentContext{ConversationID: g.uuid(), FlowID: g.uuid(), IdentitySource: "inferred"}
+		emitFlow(persona.BuildFlow(g), meta, g.uuid)
+	}
+
 	return entries, results
 }
 
-// printSummary reports the run's headline numbers, including the
-// potential savings (avoidable spend) the dashboard's avoidable-cost
-// panel will surface.
+// printSummary reports the run's headline numbers rolled up per agent —
+// flows, step-events, cost, potential savings (avoidable spend), and
+// average CLEAR — exactly the shape the per-agent dashboard view shows.
 func printSummary(results []synthResult, dryRun bool) {
 	type agg struct {
-		count        int
+		flows        map[string]bool
+		steps        int
 		cost         float64
 		avoidableUSD float64
 		compSum      int
 		compN        int
 	}
-	byProfile := map[string]*agg{}
+	byAgent := map[string]*agg{}
 	var total agg
+	total.flows = map[string]bool{}
 	for _, res := range results {
-		a := byProfile[res.Profile]
-		if a == nil {
-			a = &agg{}
-			byProfile[res.Profile] = a
+		name := res.Agent
+		if name == "" {
+			name = "(inferred / unattributed)"
 		}
-		a.count++
+		a := byAgent[name]
+		if a == nil {
+			a = &agg{flows: map[string]bool{}}
+			byAgent[name] = a
+		}
+		a.steps++
 		a.cost += res.CostUSD
 		a.avoidableUSD += res.AvoidableUSD
-		total.count++
+		if res.FlowID != "" {
+			a.flows[res.FlowID] = true
+			total.flows[res.FlowID] = true
+		}
+		total.steps++
 		total.cost += res.CostUSD
 		total.avoidableUSD += res.AvoidableUSD
 		if res.HasComposite {
@@ -191,8 +264,8 @@ func printSummary(results []synthResult, dryRun bool) {
 		}
 	}
 
-	keys := make([]string, 0, len(byProfile))
-	for k := range byProfile {
+	keys := make([]string, 0, len(byAgent))
+	for k := range byAgent {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -201,16 +274,16 @@ func printSummary(results []synthResult, dryRun bool) {
 	if dryRun {
 		verb = "generated (dry-run)"
 	}
-	fmt.Printf("\n%s %d events  |  total cost $%.4f  |  potential savings $%.4f (%.1f%%)\n",
-		verb, total.count, total.cost, total.avoidableUSD, pct(total.avoidableUSD, total.cost))
-	fmt.Printf("%-28s %6s  %12s  %12s  %9s\n", "profile", "events", "cost USD", "avoidable", "avg CLEAR")
+	fmt.Printf("\n%s %d flows / %d step-events  |  total cost $%.4f  |  potential savings $%.4f (%.1f%%)\n",
+		verb, len(total.flows), total.steps, total.cost, total.avoidableUSD, pct(total.avoidableUSD, total.cost))
+	fmt.Printf("%-30s %6s %6s  %12s  %12s  %9s\n", "agent", "flows", "steps", "cost USD", "avoidable", "avg CLEAR")
 	for _, k := range keys {
-		a := byProfile[k]
+		a := byAgent[k]
 		avg := 0
 		if a.compN > 0 {
 			avg = a.compSum / a.compN
 		}
-		fmt.Printf("%-28s %6d  %12.4f  %12.4f  %9d\n", k, a.count, a.cost, a.avoidableUSD, avg)
+		fmt.Printf("%-30s %6d %6d  %12.4f  %12.4f  %9d\n", k, len(a.flows), a.steps, a.cost, a.avoidableUSD, avg)
 	}
 	fmt.Println()
 }
