@@ -167,6 +167,25 @@ type ResponseEvent struct {
 	// Versioning
 	ScoringVersion string `json:"scoring_version"`
 	GatewayVersion string `json:"gateway_version"`
+
+	// ResolvedPolicyBundle is the bundle aiqg-dashboard-be's
+	// /internal/policy/resolve picked for this request (Phase 4.0).
+	// Always populated — nil/empty would defeat the "every request
+	// resolves to exactly one bundle" guarantee. When source="default"
+	// the bundle ID is empty and bundle name is "(default)", and the
+	// (Stage 4.1+) enforcement engine treats this as observe-only.
+	ResolvedPolicyBundle *ResolvedPolicyBundle `json:"resolved_policy_bundle,omitempty"`
+}
+
+// ResolvedPolicyBundle mirrors the dashboard-be ResolveResponse shape.
+// The middleware fills this in after calling the resolver; the emitter
+// promotes the fields to top-level logrus labels (resolved_policy_bundle_id
+// + resolved_policy_bundle_name + resolved_policy_bundle_source) so LogQL
+// can aggregate without parsing the embedded payload.
+type ResolvedPolicyBundle struct {
+	BundleID   string `json:"bundle_id"`
+	BundleName string `json:"bundle_name"`
+	Source     string `json:"source"` // "explicit" | "tenant_active" | "default"
 }
 
 // TokenAccounting carries the vendor-reported token counts and the

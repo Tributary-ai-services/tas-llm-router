@@ -38,6 +38,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
 
@@ -71,6 +72,14 @@ type AIQGConfig struct {
 	// Once a Resolver is configured, unknown tokens become 401 and
 	// suspended accounts become 403.
 	Resolver tokens.Resolver
+
+	// PolicyResolver picks the AIQG policy_bundle that applies to each
+	// request (Phase 4.0). Nil is allowed — the middleware emits
+	// events without a resolved_policy_bundle field, matching pre-4.0
+	// behavior. When configured but the resolver returns an error,
+	// the middleware falls back to policy.Default() so the event
+	// always has a resolution (the "every request resolves" gate).
+	PolicyResolver policy.Resolver
 }
 
 // NewAIQG returns the middleware constructor. The returned handler is a
@@ -171,6 +180,34 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	}
 	instrumentation.StampReceived(ctx)
 
+	// Phase 4.0 — resolve which policy bundle applies. Observation-only:
+	// stash on the request context so events.Build can stamp it on
+	// the response event. Errors degrade to Default() so "every event
+	// has a resolution" is upheld even when the resolver is down.
+	var bundleResolution policy.Resolution
+	if cfg.PolicyResolver != nil && resolvedToken != nil {
+		res, err := cfg.PolicyResolver.Resolve(ctx, policy.ResolveRequest{
+			TenantID:           resolvedToken.TenantID,
+			AIQGAccountID:      resolvedToken.AIQGAccountID,
+			PolicyBundleHeader: parsed.PolicyBundle,
+			SourceApp:          parsed.SourceApp,
+			Path:               r.URL.Path,
+		})
+		if err != nil {
+			// Don't fail the request — operators see the resolver
+			// degradation via the warning, and the request still
+			// flows with a Default() resolution stamped on its event.
+			cfg.Logger.WithError(err).WithFields(logrus.Fields{
+				"event":     "aiqg.policy_resolve_error",
+				"tenant_id": resolvedToken.TenantID,
+				"bundle":    parsed.PolicyBundle,
+			}).Warn("AIQG policy resolver returned error; defaulting to observe-all")
+		}
+		bundleResolution = res
+	} else {
+		bundleResolution = policy.Default()
+	}
+
 	sw := &statusCapturingResponseWriter{ResponseWriter: w}
 
 	emitter := cfg.Emitter
@@ -186,6 +223,11 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
 			HTTPStatus: sw.status(),
 			Region:     cfg.Region,
+			ResolvedPolicyBundle: &events.ResolvedPolicyBundle{
+				BundleID:   bundleResolution.BundleID,
+				BundleName: bundleResolution.BundleName,
+				Source:     bundleResolution.Source,
+			},
 		})
 		if err := emitter.Emit(ctx, reqEnv, respEnv); err != nil {
 			cfg.Logger.WithError(err).Warn("AIQG event emission failed")

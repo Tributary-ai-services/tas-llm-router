@@ -20,6 +20,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -238,12 +239,31 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			logger.Info("AIQG token resolver: none — events emit with empty tenant fields")
 		}
 
+		// Phase 4.0 — build the policy bundle resolver alongside the
+		// token resolver. Reuses the same dashboard URL + internal
+		// auth token; only constructed when both are configured.
+		// Nil PolicyResolver leaves events without a
+		// resolved_policy_bundle field (pre-4.0 behavior).
+		var policyResolver policy.Resolver
+		if config.AIQG.DashboardURL != "" && config.AIQG.DashboardInternalAuthToken != "" {
+			pr, err := policy.NewDashboardResolver(config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build AIQG policy.DashboardResolver: %w", err)
+			}
+			policyResolver = pr
+			logger.WithField("dashboard_url", config.AIQG.DashboardURL).
+				Info("AIQG policy resolver: DashboardResolver (Phase 4.0 — observation only)")
+		} else {
+			logger.Info("AIQG policy resolver: none — events emit without resolved_policy_bundle")
+		}
+
 		server.aiqgMiddleware = middleware.NewAIQG(middleware.AIQGConfig{
-			Strict:   config.AIQG.Strict,
-			Logger:   logger,
-			Emitter:  server.aiqgEmitter,
-			Region:   config.AIQG.Region,
-			Resolver: resolver,
+			Strict:         config.AIQG.Strict,
+			Logger:         logger,
+			Emitter:        server.aiqgEmitter,
+			Region:         config.AIQG.Region,
+			Resolver:       resolver,
+			PolicyResolver: policyResolver,
 		})
 		logger.WithFields(logrus.Fields{
 			"strict":           config.AIQG.Strict,
