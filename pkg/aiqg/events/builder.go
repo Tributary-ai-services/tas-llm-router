@@ -117,6 +117,14 @@ type BuildOptions struct {
 	Status       string // explicit status; if empty, derived from HTTPStatus
 	Region       string // deployment region; if empty, omitted from event
 	FinishReason string
+
+	// ResolvedPolicyBundle is the bundle aiqg-dashboard-be picked for
+	// this request (Phase 4.0). Always set in production — the
+	// middleware degrades to a Default() resolution when the resolver
+	// is unavailable so "every event has a resolved_policy_bundle"
+	// holds. Nil pointer → field omitted from the response event
+	// (covers pre-Phase-4.0 callers + non-AIQG middleware).
+	ResolvedPolicyBundle *ResolvedPolicyBundle
 }
 
 // Build constructs the paired (RequestEnvelope, ResponseEnvelope) from
@@ -279,12 +287,13 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Streamed:          snap.ChunkCount > 0,
 		ChunkCount:        snap.ChunkCount,
 		ContentChunkCount: snap.ContentChunkCount,
-		EventTimestamps:   snap,
-		TokenAccounting:   tokenAcct,
-		Assurance:         assuranceSummary,
-		CLEAR:             clear.Compute(clearInput),
-		ScoringVersion:    ScoringVersion,
-		GatewayVersion:    GatewayVersion,
+		EventTimestamps:      snap,
+		TokenAccounting:      tokenAcct,
+		Assurance:            assuranceSummary,
+		CLEAR:                clear.Compute(clearInput),
+		ScoringVersion:       ScoringVersion,
+		GatewayVersion:       GatewayVersion,
+		ResolvedPolicyBundle: opts.ResolvedPolicyBundle,
 	}
 
 	reqEnv := RequestEnvelope{

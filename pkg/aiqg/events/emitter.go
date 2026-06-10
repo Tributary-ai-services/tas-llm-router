@@ -185,6 +185,15 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 	if ms := ts.MedianInterTokenMs; ms != nil {
 		respFields["median_inter_token_ms"] = *ms
 	}
+	// Resolved policy bundle (Phase 4.0). Always populated when AIQG
+	// middleware is wired; nil for non-AIQG callers (tests, the noop
+	// path). Promote all three fields so LogQL can aggregate
+	// "bundles in use this week" without parsing payload.
+	if rpb := resp.Data.ResolvedPolicyBundle; rpb != nil {
+		respFields["resolved_policy_bundle_id"] = rpb.BundleID
+		respFields["resolved_policy_bundle_name"] = rpb.BundleName
+		respFields["resolved_policy_bundle_source"] = rpb.Source
+	}
 	// CLEAR scores — pointer-fielded; promote each non-nil dimension.
 	if c := resp.Data.CLEAR; c != nil {
 		if c.Cost != nil {
