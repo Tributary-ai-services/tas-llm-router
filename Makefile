@@ -3,7 +3,7 @@
 # Variables
 BINARY_NAME=llm-router
 DOCKER_IMAGE=llm-router-waf
-VERSION?=v1.0.0
+VERSION?=aiqg-v5.21
 BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT=$(shell git rev-parse --short HEAD)
 
