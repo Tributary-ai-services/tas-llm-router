@@ -126,10 +126,11 @@ var ScoringVersion = clear.Version
 // aren't on the request context (HTTP status, response status string,
 // region). Fields default to sensible MVP values when zero.
 type BuildOptions struct {
-	HTTPStatus   int    // 0 if no response was written (gateway blocked)
-	Status       string // explicit status; if empty, derived from HTTPStatus
-	Region       string // deployment region; if empty, omitted from event
-	FinishReason string
+	HTTPStatus    int    // 0 if no response was written (gateway blocked)
+	Status        string // explicit status; if empty, derived from HTTPStatus
+	Region        string // deployment region; if empty, omitted from event
+	IPCaptureMode string // off | minimized (default) | full — gates client IP
+	FinishReason  string
 
 	// ResolvedPolicyBundle is the bundle aiqg-dashboard-be picked for
 	// this request (Phase 4.0). Always set in production — the
@@ -171,12 +172,13 @@ type BuildOptions struct {
 // AIQG token supplies the always-present principal tier. identity_source
 // records the strongest tier that produced an identity. Returns nil only
 // when nothing at all resolved (no token, no headers).
-func buildAgentContext(h AIQGHeadersView, t TokenView) *AgentContext {
+func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string) *AgentContext {
 	ac := &AgentContext{
 		AgentID:      h.AgentID,
 		AgentName:    h.AgentName,
 		AgentVersion: h.AgentVersion,
 		UserID:       h.BaggageUserID,
+		ClientIP:     clientIP,
 	}
 	// conversation: explicit header wins, else baggage session.id
 	ac.ConversationID = h.ConversationID
@@ -203,15 +205,44 @@ func buildAgentContext(h AIQGHeadersView, t TokenView) *AgentContext {
 		ac.IdentitySource = "trace"
 	case ac.PrincipalID != "":
 		ac.IdentitySource = "principal"
+	case ac.ClientIP != "":
+		ac.IdentitySource = "transport"
 	default:
 		ac.IdentitySource = "unattributed"
 	}
 
 	if ac.AgentID == "" && ac.AgentName == "" && ac.UserID == "" &&
-		ac.ConversationID == "" && ac.FlowID == "" && ac.PrincipalID == "" {
+		ac.ConversationID == "" && ac.FlowID == "" && ac.PrincipalID == "" && ac.ClientIP == "" {
 		return nil
 	}
 	return ac
+}
+
+// applyIPMode gates a raw client IP per the deployment's capture mode:
+// "off" drops it, "full" keeps it raw, anything else (incl. empty)
+// minimizes to a /24 (IPv4) or /48 (IPv6) prefix.
+func applyIPMode(ip, mode string) string {
+	switch mode {
+	case "off":
+		return ""
+	case "full":
+		return ip
+	default:
+		return truncateIP(ip)
+	}
+}
+
+// truncateIP reduces an IP to its /24 (IPv4) or /48 (IPv6) network
+// prefix. Returns "" for an empty or unparseable address.
+func truncateIP(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ""
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4.Mask(net.CIDRMask(24, 32)).String() + "/24"
+	}
+	return parsed.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }
 
 func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token TokenView, snap instrumentation.Snapshot, opts BuildOptions) (RequestEnvelope, ResponseEnvelope) {
@@ -246,8 +277,11 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		sourceApp = token.SourceApp
 	}
 
+	// Client IP, gated by the deployment's IP-capture mode.
+	clientIPVal := applyIPMode(clientIP(r), opts.IPCaptureMode)
+
 	// Self-asserted identity attribution (shared by both events).
-	agentCtx := buildAgentContext(headers, token)
+	agentCtx := buildAgentContext(headers, token, clientIPVal)
 
 	reqEvent := RequestEvent{
 		RequestEventID:  reqID,

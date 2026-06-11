@@ -38,10 +38,16 @@ type Config struct {
 // to a backend-client Resolver against aiqg-dashboard-be once that
 // service ships.
 type AIQGConfig struct {
-	Enabled bool                  `yaml:"enabled"`
-	Strict  bool                  `yaml:"strict"`
-	Region  string                `yaml:"region"`
-	Tokens  []AIQGTokenConfig     `yaml:"tokens"`
+	Enabled bool   `yaml:"enabled"`
+	Strict  bool   `yaml:"strict"`
+	Region  string `yaml:"region"`
+	// IPCaptureMode gates how the client IP is recorded on AIQG events:
+	// "off" (none), "minimized" (truncated /24·/48 prefix; the default
+	// when empty), "full" (raw). Set "full" on internal/self-hosted
+	// deployments; leave default for the privacy-minimized product.
+	// Env: AIQG_IP_CAPTURE_MODE.
+	IPCaptureMode string            `yaml:"ip_capture_mode"`
+	Tokens        []AIQGTokenConfig `yaml:"tokens"`
 
 	// EmitterType selects the AIQG event sink: "log" (default,
 	// Loki via logrus), "kafka", or "both". Env override:
@@ -432,6 +438,9 @@ func (c *Config) loadFromEnv() {
 	if region := os.Getenv("AIQG_REGION"); region != "" {
 		c.AIQG.Region = region
 	}
+	if mode := os.Getenv("AIQG_IP_CAPTURE_MODE"); mode != "" {
+		c.AIQG.IPCaptureMode = mode
+	}
 	if et := os.Getenv("AIQG_EMITTER_TYPE"); et != "" {
 		c.AIQG.EmitterType = et
 	}
@@ -622,6 +631,7 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		Enabled:                    c.AIQG.Enabled,
 		Strict:                     c.AIQG.Strict,
 		Region:                     c.AIQG.Region,
+		IPCaptureMode:              c.AIQG.IPCaptureMode,
 		EmitterType:                c.AIQG.EmitterType,
 		DashboardURL:               c.AIQG.DashboardURL,
 		DashboardInternalAuthToken: c.AIQG.DashboardInternalAuthToken,
