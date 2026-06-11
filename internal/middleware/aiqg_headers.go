@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -48,6 +49,17 @@ type AIQGHeaders struct {
 	Trace                 bool     // TAS-Trace=1
 	DryRun                bool     // TAS-Dry-Run=1
 	SourceApp             string   // TAS-Source-App (max 128 chars)
+
+	// Identity (additive, observability attribution — see
+	// docs/AIQG-AGENT-FLOW-ATTRIBUTION.md). Self-asserted; never
+	// authenticated here. All optional; parse never fails on these.
+	AgentID        string            // TAS-Agent-Id
+	AgentName      string            // TAS-Agent-Name
+	AgentVersion   string            // TAS-Agent-Version
+	FlowID         string            // TAS-Flow-Id (explicit run id)
+	ConversationID string            // TAS-Conversation-Id
+	TraceID        string            // W3C traceparent trace-id (read, not stripped)
+	Baggage        map[string]string // W3C baggage (user.id, session.id, account.id, …)
 }
 
 // IsZero reports whether any AIQG header was set. Used by the Path A
@@ -71,6 +83,15 @@ var canonicalHeaderNames = []string{
 	"TAS-Trace",
 	"TAS-Dry-Run",
 	"TAS-Source-App",
+	// Identity headers — stripped before the vendor. `baggage` carries
+	// end-user identity and MUST NOT leak upstream. (`traceparent` is a
+	// standard tracing header and is intentionally NOT stripped.)
+	"TAS-Agent-Id",
+	"TAS-Agent-Name",
+	"TAS-Agent-Version",
+	"TAS-Flow-Id",
+	"TAS-Conversation-Id",
+	"baggage",
 }
 
 // validWorkflows is the closed enum from
@@ -128,6 +149,14 @@ func ParseHeaders(req *http.Request) (AIQGHeaders, error) {
 		Trace:                 req.Header.Get("TAS-Trace") == "1",
 		DryRun:                req.Header.Get("TAS-Dry-Run") == "1",
 		SourceApp:             strings.TrimSpace(req.Header.Get("TAS-Source-App")),
+
+		AgentID:        strings.TrimSpace(req.Header.Get("TAS-Agent-Id")),
+		AgentName:      strings.TrimSpace(req.Header.Get("TAS-Agent-Name")),
+		AgentVersion:   strings.TrimSpace(req.Header.Get("TAS-Agent-Version")),
+		FlowID:         strings.TrimSpace(req.Header.Get("TAS-Flow-Id")),
+		ConversationID: strings.TrimSpace(req.Header.Get("TAS-Conversation-Id")),
+		TraceID:        parseTraceparentTraceID(req.Header.Get("traceparent")),
+		Baggage:        parseBaggage(req.Header.Get("baggage")),
 	}
 
 	if raw := req.Header.Get("TAS-Policy"); raw != "" {
@@ -163,6 +192,56 @@ func ParseHeaders(req *http.Request) (AIQGHeaders, error) {
 	}
 
 	return h, nil
+}
+
+// parseBaggage parses a W3C `baggage` header — a comma-separated list of
+// key=value pairs, each with optional ;-properties that we ignore. Used
+// to lift the cross-app identity keys (user.id, session.id, account.id —
+// the Datadog/OTel defaults) onto the AIQG event. Defensive: malformed
+// pairs are skipped, never panics. Returns nil for an empty header.
+func parseBaggage(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		if i := strings.IndexByte(pair, ';'); i >= 0 {
+			pair = pair[:i] // drop ;-properties
+		}
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(kv[0])
+		v := strings.TrimSpace(kv[1])
+		if k == "" || v == "" {
+			continue
+		}
+		if dv, err := url.QueryUnescape(v); err == nil {
+			v = dv
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseTraceparentTraceID extracts the 32-hex trace-id from a W3C
+// `traceparent` header ("version-traceid-spanid-flags"). Returns "" if
+// absent or malformed — never panics.
+func parseTraceparentTraceID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, "-")
+	if len(parts) < 4 || len(parts[1]) != 32 {
+		return ""
+	}
+	return parts[1]
 }
 
 // StripFromOutbound removes every TAS-* header from req.Header. Call this

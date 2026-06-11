@@ -112,6 +112,27 @@ type RequestEvent struct {
 	ScoringVersion string `json:"scoring_version"`
 	GatewayVersion string `json:"gateway_version"`
 	LifecycleState string `json:"lifecycle_state"`
+
+	// Identity attribution (additive) — see AgentContext.
+	AgentContext *AgentContext `json:"agent_context,omitempty"`
+}
+
+// AgentContext is the self-asserted identity attribution for a request:
+// the cross-app user/agent/flow keys lifted from the W3C `baggage` and
+// TAS-Agent-* / `traceparent` headers, plus the AIQG token for the
+// principal tier. Additive and optional — nil when nothing resolved.
+// See docs/AIQG-AGENT-FLOW-ATTRIBUTION.md. The emitter promotes the
+// non-empty fields to top-level Loki labels so dashboards can group by
+// user_id / agent_id / flow_id without parsing the payload.
+type AgentContext struct {
+	AgentID        string `json:"agent_id,omitempty"`        // TAS-Agent-Id
+	AgentName      string `json:"agent_name,omitempty"`      // TAS-Agent-Name
+	AgentVersion   string `json:"agent_version,omitempty"`   // TAS-Agent-Version
+	UserID         string `json:"user_id,omitempty"`         // baggage user.id (pseudonymous)
+	ConversationID string `json:"conversation_id,omitempty"` // TAS-Conversation-Id or baggage session.id
+	FlowID         string `json:"flow_id,omitempty"`         // TAS-Flow-Id or traceparent trace-id
+	PrincipalID    string `json:"principal_id,omitempty"`    // AIQG token source_app / token id
+	IdentitySource string `json:"identity_source,omitempty"` // baggage|asserted|trace|principal|unattributed
 }
 
 // ResponseEvent mirrors aether-shared/data-models/aiqg/response-event.md §2.2.
@@ -175,6 +196,9 @@ type ResponseEvent struct {
 	// the bundle ID is empty and bundle name is "(default)", and the
 	// (Stage 4.1+) enforcement engine treats this as observe-only.
 	ResolvedPolicyBundle *ResolvedPolicyBundle `json:"resolved_policy_bundle,omitempty"`
+
+	// Identity attribution (additive) — see AgentContext.
+	AgentContext *AgentContext `json:"agent_context,omitempty"`
 }
 
 // ResolvedPolicyBundle mirrors the dashboard-be ResolveResponse shape.
