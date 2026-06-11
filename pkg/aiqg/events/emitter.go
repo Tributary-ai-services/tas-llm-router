@@ -236,6 +236,35 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 			respFields["tag_"+sanitizeTagKey(k)] = v
 		}
 	}
+	// Promote self-asserted identity attribution so dashboards can
+	// `| json | user_id="…"` / group by (agent_id) / by (flow_id)
+	// without parsing the payload. Only non-empty fields are promoted.
+	if ac := resp.Data.AgentContext; ac != nil {
+		if ac.AgentID != "" {
+			respFields["agent_id"] = ac.AgentID
+		}
+		if ac.AgentName != "" {
+			respFields["agent_name"] = ac.AgentName
+		}
+		if ac.AgentVersion != "" {
+			respFields["agent_version"] = ac.AgentVersion
+		}
+		if ac.UserID != "" {
+			respFields["user_id"] = ac.UserID
+		}
+		if ac.ConversationID != "" {
+			respFields["conversation_id"] = ac.ConversationID
+		}
+		if ac.FlowID != "" {
+			respFields["flow_id"] = ac.FlowID
+		}
+		if ac.PrincipalID != "" {
+			respFields["principal_id"] = ac.PrincipalID
+		}
+		if ac.IdentitySource != "" {
+			respFields["identity_source"] = ac.IdentitySource
+		}
+	}
 	e.Logger.WithFields(respFields).Info("aiqg response event")
 	return nil
 }

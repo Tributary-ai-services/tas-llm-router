@@ -375,6 +375,13 @@ func TestCanonicalHeaderListExhaustive(t *testing.T) {
 		"TAS-Trace":                  {},
 		"TAS-Dry-Run":                {},
 		"TAS-Source-App":             {},
+		// Identity headers (stripped before vendor).
+		"TAS-Agent-Id":        {},
+		"TAS-Agent-Name":      {},
+		"TAS-Agent-Version":   {},
+		"TAS-Flow-Id":         {},
+		"TAS-Conversation-Id": {},
+		"baggage":             {},
 	}
 	if len(canonicalHeaderNames) != len(expected) {
 		t.Fatalf("canonicalHeaderNames len=%d want=%d", len(canonicalHeaderNames), len(expected))
@@ -383,5 +390,63 @@ func TestCanonicalHeaderListExhaustive(t *testing.T) {
 		if _, ok := expected[n]; !ok {
 			t.Errorf("unexpected header in canonical list: %q", n)
 		}
+	}
+}
+
+func TestParseHeaders_Identity(t *testing.T) {
+	req := newReq(t, map[string]string{
+		"TAS-Agent-Id":        "agent-7",
+		"TAS-Agent-Name":      "Planner",
+		"TAS-Conversation-Id": "conv-9",
+		"traceparent":         "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		"baggage":             "user.id=u_42,session.id=s_99,account.id=acct_1",
+	})
+	h, err := ParseHeaders(req)
+	if err != nil {
+		t.Fatalf("ParseHeaders: %v", err)
+	}
+	if h.AgentID != "agent-7" || h.AgentName != "Planner" {
+		t.Errorf("agent fields: %+v", h)
+	}
+	if h.ConversationID != "conv-9" {
+		t.Errorf("conversation: %q", h.ConversationID)
+	}
+	if h.TraceID != "0af7651916cd43dd8448eb211c80319c" {
+		t.Errorf("trace id: %q", h.TraceID)
+	}
+	if h.Baggage["user.id"] != "u_42" || h.Baggage["session.id"] != "s_99" || h.Baggage["account.id"] != "acct_1" {
+		t.Errorf("baggage: %+v", h.Baggage)
+	}
+}
+
+func TestParseBaggage_Malformed(t *testing.T) {
+	// Empty, junk, and ;-properties must not panic and parse defensively.
+	if parseBaggage("") != nil {
+		t.Errorf("empty baggage should be nil")
+	}
+	got := parseBaggage("user.id=u1;meta=x, =bad, novalue=, k=v")
+	if got["user.id"] != "u1" || got["k"] != "v" {
+		t.Errorf("baggage parse: %+v", got)
+	}
+	if _, ok := got["novalue"]; ok {
+		t.Errorf("empty-value pair should be dropped: %+v", got)
+	}
+}
+
+func TestStripFromOutbound_IdentityHeaders(t *testing.T) {
+	req := newReq(t, map[string]string{
+		"baggage":      "user.id=u_42",
+		"TAS-Agent-Id": "agent-7",
+		"traceparent":  "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+	})
+	StripFromOutbound(req)
+	if req.Header.Get("baggage") != "" {
+		t.Errorf("baggage must be stripped before vendor")
+	}
+	if req.Header.Get("TAS-Agent-Id") != "" {
+		t.Errorf("TAS-Agent-Id must be stripped before vendor")
+	}
+	if req.Header.Get("traceparent") == "" {
+		t.Errorf("traceparent must NOT be stripped (standard header)")
 	}
 }

@@ -6,16 +6,16 @@
 //
 // Decision logic (per build-vs-reuse §2.2 + §7.3 strict resolution):
 //
-//   1. Both TAS-Auth and Authorization present → enter Path A:
-//      - parse the TAS-* header taxonomy and attach to ctx
-//      - create a TimingCollector and attach to ctx
-//      - stamp StampReceived on entry, StampComplete on response end
-//      - hand off to the downstream chain
-//   2. TAS-Auth present but Authorization missing → 401 (cfg.Strict only)
-//   3. TAS-Auth missing → depends on cfg.Strict:
-//      - Strict (customer-facing ingress): 401, diagnostic body
-//      - Permissive (internal ingress): pass through unchanged, no
-//        AIQG state attached — preserves existing internal-routing behavior
+//  1. Both TAS-Auth and Authorization present → enter Path A:
+//     - parse the TAS-* header taxonomy and attach to ctx
+//     - create a TimingCollector and attach to ctx
+//     - stamp StampReceived on entry, StampComplete on response end
+//     - hand off to the downstream chain
+//  2. TAS-Auth present but Authorization missing → 401 (cfg.Strict only)
+//  3. TAS-Auth missing → depends on cfg.Strict:
+//     - Strict (customer-facing ingress): 401, diagnostic body
+//     - Permissive (internal ingress): pass through unchanged, no
+//     AIQG state attached — preserves existing internal-routing behavior
 //
 // The middleware never persists Authorization. The header value is
 // already in r.Header for the rest of the chain; Path A's promise
@@ -250,6 +250,15 @@ func headersView(h AIQGHeaders) events.AIQGHeadersView {
 		PolicyBundle: h.PolicyBundle,
 		DryRun:       h.DryRun,
 		Trace:        h.Trace,
+
+		AgentID:          h.AgentID,
+		AgentName:        h.AgentName,
+		AgentVersion:     h.AgentVersion,
+		FlowID:           h.FlowID,
+		ConversationID:   h.ConversationID,
+		TraceID:          h.TraceID,
+		BaggageUserID:    h.Baggage["user.id"],
+		BaggageSessionID: h.Baggage["session.id"],
 	}
 }
 

@@ -23,6 +23,19 @@ type AIQGHeadersView struct {
 	PolicyBundle string
 	DryRun       bool
 	Trace        bool
+
+	// Identity (additive, self-asserted). The middleware projects these
+	// from its parsed AIQGHeaders (TAS-Agent-* / traceparent) and the two
+	// baggage keys it cares about. Build assembles them — with the token
+	// principal — into the event AgentContext.
+	AgentID          string
+	AgentName        string
+	AgentVersion     string
+	FlowID           string
+	ConversationID   string
+	TraceID          string
+	BaggageUserID    string
+	BaggageSessionID string
 }
 
 // RoutingView is the subset of routing-layer state the event builder
@@ -152,6 +165,55 @@ type BuildOptions struct {
 // auth failures don't reach Build (per spec §273), so token is either
 // fully populated from a successful resolve or fully empty (resolver
 // not configured / non-AIQG path).
+// buildAgentContext resolves the self-asserted identity ladder for a
+// request (docs/AIQG-AGENT-FLOW-ATTRIBUTION.md): baggage user.id is the
+// cross-app user key; TAS-Agent-* / traceparent supply agent/flow; the
+// AIQG token supplies the always-present principal tier. identity_source
+// records the strongest tier that produced an identity. Returns nil only
+// when nothing at all resolved (no token, no headers).
+func buildAgentContext(h AIQGHeadersView, t TokenView) *AgentContext {
+	ac := &AgentContext{
+		AgentID:      h.AgentID,
+		AgentName:    h.AgentName,
+		AgentVersion: h.AgentVersion,
+		UserID:       h.BaggageUserID,
+	}
+	// conversation: explicit header wins, else baggage session.id
+	ac.ConversationID = h.ConversationID
+	if ac.ConversationID == "" {
+		ac.ConversationID = h.BaggageSessionID
+	}
+	// flow: explicit header wins, else traceparent trace-id
+	ac.FlowID = h.FlowID
+	if ac.FlowID == "" {
+		ac.FlowID = h.TraceID
+	}
+	// principal: token source_app, else token id (always present in AIQG mode)
+	ac.PrincipalID = t.SourceApp
+	if ac.PrincipalID == "" {
+		ac.PrincipalID = t.TASAuthTokenID
+	}
+
+	switch {
+	case ac.UserID != "":
+		ac.IdentitySource = "baggage"
+	case ac.AgentID != "" || h.FlowID != "" || h.ConversationID != "":
+		ac.IdentitySource = "asserted"
+	case h.TraceID != "":
+		ac.IdentitySource = "trace"
+	case ac.PrincipalID != "":
+		ac.IdentitySource = "principal"
+	default:
+		ac.IdentitySource = "unattributed"
+	}
+
+	if ac.AgentID == "" && ac.AgentName == "" && ac.UserID == "" &&
+		ac.ConversationID == "" && ac.FlowID == "" && ac.PrincipalID == "" {
+		return nil
+	}
+	return ac
+}
+
 func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token TokenView, snap instrumentation.Snapshot, opts BuildOptions) (RequestEnvelope, ResponseEnvelope) {
 	reqID := newUUID()
 	respID := newUUID()
@@ -184,6 +246,9 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		sourceApp = token.SourceApp
 	}
 
+	// Self-asserted identity attribution (shared by both events).
+	agentCtx := buildAgentContext(headers, token)
+
 	reqEvent := RequestEvent{
 		RequestEventID:  reqID,
 		TenantID:        token.TenantID,
@@ -211,6 +276,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		ScoringVersion:            ScoringVersion,
 		GatewayVersion:            GatewayVersion,
 		LifecycleState:            LifecyclePairedWithResponse,
+		AgentContext:              agentCtx,
 	}
 
 	// Routing's FinishReason wins over BuildOptions.FinishReason when
@@ -274,19 +340,19 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 	}
 
 	respEvent := ResponseEvent{
-		ResponseEventID:   respID,
-		RequestEventID:    reqID,
-		TenantID:          token.TenantID,      // denormalized per response-event.md §"Denormalization rationale"
-		AIQGAccountID:     token.AIQGAccountID, // ditto
-		Vendor:            routing.Vendor,      // denormalized from routing decision (same as RequestEvent)
-		Model:             routing.Model,       // ditto — powers per-vendor/model dashboards off the response stream
-		CompleteAt:        completeAt,
-		Status:            status,
-		HTTPStatus:        opts.HTTPStatus,
-		FinishReason:      finishReason,
-		Streamed:          snap.ChunkCount > 0,
-		ChunkCount:        snap.ChunkCount,
-		ContentChunkCount: snap.ContentChunkCount,
+		ResponseEventID:      respID,
+		RequestEventID:       reqID,
+		TenantID:             token.TenantID,      // denormalized per response-event.md §"Denormalization rationale"
+		AIQGAccountID:        token.AIQGAccountID, // ditto
+		Vendor:               routing.Vendor,      // denormalized from routing decision (same as RequestEvent)
+		Model:                routing.Model,       // ditto — powers per-vendor/model dashboards off the response stream
+		CompleteAt:           completeAt,
+		Status:               status,
+		HTTPStatus:           opts.HTTPStatus,
+		FinishReason:         finishReason,
+		Streamed:             snap.ChunkCount > 0,
+		ChunkCount:           snap.ChunkCount,
+		ContentChunkCount:    snap.ContentChunkCount,
 		EventTimestamps:      snap,
 		TokenAccounting:      tokenAcct,
 		Assurance:            assuranceSummary,
@@ -294,6 +360,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		ScoringVersion:       ScoringVersion,
 		GatewayVersion:       GatewayVersion,
 		ResolvedPolicyBundle: opts.ResolvedPolicyBundle,
+		AgentContext:         agentCtx,
 	}
 
 	reqEnv := RequestEnvelope{
