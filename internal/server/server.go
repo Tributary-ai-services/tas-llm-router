@@ -14,10 +14,10 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
-	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
@@ -72,9 +72,11 @@ func (aiqgMetricsAdapter) RecordEvent(resp events.ResponseEnvelope) {
 }
 
 // buildAIQGEmitter constructs the Emitter per the configured type.
-//   "" or "log" → LogEmitter (default; no infra required)
-//   "kafka"     → KafkaEmitter only
-//   "both"      → MultiEmitter fanning to log + kafka
+//
+//	"" or "log" → LogEmitter (default; no infra required)
+//	"kafka"     → KafkaEmitter only
+//	"both"      → MultiEmitter fanning to log + kafka
+//
 // Unknown values fall back to log with a warning so a typo doesn't
 // crash the deployment.
 func buildAIQGEmitter(cfg *AIQGServerConfig, logger *logrus.Logger) (events.Emitter, error) {
@@ -128,6 +130,10 @@ type AIQGServerConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Strict  bool   `yaml:"strict"`
 	Region  string `yaml:"region"`
+
+	// IPCaptureMode gates client-IP recording on events: "off",
+	// "minimized" (truncated prefix; default when empty), "full" (raw).
+	IPCaptureMode string `yaml:"ip_capture_mode"`
 
 	// Tokens is the MVP in-memory token store. Used as a fallback
 	// when DashboardURL is unset OR when the dashboard-be is
@@ -262,6 +268,7 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			Logger:         logger,
 			Emitter:        server.aiqgEmitter,
 			Region:         config.AIQG.Region,
+			IPCaptureMode:  config.AIQG.IPCaptureMode,
 			Resolver:       resolver,
 			PolicyResolver: policyResolver,
 		})

@@ -261,6 +261,9 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		if ac.PrincipalID != "" {
 			respFields["principal_id"] = ac.PrincipalID
 		}
+		if ac.ClientIP != "" {
+			respFields["client_ip"] = ac.ClientIP
+		}
 		if ac.IdentitySource != "" {
 			respFields["identity_source"] = ac.IdentitySource
 		}

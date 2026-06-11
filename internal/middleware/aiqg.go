@@ -65,6 +65,10 @@ type AIQGConfig struct {
 	// during local dev and is omitted from the event JSON.
 	Region string
 
+	// IPCaptureMode gates client-IP recording on events: "off",
+	// "minimized" (truncated prefix; default when empty), "full" (raw).
+	IPCaptureMode string
+
 	// Resolver turns the TAS-Auth bearer into a tenant_id / account_id
 	// for event attribution. Nil is allowed during incremental rollout:
 	// the middleware skips resolution, every request is treated as
@@ -221,8 +225,9 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	// stamps made by the handler reach the event.
 	defer func() {
 		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
-			HTTPStatus: sw.status(),
-			Region:     cfg.Region,
+			HTTPStatus:    sw.status(),
+			Region:        cfg.Region,
+			IPCaptureMode: cfg.IPCaptureMode,
 			ResolvedPolicyBundle: &events.ResolvedPolicyBundle{
 				BundleID:   bundleResolution.BundleID,
 				BundleName: bundleResolution.BundleName,

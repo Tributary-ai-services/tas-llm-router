@@ -132,7 +132,8 @@ type AgentContext struct {
 	ConversationID string `json:"conversation_id,omitempty"` // TAS-Conversation-Id or baggage session.id
 	FlowID         string `json:"flow_id,omitempty"`         // TAS-Flow-Id or traceparent trace-id
 	PrincipalID    string `json:"principal_id,omitempty"`    // AIQG token source_app / token id
-	IdentitySource string `json:"identity_source,omitempty"` // baggage|asserted|trace|principal|unattributed
+	ClientIP       string `json:"client_ip,omitempty"`       // gated client IP (raw/truncated/off per ip_capture_mode)
+	IdentitySource string `json:"identity_source,omitempty"` // baggage|asserted|trace|principal|transport|unattributed
 }
 
 // ResponseEvent mirrors aether-shared/data-models/aiqg/response-event.md §2.2.
