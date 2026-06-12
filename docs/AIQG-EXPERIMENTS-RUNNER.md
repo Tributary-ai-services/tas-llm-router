@@ -130,11 +130,56 @@ variant  = walk cumulative variant weights until bucket < cumulative
 - **Falls back down the ladder**: if no `user_id`, use `conversation_id`, etc.,
   ending at a per-request UUID (effectively random) — so an un-instrumented
   caller still gets a clean split, just not sticky.
-- **Salt** lets two experiments on overlapping cohorts assign independently
-  (no correlation between experiments).
+- **Salt** decorrelates assignment across experiments — so a user bucketed
+  "low" in one isn't systematically "low" in the next (sequential experiments,
+  and the future domain/layer modes in §4.1). Concurrent *overlapping*
+  experiments don't co-occur on a request in v1 — see §4.1.
 - **Bucketing respects `max_traffic_pct`**: only the first N% of buckets are
   eligible; the rest force `control` regardless of variant weights, so a
   50/50 experiment capped at 10% traffic = 5% A / 5% B / 90% untouched.
+
+### 4.1 Collision & concurrency (when >1 experiment matches a request)
+
+Nearly every variant axis here — model, prompt, `gatekeeper_profile`, params —
+changes the **same outcome** (the response and its quality/cost/latency). So two
+overlapping experiments **confound** each other's results. That rules out naive
+**layering** (independent concurrent experiments per request), which is only
+safe for genuinely orthogonal subsystems — which we mostly don't have.
+
+**v1 rule — mutual exclusion by priority.** A request is **claimed by the
+highest-`priority` `running`/`dry_run` experiment whose cohort matches**, and
+participates in that one only. Reuses the route-rule `priority` model (reserved
+ranges, first-match-wins) — one mental model, not two.
+
+- **Claim-on-match, not claim-on-variant:** a request matching exp A leaves
+  exp B's pool *even if A assigned it to control* — otherwise A's control and
+  variant populations would differ (variant excluded from B, control not),
+  confounding A. Each experiment's control vs variant must come from the same
+  claimed population.
+- **Not a user-facing knob.** We do NOT expose a collision-strategy selector
+  (layering/domains/priority menu) — it lets operators ship confounded results.
+  The only exposed control is `priority` (the tiebreaker).
+
+**We DO detect collisions** (what makes "pick one + document it" safe rather
+than silently broken):
+- *Static (create/start):* conservatively test the new cohort against active
+  experiments — intersect `source_app`/`model`/`workflow_type` sets, treat regex
+  `url_path` as "possibly overlaps" (bias to over-flag). On overlap → **warn +
+  require explicit acknowledgment** ("exp X will be starved / may not reach
+  significance").
+- *Runtime:* a request matching >1 eligible experiment emits an
+  `experiment_collision` metric and flags the lower-priority experiment's
+  results as **"possible confounding / starved."**
+
+**Documented limitation:** you cannot run two *overlapping* experiments
+concurrently without starving the lower-priority one — run them sequentially or
+make their cohorts disjoint.
+
+**Deferred (Phase 3), safest-first:** (1) **mutually-exclusive domains** —
+partition a cohort into disjoint slices so N experiments each get a guaranteed,
+unbiased fraction (bounded total traffic); (2) **layering** — only for axes
+proven orthogonal in outcome, gated behind an explicit orthogonality assertion +
+interaction monitoring.
 
 ---
 
@@ -518,6 +563,11 @@ Extends the existing page (today: comparison) with:
 - **Stickiness vs. coverage** — keying on `conversation` is coherent but a few
   heavy users can dominate a variant; surface per-variant unique-key counts so
   skew is visible.
+- **Experiment collision / starvation** — overlapping experiments confound (our
+  axes aren't orthogonal), so v1 is mutual-exclusion-by-priority: overlapping
+  experiments can't run truly concurrently, and a low-priority one is starved.
+  Mitigated by collision detection (warn + runtime flag) and the documented
+  sequential/disjoint workaround. See §4.1; domains/layering deferred.
 - **Open: where the override lives** — extend `Router.Route()` with a forced
   vendor/model arg (cleanest) vs. a synthetic high-priority route rule. Leaning
   to the `Route()` arg since route-rules bind bundles, not models.
