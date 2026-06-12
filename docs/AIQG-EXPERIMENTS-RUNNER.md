@@ -142,21 +142,67 @@ handleAIQG → resolve token → resolve policy bundle
 
 ---
 
-## 6. Measurement & significance
+## 6. Measurement pipeline & decision metrics
 
-- Per-variant metrics come from the **existing events**, grouped by
-  `experiment_id` + `variant`: request_count, success/error/blocked,
-  avg/percentile latency, total + per-request cost, CLEAR composite + dims.
-  New dashboard endpoint `GET /api/v1/experiments/{id}/results` runs the same
-  Loki/TimescaleDB aggregations the metrics endpoints already use, grouped by
-  the `variant` label.
-- **v1 significance**: report per-variant **sample count** and a coarse
-  confidence flag — "insufficient samples (<min_samples)", "directional", or
-  "clear" (non-overlapping simple CIs on the headline metric). Explicitly
-  *not* a p-value engine in v1; surface the numbers honestly and let a human
-  call it. Full sequential testing is Phase 3.
-- **Guardrail metrics** (§7) are computed on the same rollup on a short cadence
-  so a regression trips fast.
+### The existing pipeline (verified live)
+
+```
+tas-llm-router ──► Kafka (tas.aiqg.*) + Loki (aiqg response event)
+                        │
+            Spark  aiqg-aggregator  (running in tas-shared; spark-operator)
+                        │ writes
+                        ▼
+            TimescaleDB  aiqg.metrics_1m  (Spark-fed)  ──► metrics_5m/1h/1d (TS continuous aggregates)
+                        ▲
+    aiqg-dashboard-be reads TS-first ─── Loki fallback (and Loki for `status`, which is NOT a TS column)
+```
+
+Rollup rows are keyed `(bucket_start, tenant_id, scope_type, scope_key)`,
+`scope_type ∈ {account, workflow, route, model, endpoint, source_app}`,
+carrying `request_count`, **t-digest latency sketches**, CLEAR scores, and
+cost. One request fans out into one row per scope_type.
+
+### Decision metrics
+
+| Purpose | Metrics (per variant, vs `control`) | Source |
+|---|---|---|
+| **Auto-stop guardrails** (§7) | error rate (status≠`success`), p95 latency, avg cost/request | error rate ← **Loki** `sum by (variant, status) count_over_time`; p95 ← **TS** t-digest; cost ← **TS** rollup |
+| **Winner / human call** | CLEAR composite + 5 dims, success rate, avg cost/request, **sample count** | **TS** rollup (CLEAR / cost / latency) + Loki (status) |
+
+The operator designates one **primary metric** (e.g. avg cost/request, or
+CLEAR composite); the rest are reported alongside.
+
+### The additive change this requires (Spark + TS)
+
+Per-variant reads must be cheap enough for ~per-minute guardrail polling and
+correct for p95 — so the **Spark `aiqg-aggregator` emits a new scope row**:
+
+```
+scope_type = 'experiment_variant'        (additive enum value)
+scope_key  = '<experiment_id>:<variant>'  (emitted when the event carries experiment_id + variant)
+```
+
+Then:
+- **Results** = `… FROM aiqg.metrics_1m WHERE scope_type='experiment_variant'
+  AND scope_key LIKE '<exp>:%'` → per-variant CLEAR/cost/latency (p95 from the
+  t-digest), sub-100ms. `GET /api/v1/experiments/{id}/results` runs this +
+  a Loki `sum by (variant, status)` for the status breakdown.
+- **Auto-stop evaluator** — a periodic job in aiqg-dashboard-be reads the same
+  1m rollup + the Loki status query every ~minute, compares each variant to
+  control, and trips the experiment to `paused` on a guardrail breach.
+
+This is an **additive `scope_type`** (the model declares scope_type additive)
+plus the status-from-Loki pattern already shipped for `/metrics/health` and
+`/by-vendor` — not a new pipeline. It is **load-bearing for guardrails**, so it
+lands in Phase 2b (not deferred).
+
+### Significance (v1)
+
+Report per-variant **sample count** + a coarse confidence flag —
+"insufficient (<`min_samples`)", "directional", or "clear" (non-overlapping
+simple CIs on the primary metric). Not a p-value engine in v1; surface the
+numbers honestly and let a human call it. Sequential/Bayesian testing is
+Phase 3.
 
 ---
 
@@ -226,10 +272,11 @@ pattern + TTL as the policy resolver cache). New Kafka topic
 `tas.aiqg.experiment.changed.v1` (additive, matches the existing AIQG topic
 convention) invalidates the cache on edit for sub-cache-TTL propagation.
 
-Per-request results need no new storage — they ride the existing event stream
-via the `experiment_id` + `variant` Loki/TimescaleDB labels. (Phase 4: a
-`scope_type='variant'` rollup in `aiqg.metrics_*` for fast results, like the
-agent/user rollups.)
+Per-variant results are served by the **`scope_type='experiment_variant'`
+rollup** the Spark aggregator emits (§6) — `aiqg.metrics_1m` keyed
+`scope_key='<experiment_id>:<variant>'` — plus a Loki status query. No
+per-experiment results storage in Postgres; the metrics ride the existing
+Spark→TS rollup + Loki, just on a new scope dimension.
 
 ---
 
@@ -274,9 +321,11 @@ Extends the existing page (today: comparison) with:
   experiment resolver in **dry_run only** (assign + stamp, no reroute). Proves
   cohorts/assignment/stickiness against live traffic with zero risk.
 - **Phase 2b — live split**: enable the routing override + guardrails +
-  auto-stop + kill switch + results endpoint/UI. The gated step.
+  auto-stop + kill switch, the **`scope_type='experiment_variant'` Spark
+  rollup** (§6 — load-bearing for guardrails/results), and the results
+  endpoint/UI. The gated step.
 - **Phase 3**: significance engine, auto-ramp, winner declaration, bandit
-  allocation, `scope_type='variant'` rollups.
+  allocation.
 
 ---
 
@@ -304,13 +353,18 @@ Extends the existing page (today: comparison) with:
 
 ## 14. Work breakdown (per repo, Phase 2)
 
-1. **aiqg-dashboard-be** — experiment tables + CRUD API + `/results` +
-   `/internal/experiments` cache-load + `tas.aiqg.experiment.changed.v1` emit.
+1. **aiqg-dashboard-be** — experiment tables + CRUD API + `/results`
+   (experiment_variant rollup + Loki status) + `/internal/experiments`
+   cache-load + `tas.aiqg.experiment.changed.v1` emit + the **periodic
+   auto-stop evaluator** (reads 1m rollup + Loki status, trips `paused`).
 2. **tas-llm-router** — experiment resolver + per-tenant cache + assignment
    (reuse identity ladder) + `Route()` override arg + `experiment_id`/`variant`
-   event stamping + emitter promotion + guardrail auto-stop signal. The core,
-   and the production-routing change — lands behind dry-run first.
-3. **aiqg-ui** — experiments list + create/edit wizard + live results
+   on the event + emitter promotion. The core, and the production-routing
+   change — lands behind dry-run first.
+3. **tas-spark-jobs** (Phase 2b, NOT deferred) — emit the
+   `scope_type='experiment_variant'` row from `aiqg-aggregator` so per-variant
+   metrics are pre-aggregated in `aiqg.metrics_1m`. Load-bearing for guardrails.
+4. **aiqg-ui** — experiments list + create/edit wizard + live results
    (per-variant comparison + pause).
-4. **tas-spark-jobs / TimescaleDB** (Phase 4) — `scope_type='variant'` rollups.
-5. **aether-shared/data-models/aiqg/** — new `experiment.md` model doc.
+5. **aether-shared/data-models/aiqg/** — new `experiment.md` model doc +
+   `aggregated-metrics.md` update for the new `scope_type`.
