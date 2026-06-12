@@ -70,8 +70,18 @@ Experiment
   schedule     — { starts_at, ends_at }       (optional)
   created_by, created_at, transitions[]       (audit)
 
-Variant.override   — { vendor?, model?, policy_bundle_id? }
-                     control has an empty override (baseline strategy runs)
+Variant.override   — a TYPED SET OF AXES; an experiment varies one (rarely more):
+                       vendor / model     route to a different provider/model
+                       system_prompt      override/inject the system prompt
+                       prompt_template_id swap a named prompt template
+                       policy_bundle_id   A/B a policy bundle (reuses route/policy path)
+                       gatekeeper_profile A/B Gatekeeper config — scan profile,
+                                          redaction on/off, tokenization mode
+                       params             sampling params (temperature, max_tokens…)
+                     control = empty override (baseline runs unchanged)
+Assignment.mode    — gateway_applied (gateway applies the override) OR
+                     client_asserted (the app picks the arm + sends
+                     `TAS-Experiment-Variant: <key>`; gateway only attributes/measures)
 Cohort             — route-rule-style matchers + workflow_type (Phase-2 matcher
                      that Experiments needs from day one): url_path, source_app[],
                      model[], workflow_type[], customer_header
@@ -80,6 +90,25 @@ Cohort             — route-rule-style matchers + workflow_type (Phase-2 matche
 A request is **eligible** if it matches the cohort AND the experiment is
 `running` AND within `schedule`. Eligible requests are assigned to exactly
 one variant; everyone else routes normally (untouched).
+
+### Experiment kinds (the variant axis is general — not just models)
+
+- **Model/vendor swap** (gpt-4o vs 4o-mini) — cost/latency win vs quality
+  *non-inferiority* (§6.2–6.3). The canonical case.
+- **Prompt A/B** (system prompt or template v1 vs v2) — quality/efficacy
+  *superiority*. Either `gateway_applied` (gateway injects the variant system
+  prompt) or `client_asserted` (the app owns its prompts and just tags the arm).
+- **Policy-bundle A/B** — enforcement/blocking impact (reuses the policy path).
+- **Gatekeeper-impact** (redaction/tokenization profile A vs B, or on vs off) —
+  *does context modification degrade response quality?* See §6.4 — this is a
+  first-class case, not an afterthought: the product's premise is that
+  Gatekeeper's inbound rewrites don't hurt answers, and this is how you prove
+  (or bound) it.
+- **Param sweep** (temperature, max_tokens) — quality/latency/cost tradeoff.
+
+`gateway_applied` axes that **mutate the request body** (system_prompt,
+prompt_template, params, gatekeeper_profile) are more invasive than a routing
+override — see the risk in §13.
 
 ---
 
@@ -142,7 +171,7 @@ handleAIQG → resolve token → resolve policy bundle
 
 ---
 
-## 6. Measurement pipeline & decision metrics
+## 6. Measurement, decision metrics & what "better" means
 
 ### The existing pipeline (verified live)
 
@@ -162,15 +191,48 @@ Rollup rows are keyed `(bucket_start, tenant_id, scope_type, scope_key)`,
 carrying `request_count`, **t-digest latency sketches**, CLEAR scores, and
 cost. One request fans out into one row per scope_type.
 
-### Decision metrics
+### 6.1 "Better" is objective-relative
 
-| Purpose | Metrics (per variant, vs `control`) | Source |
+There is no single "better" metric — each experiment declares a **primary
+objective** + **guardrails** on the rest:
+
+- **Cost-reduction** (the common model-swap case): primary = quality
+  **non-inferiority** (variant within a margin ε of control) **at lower cost**.
+- **Quality-improvement** (the common prompt-A/B case): primary = quality
+  **superiority** at acceptable cost/latency.
+- **Latency/cost-only**: primary = p95 or $/req, quality as a guardrail.
+
+Non-inferiority — *"not meaningfully worse"* — is the default frame for any
+cheaper/faster variant, **not** "the higher number wins."
+
+### 6.2 What we can measure — objective spine + a quality layer
+
+**Objective spine (have today, cheap, exact):** cost/req, tokens, p50/p95
+latency, status (success/error/blocked), safety (assurance findings, NIST).
+Reliable; drives guardrails.
+
+**The quality gap:** CLEAR **Efficacy** is MVP-computed from *structural
+validity + hedge/refusal signals only* (`build-vs-reuse §2.12`) — it does
+**not** measure correctness / helpfulness / completeness, and the source doc
+itself flags that it under-represents true quality pending LLM-as-judge. So
+**do not let Efficacy be the quality verdict.** An experiment whose objective
+is quality MUST name a real quality metric from this ladder (keyed to
+`workflow_type`):
+
+| Tier | Signal | Cost | Status |
+|---|---|---|---|
+| **Structural** | validity, parse/schema conformance, hedge/refusal; **groundedness/citations** (RAG) | free | partly today |
+| **Behavioral / implicit** | regeneration & retry rate, conversation continuation vs abandonment, tool-call success, code accept / edit-distance | cheap | needs light client signals |
+| **Explicit feedback** | app posts an outcome tied to `response_event_id` (thumbs / accepted / resolved / task reward) | cheap, gold | needs a feedback path |
+| **LLM-as-judge** | a *different* judge model rubric-scores a **sample** (correctness/helpfulness/completeness), async | $$ + latency | the planned Phase-2 efficacy augmentation — experiments *consume* it |
+
+**Decision-metric roles:**
+
+| Role | Metrics (per variant vs `control`) | Source |
 |---|---|---|
-| **Auto-stop guardrails** (§7) | error rate (status≠`success`), p95 latency, avg cost/request | error rate ← **Loki** `sum by (variant, status) count_over_time`; p95 ← **TS** t-digest; cost ← **TS** rollup |
-| **Winner / human call** | CLEAR composite + 5 dims, success rate, avg cost/request, **sample count** | **TS** rollup (CLEAR / cost / latency) + Loki (status) |
-
-The operator designates one **primary metric** (e.g. avg cost/request, or
-CLEAR composite); the rest are reported alongside.
+| **Guardrails / auto-stop** | error rate, p95 latency, avg cost/req, safety-finding rate | Loki (status/safety) + TS (latency/cost) |
+| **Primary verdict** | the experiment's objective metric + its chosen quality metric | per the ladder |
+| **Reported alongside** | full CLEAR, tokens, sample count | TS + Loki |
 
 ### The additive change this requires (Spark + TS)
 
@@ -196,13 +258,48 @@ plus the status-from-Loki pattern already shipped for `/metrics/health` and
 `/by-vendor` — not a new pipeline. It is **load-bearing for guardrails**, so it
 lands in Phase 2b (not deferred).
 
-### Significance (v1)
+### 6.3 Verdict mechanics
 
-Report per-variant **sample count** + a coarse confidence flag —
-"insufficient (<`min_samples`)", "directional", or "clear" (non-overlapping
-simple CIs on the primary metric). Not a p-value engine in v1; surface the
-numbers honestly and let a human call it. Sequential/Bayesian testing is
-Phase 3.
+- **Separate guardrails from the verdict.** Auto-stop runs only on the
+  cheap/fast/unambiguous spine (error/latency/cost/safety) — never on a slow or
+  noisy quality judge. The better/worse *verdict* may use the quality metric,
+  sample-size-gated.
+- **Non-inferiority test (default):** accept the variant if its quality metric
+  is within margin ε of control (e.g. judge-score delta ≥ −2pp) **and** it wins
+  the objective (cost/latency). Prevents "looked cheaper, shipped a regression."
+- **Sampling:** LLM-as-judge scores a random **sample** (≈5–20%) per variant,
+  async, off the hot path; the judge is a *third* model (not either variant) to
+  avoid self-preference / position bias.
+- **Split-test caveat → shadow-eval:** in a live split a prompt hits only ONE
+  arm, so same-prompt **pairwise** A/B isn't available inline. Either score
+  **pointwise** per arm, or run a **shadow-eval**: replay a sample of *control's*
+  logged requests through the variant offline and judge pairwise — zero user
+  impact (~2× cost on the sample). Shadow-eval gives the cleanest paired quality
+  delta and pairs naturally with `dry_run` (§8).
+- **Significance (v1):** report sample count + a coarse flag — "insufficient
+  (<`min_samples`)", "directional", "clear" (non-overlapping simple CIs on the
+  primary metric). Not a p-value engine in v1; sequential/Bayesian is Phase 3.
+
+### 6.4 Gatekeeper-impact experiments
+
+Gatekeeper modifies the **inbound** context (PII tokenization swaps values,
+redaction removes spans, injection-neutralization rewrites) — which *could*
+degrade the model's answer. A Gatekeeper-impact experiment varies
+`gatekeeper_profile` across arms (e.g. control = current profile, variant =
+no-redaction / a different tokenization mode) and measures the **quality delta**
+with the §6.2 ladder. This directly tests the product premise that Gatekeeper's
+rewrites don't hurt answers — or quantifies the tradeoff.
+
+- **Context-modification covariate:** alongside quality, surface *how much*
+  Gatekeeper changed the prompt per request — count of inbound findings that
+  triggered a redact/tokenize action, and % of prompt tokens altered (derivable
+  from the existing assurance findings + tag actions). Lets you correlate
+  modification *magnitude* with quality delta, not just on/off.
+- **Strongest design = shadow-eval pairwise:** run the same logged prompt
+  through both profiles offline and judge the paired responses — isolates
+  Gatekeeper's effect from prompt variance, with no user impact.
+- A `gatekeeper_profile` variant **mutates what the model sees** (inbound
+  request body), so it's a request-mutating axis — see §13.
 
 ---
 
@@ -336,6 +433,21 @@ Extends the existing page (today: comparison) with:
   Phase 2b needs explicit sign-off.
 - **Cost runaway** — a variant on a pricier model multiplies spend on its arm;
   cost guardrail + ceiling required.
+- **Request-body-mutating axes** (`system_prompt`, `prompt_template`, `params`,
+  `gatekeeper_profile`) are more invasive than a routing override — the gateway
+  changes *what the model sees / how it's scanned*, not just where the call
+  goes. Higher blast radius and harder to reason about. Mitigations: ship
+  routing/model axes first (Phase 2b), gate mutating axes behind a separate
+  enablement + extra dry-run scrutiny, and prefer `client_asserted` mode for
+  prompt A/B where the app already owns its prompts. Gatekeeper-profile variants
+  additionally interact with safety posture — never let an experiment widen the
+  security envelope (e.g. silently disabling injection scanning) without an
+  explicit, audited security sign-off.
+- **Quality measurement is the soft spot** — CLEAR Efficacy is structural-only
+  (§6.2); a quality verdict needs the judge/feedback layer, which adds cost,
+  latency, and judge bias. v1 leans on non-inferiority + sampling + shadow-eval
+  and is explicit about confidence; over-trusting Efficacy as "quality" is the
+  trap to avoid.
 - **Result validity** — confounding (time-of-day, cohort skew), insufficient
   samples; v1 is honest about sample size and avoids over-claiming
   significance.
