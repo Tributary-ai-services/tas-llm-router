@@ -301,6 +301,70 @@ rewrites don't hurt answers — or quantifies the tradeoff.
 - A `gatekeeper_profile` variant **mutates what the model sees** (inbound
   request body), so it's a request-mutating axis — see §13.
 
+### 6.5 Explicit feedback (gold signal) — a shared capability
+
+Feedback is the highest-signal, lowest-bias quality metric, and useful far
+beyond experiments (it can also augment CLEAR Efficacy and the AI Quality
+report). Build it as a **standalone capability experiments consume**, not
+experiment-internal. (Deserves its own
+`aether-shared/data-models/aiqg/response-feedback.md`.)
+
+**Ingest** — `POST /api/v1/feedback` (tenant-scoped; AIQG-token or Keycloak auth):
+```
+{ response_event_id?  |  client_request_id?,   // correlation — one required
+  signal_type,   // thumb | accept_reject | rating | task_success | reward | edit_distance | custom
+  value,         // normalized: thumb → ±1, rating → 1..5, task_success → bool, reward → float
+  source_app?, occurred_at?, metadata? }
+```
+
+**Correlation, two modes:**
+- `response_event_id` (exact) — the gateway optionally returns a
+  `TAS-Response-Event-Id` response header (also reachable via `TAS-Trace`) so
+  apps can capture it at call time.
+- `client_request_id` (app-friendly) — the app sends a stable id on the LLM
+  call (reuses `X-Request-ID` / baggage `session.id`); the event already records
+  it, and feedback references the same id. Resolves to the event by (tenant, id).
+
+**Storage + join** — `aiqg.response_feedback(response_event_id, tenant_id,
+signal_type, value, source_app, occurred_at, metadata)`. At ingest, resolve the
+referenced event and **denormalize `experiment_id` + `variant` onto the row**,
+so per-variant feedback aggregation is a plain GROUP BY (no read-time join).
+
+**Late-arriving by nature** — a thumb is immediate; "ticket resolved" may be
+hours/days later. A feedback-based verdict therefore **matures over time**:
+results windows must tolerate late feedback, and an experiment can sit in
+"verdict pending sufficient feedback" until enough lands.
+
+**Hygiene** — tenant-scoped + rate-limited; `metadata`/comments may carry PII,
+so that field is optional and minimized/scanned like other payloads; feedback
+is never required for an experiment to run (it's the gold tier, not the floor).
+
+### 6.6 LLM-as-judge rubrics, by workflow type
+
+The judge is likewise a **shared capability** (the planned Phase-2 Efficacy
+augmentation); experiments consume it. The rubric is keyed to `workflow_type`,
+and **where a cheaper automatic signal exists, prefer it over the judge**
+(cheaper, unbiased):
+
+| workflow_type | Judge rubric (semantic) | Cheaper automatic signal — prefer when available |
+|---|---|---|
+| `single_turn_qa` | correctness · helpfulness · completeness | — (judge or explicit feedback) |
+| `rag` | **faithfulness to retrieved context** · answer relevance | groundedness / citation coverage (structural, have) |
+| `summarization` | faithfulness (no hallucination) · key-point coverage · concision | context-utilization / coverage proxy |
+| `code_generation` | solves the prompt · idiomatic | **execution: compile / run tests** (beats a judge) |
+| `classification_extraction` | label correctness | **schema conformance + label match** (when labels known) |
+| `agentic` | goal completion · correct tool use across turns | tool-call success + outcome feedback |
+
+- **Mode** — reference-free in production (no ground truth): **pointwise**
+  rubric per arm on the live split, or **pairwise** (A vs B on the same
+  prompt+context) in shadow-eval (§6.3) for a stronger paired signal.
+- **Output** — per-dimension 0–1 + overall + an **abstain** option; aggregate
+  over the sample → a per-variant judge score with a CI.
+- **Bias controls (mandatory)** — judge model ≠ either variant; **randomize A/B
+  order** in pairwise (or score both orders and average) to counter position
+  bias; version the rubric (`judge_rubric_version`) so scores compare over time;
+  periodically **calibrate the judge against a human-labeled spot-check** set.
+
 ---
 
 ## 7. Guardrails (the part that gates the build)
@@ -476,7 +540,23 @@ Extends the existing page (today: comparison) with:
 3. **tas-spark-jobs** (Phase 2b, NOT deferred) — emit the
    `scope_type='experiment_variant'` row from `aiqg-aggregator` so per-variant
    metrics are pre-aggregated in `aiqg.metrics_1m`. Load-bearing for guardrails.
-4. **aiqg-ui** — experiments list + create/edit wizard + live results
-   (per-variant comparison + pause).
-5. **aether-shared/data-models/aiqg/** — new `experiment.md` model doc +
-   `aggregated-metrics.md` update for the new `scope_type`.
+4. **aiqg-ui** — experiments list + create/edit wizard (objective + variant
+   axis + quality metric + guardrails) + live results (per-variant comparison
+   incl. quality/feedback, pause).
+5. **aether-shared/data-models/aiqg/** — new `experiment.md` + `response-feedback.md`
+   model docs + `aggregated-metrics.md` update for the new `scope_type`.
+
+**Shared quality capabilities (experiments *consume*, don't own — sequence
+independently):**
+
+6. **Explicit feedback** (§6.5) — `POST /api/v1/feedback` + `aiqg.response_feedback`
+   table + correlation (response_event_id / client_request_id) + optional
+   `TAS-Response-Event-Id` response header on the gateway. Useful platform-wide
+   (also feeds Efficacy + the AI Quality report), so build standalone; the
+   experiment results query joins/aggregates it per variant.
+7. **LLM-as-judge** (§6.6) — the Phase-2 Efficacy augmentation: a judge service
+   that rubric-scores a sample by `workflow_type`, plus the per-type automatic
+   signals (code execution, schema/label match). Owned by the Efficacy/scoring
+   track; experiments call into it (pointwise live, pairwise in shadow-eval).
+   **An experiment with a quality objective is blocked until at least the
+   structural tier + one of {feedback, judge} is available for its workflow type.**
