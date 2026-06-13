@@ -1,10 +1,35 @@
 # demo-traffic — AIQG demo data generator
 
-Generates synthetic **AIQG response-event** log lines for a set of agent
-traffic types and pushes them to Loki so the AIQG dashboard's CLEAR,
-cost, latency, tag, and avoidable-cost panels light up with believable
-multi-agent traffic — and reports the **potential savings** AIQG would
-surface.
+Generates believable multi-agent AIQG traffic. **Two targets:**
+
+- **`--target=loki`** (default) — synthesizes **AIQG response-event** log
+  lines and pushes them straight to Loki so the dashboard's CLEAR, cost,
+  latency, tag, and avoidable-cost panels light up. Does **not** call any
+  vendor LLM; scores/costs come from the real `pkg/clear` scorer. Fast,
+  free, deterministic — but **Loki-only**: it never reaches Kafka, so the
+  TimescaleDB rollups behind `/metrics/agents` + `/flows` stay empty.
+- **`--target=gateway`** — sends **real** chat-completion requests through
+  the AIQG strict gateway (`llm-router-aiqg`) with the same per-agent
+  attribution headers (`TAS-Agent-*`, `TAS-Flow-Id`/`TAS-Conversation-Id`,
+  `baggage user.id`). The gateway emits genuine events down the full
+  **Kafka→Spark→TimescaleDB** path (and Loki), so the per-agent / per-flow
+  TS rollups populate with attributed traffic. Makes tiny real upstream
+  calls (small `--max-tokens`), so it costs a few cents.
+
+```bash
+# Loki target (default)
+go run ./cmd/demo-traffic                       # one pass
+go run ./cmd/demo-traffic --interval 30s        # loop
+
+# Gateway target — populates the TimescaleDB rollups
+export AIQG_TAS_AUTH_TOKEN=tas_qg_live_...       # aether-secrets/apps/tas-llm-router/aiqg-tokens.env
+go run ./cmd/demo-traffic --target=gateway \
+  --gateway-url https://gateway.aiqg.tas.scharber.com --insecure --flows-per-agent 2
+go run ./cmd/demo-traffic --target=gateway --dry-run   # preview requests, no token / no calls
+```
+
+The Loki-target details below also describe the agent personas and flow
+shapes the gateway target reuses.
 
 It does **not** call any vendor LLM. Per-step inputs are sampled from
 eight workflow profiles and scored by the **real** `pkg/clear` scorer
