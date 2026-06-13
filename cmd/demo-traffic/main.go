@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -56,6 +57,13 @@ func main() {
 		orgID      = flag.String("org-id", "", "optional X-Scope-OrgID header for multi-tenant Loki")
 		spreadSec  = flag.Int("spread", 90, "seconds to spread a pass's events over, ending at now")
 		insecure   = flag.Bool("insecure", true, "skip TLS verification (TAS Loki uses the internal tas-ca-issuer CA)")
+
+		target     = flag.String("target", "loki", "loki: synthesize response-event log lines + push to Loki | gateway: send real attributed chat requests through llm-router-aiqg (populates Kafka→Spark→TimescaleDB)")
+		gatewayURL = flag.String("gateway-url", "http://localhost:8086", "gateway base URL for --target=gateway (chat at /v1/chat/completions)")
+		token      = flag.String("token", os.Getenv("AIQG_TAS_AUTH_TOKEN"), "TAS-Auth gateway token for --target=gateway (or env AIQG_TAS_AUTH_TOKEN)")
+		model      = flag.String("model", "claude-haiku-4-5-20251001", "model for --target=gateway requests")
+		maxTokens  = flag.Int("max-tokens", 8, "max_tokens for --target=gateway requests (keep small — attribution, not content, is the point)")
+		usersCSV   = flag.String("users", "u_alice,u_bob,u_carol,u_dave", "baggage user.id pool sampled per flow (--target=gateway)")
 
 		complianceRate = flag.Float64("compliance-rate", 0.08, "fraction of events carrying a compliance (PII/cred/injection/safety) finding")
 		vagueRate      = flag.Float64("vague-rate", 0.12, "fraction of events carrying a vague-input finding")
@@ -86,6 +94,19 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Gateway target: send real attributed requests through llm-router-aiqg
+	// so the full Kafka→Spark→TimescaleDB attribution path populates (the
+	// Loki-synthesis path below never reaches Kafka).
+	if *target == "gateway" {
+		if strings.TrimSpace(*token) == "" && !*dryRun {
+			fmt.Fprintln(os.Stderr, "error: --target=gateway needs --token or AIQG_TAS_AUTH_TOKEN (set --dry-run to preview without a token)")
+			os.Exit(2)
+		}
+		gc := newGatewayClient(*gatewayURL, *token, *model, *maxTokens, *insecure)
+		runGatewayTarget(ctx, g, r, gc, splitUsers(*usersCSV), *flowsPer, *interval, *dryRun)
+		return
+	}
 
 	fmt.Printf("demo-traffic: tenant=%s account=%s agents=%d flows-per-agent=%d inferred-flows=%d seed=%d dry-run=%v\n",
 		*tenantID, *accountID, len(personas), *flowsPer, *inferredFl, s, *dryRun)
