@@ -132,6 +132,12 @@ type BuildOptions struct {
 	IPCaptureMode string // off | minimized (default) | full — gates client IP
 	FinishReason  string
 
+	// ResponseEventID, when set, is used as the response event's id
+	// instead of minting a fresh one. The Path A middleware pre-generates
+	// it so it can set the TAS-Response-Event-Id response header before the
+	// body flushes (clients/feedback correlate against it). Empty = mint.
+	ResponseEventID string
+
 	// ResolvedPolicyBundle is the bundle aiqg-dashboard-be picked for
 	// this request (Phase 4.0). Always set in production — the
 	// middleware degrades to a Default() resolution when the resolver
@@ -247,7 +253,10 @@ func truncateIP(ip string) string {
 
 func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token TokenView, snap instrumentation.Snapshot, opts BuildOptions) (RequestEnvelope, ResponseEnvelope) {
 	reqID := newUUID()
-	respID := newUUID()
+	respID := opts.ResponseEventID
+	if respID == "" {
+		respID = newUUID()
+	}
 	now := time.Now().UTC()
 
 	receivedAt := now
@@ -381,6 +390,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Vendor:               routing.Vendor,                                        // denormalized from routing decision (same as RequestEvent)
 		Model:                routing.Model,                                         // ditto — powers per-vendor/model dashboards off the response stream
 		Workflow:             preferredWorkflow(headers.Workflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
+		SourceApp:            sourceApp,                                             // ditto — carries the source_app dimension on the response stream
 		CompleteAt:           completeAt,
 		Status:               status,
 		HTTPStatus:           opts.HTTPStatus,
@@ -423,6 +433,11 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 // newUUID returns a v4-shaped 128-bit random ID, formatted as the
 // canonical 8-4-4-4-12 hex string. We don't pull in a UUID dep because
 // the format is mechanical and we don't need RFC-strict version bits.
+// NewEventID mints a fresh event id. Exported so the Path A middleware can
+// pre-generate a response_event_id (to set the TAS-Response-Event-Id header
+// before the body flushes) and pass it back via BuildOptions.ResponseEventID.
+func NewEventID() string { return newUUID() }
+
 func newUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
