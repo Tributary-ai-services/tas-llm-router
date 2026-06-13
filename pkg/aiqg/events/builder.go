@@ -376,10 +376,11 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 	respEvent := ResponseEvent{
 		ResponseEventID:      respID,
 		RequestEventID:       reqID,
-		TenantID:             token.TenantID,      // denormalized per response-event.md §"Denormalization rationale"
-		AIQGAccountID:        token.AIQGAccountID, // ditto
-		Vendor:               routing.Vendor,      // denormalized from routing decision (same as RequestEvent)
-		Model:                routing.Model,       // ditto — powers per-vendor/model dashboards off the response stream
+		TenantID:             token.TenantID,                                        // denormalized per response-event.md §"Denormalization rationale"
+		AIQGAccountID:        token.AIQGAccountID,                                   // ditto
+		Vendor:               routing.Vendor,                                        // denormalized from routing decision (same as RequestEvent)
+		Model:                routing.Model,                                         // ditto — powers per-vendor/model dashboards off the response stream
+		Workflow:             preferredWorkflow(headers.Workflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
 		CompleteAt:           completeAt,
 		Status:               status,
 		HTTPStatus:           opts.HTTPStatus,
