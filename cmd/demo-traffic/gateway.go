@@ -143,6 +143,10 @@ func assurancePrompt() string {
 		strings.Join(docs, "\n\n")
 }
 
+// demoSourceApps populates the source_app dimension (TAS-Source-App header)
+// with believable calling-app names, sampled per flow.
+var demoSourceApps = []string{"checkout-svc", "search-svc", "support-portal", "batch-worker", "mobile-app"}
+
 func splitUsers(csv string) []string {
 	var out []string
 	for _, u := range strings.Split(csv, ",") {
@@ -170,6 +174,7 @@ func runGatewayPass(ctx context.Context, g rng, c *gatewayClient, users []string
 				"TAS-Agent-Name":    persona.Name,
 				"TAS-Agent-Version": persona.Version,
 				"TAS-Flow-Id":       g.uuid(),
+				"TAS-Source-App":    demoSourceApps[g.r.Intn(len(demoSourceApps))],
 				"baggage":           "user.id=" + user,
 			}
 			if persona.TurnsHi > 1 {

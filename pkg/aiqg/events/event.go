@@ -149,9 +149,10 @@ type ResponseEvent struct {
 	// per-model cost/token dashboards read these directly off the
 	// response stream, and they survive a lost request event (see
 	// response-event.md KI-2). Same values as the paired RequestEvent.
-	Vendor   string `json:"vendor,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Workflow string `json:"workflow,omitempty"` // CLEAR workflow_type — denormalized so the response stream carries the type dimension for per-type rollups (TimescaleDB)
+	Vendor    string `json:"vendor,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Workflow  string `json:"workflow,omitempty"`   // CLEAR workflow_type — denormalized so the response stream carries the type dimension for per-type rollups (TimescaleDB)
+	SourceApp string `json:"source_app,omitempty"` // calling app — denormalized like vendor/model/workflow so the response stream carries the source dimension
 
 	// Outcome
 	CompleteAt      time.Time `json:"complete_at"`

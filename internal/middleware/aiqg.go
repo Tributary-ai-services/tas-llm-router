@@ -214,6 +214,13 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 
 	sw := &statusCapturingResponseWriter{ResponseWriter: w}
 
+	// Pre-generate the response event id so we can advertise it as a
+	// response header BEFORE the downstream handler flushes the body
+	// (works for streaming too). Clients and the /feedback endpoint
+	// correlate feedback against this exact id. Build reuses it.
+	respEventID := events.NewEventID()
+	w.Header().Set("TAS-Response-Event-Id", respEventID)
+
 	emitter := cfg.Emitter
 	if emitter == nil {
 		emitter = events.NoopEmitter{}
@@ -225,9 +232,10 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	// stamps made by the handler reach the event.
 	defer func() {
 		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
-			HTTPStatus:    sw.status(),
-			Region:        cfg.Region,
-			IPCaptureMode: cfg.IPCaptureMode,
+			HTTPStatus:      sw.status(),
+			Region:          cfg.Region,
+			IPCaptureMode:   cfg.IPCaptureMode,
+			ResponseEventID: respEventID,
 			ResolvedPolicyBundle: &events.ResolvedPolicyBundle{
 				BundleID:   bundleResolution.BundleID,
 				BundleName: bundleResolution.BundleName,
