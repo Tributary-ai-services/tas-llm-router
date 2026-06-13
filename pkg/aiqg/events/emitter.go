@@ -267,6 +267,15 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		if ac.IdentitySource != "" {
 			respFields["identity_source"] = ac.IdentitySource
 		}
+		if ac.StepID != "" {
+			respFields["step_id"] = ac.StepID
+		}
+		if ac.ParentStepID != "" {
+			respFields["parent_step_id"] = ac.ParentStepID
+		}
+		if ac.FlowStepSeq > 0 {
+			respFields["flow_step_seq"] = ac.FlowStepSeq
+		}
 	}
 	e.Logger.WithFields(respFields).Info("aiqg response event")
 	return nil

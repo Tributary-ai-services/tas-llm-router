@@ -145,6 +145,10 @@ type BuildOptions struct {
 	// holds. Nil pointer → field omitted from the response event
 	// (covers pre-Phase-4.0 callers + non-AIQG middleware).
 	ResolvedPolicyBundle *ResolvedPolicyBundle
+
+	// Linkage is the resolved `linked`-tier flow/step topology for this
+	// request (the middleware resolves it via pkg/aiqg/linkage before Build).
+	Linkage Linkage
 }
 
 // Build constructs the paired (RequestEnvelope, ResponseEnvelope) from
@@ -178,23 +182,43 @@ type BuildOptions struct {
 // AIQG token supplies the always-present principal tier. identity_source
 // records the strongest tier that produced an identity. Returns nil only
 // when nothing at all resolved (no token, no headers).
-func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string) *AgentContext {
+// Linkage is the deterministic `linked`-tier result the middleware resolves
+// (via pkg/aiqg/linkage) before Build: this request's step id and, when it
+// echoed a tool_call_id we served, the parent step + flow it belongs to.
+// "asserted wins for WHO, linked wins for SHAPE" — StepID/ParentStepID are
+// always applied; LinkedFlowID only fills FlowID when no header/trace flow
+// was asserted.
+type Linkage struct {
+	StepID       string
+	ParentStepID string
+	LinkedFlowID string
+	FlowStepSeq  int
+}
+
+func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linkage) *AgentContext {
 	ac := &AgentContext{
 		AgentID:      h.AgentID,
 		AgentName:    h.AgentName,
 		AgentVersion: h.AgentVersion,
 		UserID:       h.BaggageUserID,
 		ClientIP:     clientIP,
+		StepID:       lk.StepID,
+		ParentStepID: lk.ParentStepID,
+		FlowStepSeq:  lk.FlowStepSeq,
 	}
 	// conversation: explicit header wins, else baggage session.id
 	ac.ConversationID = h.ConversationID
 	if ac.ConversationID == "" {
 		ac.ConversationID = h.BaggageSessionID
 	}
-	// flow: explicit header wins, else traceparent trace-id
+	// flow: explicit header wins, else traceparent trace-id, else the
+	// linked flow proven by a tool_call_id echo (shape, not naming).
 	ac.FlowID = h.FlowID
 	if ac.FlowID == "" {
 		ac.FlowID = h.TraceID
+	}
+	if ac.FlowID == "" {
+		ac.FlowID = lk.LinkedFlowID
 	}
 	// principal: token source_app, else token id (always present in AIQG mode)
 	ac.PrincipalID = t.SourceApp
@@ -209,6 +233,8 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string) *AgentCo
 		ac.IdentitySource = "asserted"
 	case h.TraceID != "":
 		ac.IdentitySource = "trace"
+	case lk.LinkedFlowID != "" || lk.ParentStepID != "":
+		ac.IdentitySource = "linked"
 	case ac.PrincipalID != "":
 		ac.IdentitySource = "principal"
 	case ac.ClientIP != "":
@@ -218,7 +244,8 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string) *AgentCo
 	}
 
 	if ac.AgentID == "" && ac.AgentName == "" && ac.UserID == "" &&
-		ac.ConversationID == "" && ac.FlowID == "" && ac.PrincipalID == "" && ac.ClientIP == "" {
+		ac.ConversationID == "" && ac.FlowID == "" && ac.PrincipalID == "" && ac.ClientIP == "" &&
+		ac.StepID == "" && ac.ParentStepID == "" {
 		return nil
 	}
 	return ac
@@ -290,7 +317,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 	clientIPVal := applyIPMode(clientIP(r), opts.IPCaptureMode)
 
 	// Self-asserted identity attribution (shared by both events).
-	agentCtx := buildAgentContext(headers, token, clientIPVal)
+	agentCtx := buildAgentContext(headers, token, clientIPVal, opts.Linkage)
 
 	reqEvent := RequestEvent{
 		RequestEventID:  reqID,
