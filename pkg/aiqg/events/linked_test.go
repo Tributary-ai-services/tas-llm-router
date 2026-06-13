@@ -10,7 +10,7 @@ func TestBuildAgentContext_Linked(t *testing.T) {
 	tok := TokenView{TASAuthTokenID: "tok-1"} // principal always present in AIQG mode
 
 	t.Run("untagged request linked by tool_call echo", func(t *testing.T) {
-		lk := Linkage{StepID: "resp-2", ParentStepID: "resp-1", LinkedFlowID: "flow-X"}
+		lk := Linkage{StepID: "resp-2", ParentStepID: "resp-1", FlowID: "flow-X", Linked: true}
 		ac := buildAgentContext(AIQGHeadersView{}, tok, "", lk)
 		if ac == nil {
 			t.Fatal("nil agent context")
@@ -26,7 +26,7 @@ func TestBuildAgentContext_Linked(t *testing.T) {
 	t.Run("asserted agent keeps WHO, linkage supplies SHAPE", func(t *testing.T) {
 		// Agent named via header (asserted) but no TAS-Flow-Id; linkage fills the flow.
 		h := AIQGHeadersView{AgentID: "agent-7"}
-		lk := Linkage{StepID: "resp-9", ParentStepID: "resp-8", LinkedFlowID: "flow-Y"}
+		lk := Linkage{StepID: "resp-9", ParentStepID: "resp-8", FlowID: "flow-Y", Linked: true}
 		ac := buildAgentContext(h, tok, "", lk)
 		if ac.IdentitySource != "asserted" {
 			t.Errorf("identity_source = %q, want asserted (agent named wins WHO)", ac.IdentitySource)
@@ -38,7 +38,7 @@ func TestBuildAgentContext_Linked(t *testing.T) {
 
 	t.Run("explicit TAS-Flow-Id wins over linked flow", func(t *testing.T) {
 		h := AIQGHeadersView{FlowID: "header-flow"}
-		lk := Linkage{StepID: "resp-3", LinkedFlowID: "flow-Z"}
+		lk := Linkage{StepID: "resp-3", FlowID: "flow-Z", Linked: true}
 		ac := buildAgentContext(h, tok, "", lk)
 		if ac.FlowID != "header-flow" {
 			t.Errorf("FlowID = %q, want the asserted header flow", ac.FlowID)

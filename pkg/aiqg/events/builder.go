@@ -191,8 +191,15 @@ type BuildOptions struct {
 type Linkage struct {
 	StepID       string
 	ParentStepID string
-	LinkedFlowID string
-	FlowStepSeq  int
+	// FlowID is the effective flow anchor to stamp when no TAS-Flow-Id /
+	// traceparent flow was asserted: the resolved link's flow for an echoing
+	// child, or a minted anchor for a tool-serving root. Filling FlowID does
+	// NOT by itself mean "linked".
+	FlowID string
+	// Linked is true only when an echoed tool_call_id matched a served one
+	// (evidence) — that's what promotes identity_source to `linked`.
+	Linked      bool
+	FlowStepSeq int
 }
 
 func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linkage) *AgentContext {
@@ -218,7 +225,7 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 		ac.FlowID = h.TraceID
 	}
 	if ac.FlowID == "" {
-		ac.FlowID = lk.LinkedFlowID
+		ac.FlowID = lk.FlowID
 	}
 	// principal: token source_app, else token id (always present in AIQG mode)
 	ac.PrincipalID = t.SourceApp
@@ -233,7 +240,7 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 		ac.IdentitySource = "asserted"
 	case h.TraceID != "":
 		ac.IdentitySource = "trace"
-	case lk.LinkedFlowID != "" || lk.ParentStepID != "":
+	case lk.Linked:
 		ac.IdentitySource = "linked"
 	case ac.PrincipalID != "":
 		ac.IdentitySource = "principal"

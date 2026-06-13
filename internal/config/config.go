@@ -70,6 +70,12 @@ type AIQGConfig struct {
 	//   AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN
 	DashboardURL               string `yaml:"dashboard_url"`
 	DashboardInternalAuthToken string `yaml:"dashboard_internal_auth_token"`
+
+	// LinkageRedisURL enables the deterministic `linked`-tier attribution
+	// (docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A): a Redis (redis://…) URL for
+	// the tool_call_id echo index. Empty = linkage disabled (events emit
+	// without step/parent topology). Env: AIQG_LINKAGE_REDIS_URL.
+	LinkageRedisURL string `yaml:"linkage_redis_url"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Defined here (not in
@@ -451,6 +457,9 @@ func (c *Config) loadFromEnv() {
 	if topic := os.Getenv("AIQG_KAFKA_TOPIC"); topic != "" {
 		c.AIQG.Kafka.Topic = topic
 	}
+	if u := os.Getenv("AIQG_LINKAGE_REDIS_URL"); u != "" {
+		c.AIQG.LinkageRedisURL = u
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -635,6 +644,7 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		EmitterType:                c.AIQG.EmitterType,
 		DashboardURL:               c.AIQG.DashboardURL,
 		DashboardInternalAuthToken: c.AIQG.DashboardInternalAuthToken,
+		LinkageRedisURL:            c.AIQG.LinkageRedisURL,
 		Kafka: server.AIQGKafkaConfig{
 			Brokers: c.AIQG.Kafka.Brokers,
 			Topic:   c.AIQG.Kafka.Topic,
