@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/tributary-ai/llm-router-waf/internal/types"
@@ -104,6 +105,36 @@ func TestAgentFingerprint_MaxTokensIgnored(t *testing.T) {
 	}
 	if agentFingerprint(base(mt1)) != agentFingerprint(base(mt2)) {
 		t.Error("max_tokens must NOT split one agent's fingerprint")
+	}
+}
+
+func TestApplyExperimentOverride(t *testing.T) {
+	// Model-swap override reroutes by changing req.Model.
+	req := &types.ChatRequest{Model: "gpt-4o"}
+	applyExperimentOverride(req, json.RawMessage(`{"model":"gpt-4o-mini"}`))
+	if req.Model != "gpt-4o-mini" {
+		t.Errorf("model override not applied: %q", req.Model)
+	}
+
+	// Param-sweep override.
+	req2 := &types.ChatRequest{Model: "gpt-4o"}
+	applyExperimentOverride(req2, json.RawMessage(`{"params":{"temperature":0.2,"max_tokens":256}}`))
+	if req2.Temperature == nil || *req2.Temperature != 0.2 {
+		t.Errorf("temperature override not applied: %v", req2.Temperature)
+	}
+	if req2.MaxTokens == nil || *req2.MaxTokens != 256 {
+		t.Errorf("max_tokens override not applied: %v", req2.MaxTokens)
+	}
+	if req2.Model != "gpt-4o" {
+		t.Errorf("model should be untouched when override has no model: %q", req2.Model)
+	}
+
+	// Empty / control override is a no-op.
+	req3 := &types.ChatRequest{Model: "gpt-4o"}
+	applyExperimentOverride(req3, nil)
+	applyExperimentOverride(req3, json.RawMessage(`{}`))
+	if req3.Model != "gpt-4o" {
+		t.Errorf("empty override must not change the request: %q", req3.Model)
 	}
 }
 

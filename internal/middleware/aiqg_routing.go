@@ -87,6 +87,12 @@ type Routing struct {
 	// carries nothing fingerprintable. Combined with (tenant, principal) by
 	// the events builder to mint the AgentSurrogateID.
 	fingerprint string
+
+	// experiments (Phase D): the experiment + variant that claimed this
+	// request. Stamped at request time (so the routing override + the event
+	// stamp use one decision). Empty when no experiment claimed it.
+	experimentID      string
+	experimentVariant string
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -162,6 +168,10 @@ type RoutingSnapshot struct {
 	// fingerprinted tier (§B): the request's structural signature. Empty
 	// when nothing fingerprintable.
 	Fingerprint string
+
+	// experiments (Phase D): claiming experiment + variant. Empty when none.
+	ExperimentID      string
+	ExperimentVariant string
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -193,6 +203,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		PrefixHash:        r.prefixHash,
 		StateHash:         r.stateHash,
 		Fingerprint:       r.fingerprint,
+		ExperimentID:      r.experimentID,
+		ExperimentVariant: r.experimentVariant,
 	}
 }
 
@@ -260,6 +272,24 @@ func StampStateHash(ctx context.Context, hash string) {
 	defer r.mu.Unlock()
 	if r.stateHash == "" {
 		r.stateHash = hash
+	}
+}
+
+// StampExperiment records the experiment + variant that claimed this request
+// (Phase D). First-write-wins; empty experiment id is a no-op.
+func StampExperiment(ctx context.Context, experimentID, variant string) {
+	if experimentID == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.experimentID == "" {
+		r.experimentID = experimentID
+		r.experimentVariant = variant
 	}
 }
 
