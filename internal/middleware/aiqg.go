@@ -238,6 +238,20 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	respEventID := events.NewEventID()
 	w.Header().Set("TAS-Response-Event-Id", respEventID)
 
+	// Experiments (Phase D): stash the resolver + this request's sticky
+	// identity on ctx so the completion handler can resolve the variant at
+	// ROUTING time (when model + workflow are known) — applying a running
+	// experiment's override before Router.Route, and stamping
+	// experiment_id/variant on the routing sidecar for the event.
+	if cfg.Experiments != nil && resolvedToken != nil {
+		ctx = withExperimentResolveCtx(ctx, &experimentResolveCtx{
+			resolver:  cfg.Experiments,
+			tenantID:  resolvedToken.TenantID,
+			id:        experimentIdentity(parsed, resolvedToken, r, respEventID),
+			sourceApp: experimentSourceApp(parsed, resolvedToken),
+		})
+	}
+
 	emitter := cfg.Emitter
 	if emitter == nil {
 		emitter = events.NoopEmitter{}
@@ -254,12 +268,10 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		// the request context may already be cancelled in this deferred path.
 		lk := resolveLinkage(cfg, parsed, routing, resolvedToken, respEventID)
 
-		// Experiment attribution (Phase D): assign this request to a variant if
-		// an experiment's cohort claims it, and stamp experiment_id/variant on
-		// the event. dry_run assigns + stamps only; running's override is
-		// applied at routing time (Phase 2b) — this deferred resolution is
-		// deterministic, so it matches the request-time decision.
-		expDecision := resolveExperiment(cfg, parsed, routing, resolvedToken, r, respEventID)
+		// Experiment attribution (Phase D): read the variant the completion
+		// handler resolved + stamped at routing time. dry_run stamps only;
+		// running additionally applied the override before Router.Route.
+		expSnap := routing.Snapshot()
 
 		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
 			HTTPStatus:      sw.status(),
@@ -272,8 +284,8 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 				BundleName: bundleResolution.BundleName,
 				Source:     bundleResolution.Source,
 			},
-			ExperimentID:      expDecision.ExperimentID,
-			ExperimentVariant: expDecision.Variant,
+			ExperimentID:      expSnap.ExperimentID,
+			ExperimentVariant: expSnap.ExperimentVariant,
 		})
 		if err := emitter.Emit(ctx, reqEnv, respEnv); err != nil {
 			cfg.Logger.WithError(err).Warn("AIQG event emission failed")
@@ -377,17 +389,51 @@ func resolveLinkage(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *t
 	return lk
 }
 
-// resolveExperiment assigns the request to an experiment variant if one's
-// cohort claims it (Phase D). Returns a zero Decision when experiments are
-// disabled or none claim the request — the event then carries no
-// experiment_id/variant. The sticky key is built from the same identity ladder
-// the attribution tiers use, so a user stays in one variant across a flow.
-// Best-effort: never fails the request.
-func resolveExperiment(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *tokens.Token, r *http.Request, respEventID string) experiments.Decision {
-	if cfg.Experiments == nil || tok == nil || routing == nil {
-		return experiments.Decision{}
+// experimentResolveCtx carries everything the completion handler needs to
+// resolve the experiment variant at routing time. Stashed on the request
+// context by handleAIQG.
+type experimentResolveCtx struct {
+	resolver  *experiments.Resolver
+	tenantID  string
+	id        experiments.Identity
+	sourceApp string
+}
+
+type experimentCtxKey struct{}
+
+func withExperimentResolveCtx(ctx context.Context, ec *experimentResolveCtx) context.Context {
+	return context.WithValue(ctx, experimentCtxKey{}, ec)
+}
+
+// ResolveExperimentForRouting is called by the chat-completion handler once the
+// model + workflow are known. It resolves the variant claiming this request,
+// stamps experiment_id/variant on the routing sidecar (so the event carries
+// them), and returns the Decision — Apply=true means the caller should apply
+// the variant's override before Router.Route. Returns nil when no experiment
+// is configured/claims the request. Best-effort: never fails the request.
+func ResolveExperimentForRouting(ctx context.Context, model, workflowType, path string) *experiments.Decision {
+	ec, _ := ctx.Value(experimentCtxKey{}).(*experimentResolveCtx)
+	if ec == nil || ec.resolver == nil {
+		return nil
 	}
-	rs := routing.Snapshot()
+	attrs := experiments.ReqAttrs{
+		SourceApp:    ec.sourceApp,
+		Model:        model,
+		WorkflowType: workflowType,
+		Path:         path,
+	}
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	d := ec.resolver.Resolve(rctx, ec.tenantID, ec.id, attrs)
+	if d != nil {
+		StampExperiment(ctx, d.ExperimentID, d.Variant)
+	}
+	return d
+}
+
+// experimentIdentity builds the sticky-key ladder from the request's parsed
+// headers + token, ending at respEventID (the always-present random fallback).
+func experimentIdentity(parsed AIQGHeaders, tok *tokens.Token, r *http.Request, respEventID string) experiments.Identity {
 	principal := tok.SourceApp
 	if principal == "" {
 		principal = tok.TokenID
@@ -400,30 +446,21 @@ func resolveExperiment(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok
 	if convID == "" {
 		convID = parsed.Baggage["session.id"]
 	}
-	id := experiments.Identity{
+	return experiments.Identity{
 		UserID:         parsed.Baggage["user.id"],
 		ConversationID: convID,
 		FlowID:         flowID,
 		PrincipalID:    principal,
 		ClientIP:       experimentClientIP(r),
-		RequestID:      respEventID, // always present — the random sticky-key fallback
+		RequestID:      respEventID,
 	}
-	sourceApp := parsed.SourceApp
-	if sourceApp == "" {
-		sourceApp = tok.SourceApp
+}
+
+func experimentSourceApp(parsed AIQGHeaders, tok *tokens.Token) string {
+	if parsed.SourceApp != "" {
+		return parsed.SourceApp
 	}
-	attrs := experiments.ReqAttrs{
-		SourceApp:    sourceApp,
-		Model:        rs.Model,
-		WorkflowType: rs.Workflow,
-		Path:         r.URL.Path,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if d := cfg.Experiments.Resolve(ctx, tok.TenantID, id, attrs); d != nil {
-		return *d
-	}
-	return experiments.Decision{}
+	return tok.SourceApp
 }
 
 // experimentClientIP extracts a stable client IP for the assignment key —

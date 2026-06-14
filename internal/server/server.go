@@ -516,14 +516,23 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Timestamp = time.Now()
 
-	// AIQG: stamp the requested model + streaming flag onto the routing
-	// sidecar so the response event carries them. No-op outside AIQG mode.
-	middleware.StampModel(r.Context(), req.Model)
-	middleware.StampStreaming(r.Context(), req.Stream)
 	// AIQG: heuristically classify the workflow from request shape so
 	// the CLEAR latency scorer uses a sensible SLA when the caller
 	// didn't send a TAS-Workflow header. Empty result is a no-op.
-	middleware.StampWorkflow(r.Context(), workflow.Classify(&req))
+	wf := workflow.Classify(&req)
+	// AIQG experiments (Phase D): resolve the variant claiming this request on
+	// the REQUESTED model + workflow (the cohort matches what the caller
+	// asked), then — for a running experiment — apply the variant's override
+	// (model swap / param sweep) BEFORE routing + stamping, so the event
+	// reflects the SERVED config. dry_run returns Apply=false (stamped only).
+	if d := middleware.ResolveExperimentForRouting(r.Context(), req.Model, wf, r.URL.Path); d != nil && d.Apply {
+		applyExperimentOverride(&req, d.Override)
+	}
+	// AIQG: stamp the (possibly overridden) model + streaming flag onto the
+	// routing sidecar so the response event carries them. No-op outside AIQG.
+	middleware.StampModel(r.Context(), req.Model)
+	middleware.StampStreaming(r.Context(), req.Stream)
+	middleware.StampWorkflow(r.Context(), wf)
 	// AIQG (linked tier): tool_call_ids this request echoes (role=tool) so
 	// the middleware can prove which flow/step it continues.
 	middleware.StampEchoedToolCalls(r.Context(), echoedToolCallIDs(&req))
@@ -1016,6 +1025,40 @@ func agentFingerprint(req *types.ChatRequest) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// applyExperimentOverride mutates the request per a running experiment's
+// variant override (Phase D). Supports the model-swap (the canonical case —
+// req.Model change reroutes via the model→provider mapping) and param-sweep
+// axes. A vendor-only override (no model) is not applied here — that needs a
+// forced-provider Route() arg; logged as a no-op by the caller if needed.
+func applyExperimentOverride(req *types.ChatRequest, override json.RawMessage) {
+	if len(override) == 0 {
+		return
+	}
+	var o struct {
+		Model  string `json:"model"`
+		Params struct {
+			Temperature *float32 `json:"temperature"`
+			TopP        *float32 `json:"top_p"`
+			MaxTokens   *int     `json:"max_tokens"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(override, &o); err != nil {
+		return
+	}
+	if o.Model != "" {
+		req.Model = o.Model
+	}
+	if o.Params.Temperature != nil {
+		req.Temperature = o.Params.Temperature
+	}
+	if o.Params.TopP != nil {
+		req.TopP = o.Params.TopP
+	}
+	if o.Params.MaxTokens != nil {
+		req.MaxTokens = o.Params.MaxTokens
+	}
 }
 
 // extractResponseContent extracts text content from a ChatResponse.
