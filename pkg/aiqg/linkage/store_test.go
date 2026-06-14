@@ -65,4 +65,55 @@ func TestRedisStore_NilSafe(t *testing.T) {
 	if _, ok, err := s.ResolveToolCalls(context.Background(), "t", []string{"a"}); ok || err != nil {
 		t.Errorf("nil resolve should be (false,nil), got ok=%v err=%v", ok, err)
 	}
+	// Prefix-chaining methods are nil-safe too.
+	if err := s.IndexPrefix(context.Background(), "t", "h", "c"); err != nil {
+		t.Errorf("nil prefix index should be a no-op, got %v", err)
+	}
+	if _, ok, err := s.ResolvePrefix(context.Background(), "t", "h"); ok || err != nil {
+		t.Errorf("nil prefix resolve should be (false,nil), got ok=%v err=%v", ok, err)
+	}
+}
+
+func TestMemoryStore_PrefixIndexThenResolve(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+
+	// Serving turn 1 leaves the conversation in state hash "state-1",
+	// belonging to conversation "conv-1".
+	if err := s.IndexPrefix(ctx, "t1", "state-1", "conv-1"); err != nil {
+		t.Fatalf("index prefix: %v", err)
+	}
+	// Turn 2's message prefix hashes to that same state → same conversation.
+	got, ok, err := s.ResolvePrefix(ctx, "t1", "state-1")
+	if err != nil || !ok {
+		t.Fatalf("resolve prefix: ok=%v err=%v", ok, err)
+	}
+	if got != "conv-1" {
+		t.Errorf("resolved conversation %q, want conv-1", got)
+	}
+}
+
+func TestMemoryStore_PrefixMissTenantAndNamespace(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	_ = s.IndexPrefix(ctx, "t1", "state-x", "conv-x")
+
+	// Unknown prefix hash → miss.
+	if _, ok, _ := s.ResolvePrefix(ctx, "t1", "state-nope"); ok {
+		t.Error("unknown prefix should not resolve")
+	}
+	// Same hash, different tenant → miss (conversations never cross tenants).
+	if _, ok, _ := s.ResolvePrefix(ctx, "t2", "state-x"); ok {
+		t.Error("prefix must not resolve across tenants")
+	}
+	// Empty hash → miss, no panic.
+	if _, ok, _ := s.ResolvePrefix(ctx, "t1", ""); ok {
+		t.Error("empty prefix should not resolve")
+	}
+	// The prefix namespace must not collide with the tool_call_id namespace:
+	// a tool_call_id equal to a state hash string must not cross-resolve.
+	_ = s.IndexToolCalls(ctx, "t1", []string{"state-x"}, Link{FlowID: "f", StepID: "s"})
+	if c, ok, _ := s.ResolvePrefix(ctx, "t1", "state-x"); !ok || c != "conv-x" {
+		t.Errorf("prefix namespace collided with tool_call index: ok=%v c=%q", ok, c)
+	}
 }

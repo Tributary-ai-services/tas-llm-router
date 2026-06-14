@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -510,6 +512,10 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// AIQG (linked tier): tool_call_ids this request echoes (role=tool) so
 	// the middleware can prove which flow/step it continues.
 	middleware.StampEchoedToolCalls(r.Context(), echoedToolCallIDs(&req))
+	// AIQG (prefix-chaining tier): hash of the conversation prefix this
+	// request continues, so the middleware can recognize a tool-less
+	// multi-turn thread it previously served.
+	middleware.StampPrefixHash(r.Context(), conversationPrefixHash(&req))
 
 	// Gatekeeper: check bypass token
 	scanBypassed := false
@@ -651,6 +657,10 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 		// AIQG (linked tier): tool_call_ids this response served, so a later
 		// request echoing them links back to this step.
 		middleware.StampServedToolCalls(r.Context(), servedToolCallIDs(resp))
+		// AIQG (prefix-chaining tier): hash of the conversation state this
+		// response leaves, so a later request re-sending it as prefix links
+		// to this turn's conversation.
+		middleware.StampStateHash(r.Context(), conversationStateHash(req, resp))
 	}
 	if metadata != nil {
 		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
@@ -808,6 +818,10 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 		// AIQG (linked tier): tool_call_ids this response served, so a later
 		// request echoing them links back to this step.
 		middleware.StampServedToolCalls(r.Context(), servedToolCallIDs(resp))
+		// AIQG (prefix-chaining tier): hash of the conversation state this
+		// response leaves, so a later request re-sending it as prefix links
+		// to this turn's conversation.
+		middleware.StampStateHash(r.Context(), conversationStateHash(req, resp))
 	}
 	if metadata != nil {
 		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
@@ -852,6 +866,69 @@ func servedToolCallIDs(resp *types.ChatResponse) []string {
 		}
 	}
 	return ids
+}
+
+// hashMessages returns a canonical SHA-256 over a message sequence, projecting
+// each message to (role, content, tool_call_id). json.Marshal sorts map keys,
+// so multimodal content (decoded as map[string]interface{}) hashes
+// deterministically, and extra fields on a client-echoed assistant message
+// (refusal, annotations, …) are ignored — so the hash of a state we serve
+// matches the prefix the client re-sends verbatim on the next turn.
+func hashMessages(msgs []types.Message) string {
+	type nm struct {
+		Role       string      `json:"r"`
+		Content    interface{} `json:"c,omitempty"`
+		ToolCallID string      `json:"t,omitempty"`
+	}
+	norm := make([]nm, 0, len(msgs))
+	for _, m := range msgs {
+		norm = append(norm, nm{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID})
+	}
+	b, err := json.Marshal(norm)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// conversationPrefixHash hashes the conversation state this request CONTINUES:
+// all messages up to and including the last assistant message — the boundary
+// of the prior served turn. Empty when there's no assistant message (a fresh
+// thread: nothing to chain back to). Prefix-chaining resolve key (§A.2).
+func conversationPrefixHash(req *types.ChatRequest) string {
+	if req == nil {
+		return ""
+	}
+	last := -1
+	for i, m := range req.Messages {
+		if m.Role == "assistant" {
+			last = i
+		}
+	}
+	if last < 0 {
+		return ""
+	}
+	return hashMessages(req.Messages[:last+1])
+}
+
+// conversationStateHash hashes the conversation state serving this response
+// LEAVES behind: the request's messages plus the assistant turn we returned.
+// A later request whose prefix hash equals this is provably its next turn.
+// Empty for a tool-call-only response (no assistant text) — the tool_call_id
+// echo tier (§A.1) handles those. Prefix-chaining index key.
+func conversationStateHash(req *types.ChatRequest, resp *types.ChatResponse) string {
+	if req == nil || resp == nil {
+		return ""
+	}
+	content := extractResponseContent(resp)
+	if content == "" {
+		return ""
+	}
+	msgs := make([]types.Message, 0, len(req.Messages)+1)
+	msgs = append(msgs, req.Messages...)
+	msgs = append(msgs, types.Message{Role: "assistant", Content: content})
+	return hashMessages(msgs)
 }
 
 // extractResponseContent extracts text content from a ChatResponse.
