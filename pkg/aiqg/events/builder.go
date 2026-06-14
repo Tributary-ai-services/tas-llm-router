@@ -150,6 +150,11 @@ type BuildOptions struct {
 	// Linkage is the resolved `linked`-tier flow/step topology for this
 	// request (the middleware resolves it via pkg/aiqg/linkage before Build).
 	Linkage Linkage
+
+	// ExperimentID + ExperimentVariant stamp the experiment that claimed this
+	// request (Phase D). Empty for untouched traffic.
+	ExperimentID      string
+	ExperimentVariant string
 }
 
 // Build constructs the paired (RequestEnvelope, ResponseEnvelope) from
@@ -477,6 +482,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Model:                routing.Model,                                         // ditto — powers per-vendor/model dashboards off the response stream
 		Workflow:             preferredWorkflow(headers.Workflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
 		SourceApp:            sourceApp,                                             // ditto — carries the source_app dimension on the response stream
+		ExperimentID:         opts.ExperimentID,                                     // Phase D — experiment that claimed this request (per-variant rollup key)
+		ExperimentVariant:    opts.ExperimentVariant,
 		CompleteAt:           completeAt,
 		Status:               status,
 		HTTPStatus:           opts.HTTPStatus,

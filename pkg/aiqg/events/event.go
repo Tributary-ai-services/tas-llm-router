@@ -174,6 +174,12 @@ type ResponseEvent struct {
 	Workflow  string `json:"workflow,omitempty"`   // CLEAR workflow_type — denormalized so the response stream carries the type dimension for per-type rollups (TimescaleDB)
 	SourceApp string `json:"source_app,omitempty"` // calling app — denormalized like vendor/model/workflow so the response stream carries the source dimension
 
+	// Experiment attribution (Phase D). Set when an experiment claimed this
+	// request (dry_run or running); the Spark scope_type='experiment_variant'
+	// rollup keys per-variant metrics off these. Empty for untouched traffic.
+	ExperimentID      string `json:"experiment_id,omitempty"`
+	ExperimentVariant string `json:"experiment_variant,omitempty"`
+
 	// Outcome
 	CompleteAt      time.Time `json:"complete_at"`
 	Status          string    `json:"status"` // success | vendor_error | gateway_error | policy_blocked | client_disconnect | timeout
