@@ -144,6 +144,12 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		"model":   resp.Data.Model,
 		"payload": string(respJSON),
 	}
+	// Experiment attribution (Phase D) — promote so dashboards/Loki can slice
+	// per-variant directly; empty (omitted) for traffic no experiment claimed.
+	if resp.Data.ExperimentID != "" {
+		respFields["experiment_id"] = resp.Data.ExperimentID
+		respFields["experiment_variant"] = resp.Data.ExperimentVariant
+	}
 	// Token accounting — nil-safe; either fully populated or omitted.
 	if ta := resp.Data.TokenAccounting; ta != nil {
 		respFields["prompt_tokens"] = ta.PromptTokens

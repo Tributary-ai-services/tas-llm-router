@@ -23,6 +23,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
@@ -285,6 +286,18 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			}
 		}
 
+		// Experiments runner resolver (Phase D). Reuses the dashboard URL +
+		// internal auth token; loads each tenant's active (dry_run+running)
+		// experiments on a TTL cache and assigns requests to variants. Nil
+		// when the dashboard isn't configured — no assignment, no stamping.
+		var experimentResolver *experiments.Resolver
+		if config.AIQG.DashboardURL != "" && config.AIQG.DashboardInternalAuthToken != "" {
+			loader := experiments.NewHTTPLoader(config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken)
+			experimentResolver = experiments.NewResolver(loader, 0) // 0 = 30s TTL default
+			logger.WithField("dashboard_url", config.AIQG.DashboardURL).
+				Info("AIQG experiments resolver enabled (Phase D)")
+		}
+
 		server.aiqgMiddleware = middleware.NewAIQG(middleware.AIQGConfig{
 			Strict:         config.AIQG.Strict,
 			Logger:         logger,
@@ -294,6 +307,7 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			Resolver:       resolver,
 			PolicyResolver: policyResolver,
 			Linkage:        linkageStore,
+			Experiments:    experimentResolver,
 		})
 		logger.WithFields(logrus.Fields{
 			"strict":           config.AIQG.Strict,

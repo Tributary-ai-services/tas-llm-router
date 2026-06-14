@@ -34,12 +34,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
@@ -92,6 +95,12 @@ type AIQGConfig struct {
 	// index, docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A). Nil disables linkage —
 	// events emit without step/parent topology, same as pre-C2a behavior.
 	Linkage linkage.Store
+
+	// Experiments resolves the experiment + variant that claims a request
+	// (Phase D, docs/AIQG-EXPERIMENTS-RUNNER.md). Nil disables experiments —
+	// no assignment, no stamping. dry_run/running experiments get stamped on
+	// the event; the routing override (running) is applied separately.
+	Experiments *experiments.Resolver
 }
 
 // NewAIQG returns the middleware constructor. The returned handler is a
@@ -245,6 +254,13 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		// the request context may already be cancelled in this deferred path.
 		lk := resolveLinkage(cfg, parsed, routing, resolvedToken, respEventID)
 
+		// Experiment attribution (Phase D): assign this request to a variant if
+		// an experiment's cohort claims it, and stamp experiment_id/variant on
+		// the event. dry_run assigns + stamps only; running's override is
+		// applied at routing time (Phase 2b) — this deferred resolution is
+		// deterministic, so it matches the request-time decision.
+		expDecision := resolveExperiment(cfg, parsed, routing, resolvedToken, r, respEventID)
+
 		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
 			HTTPStatus:      sw.status(),
 			Region:          cfg.Region,
@@ -256,6 +272,8 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 				BundleName: bundleResolution.BundleName,
 				Source:     bundleResolution.Source,
 			},
+			ExperimentID:      expDecision.ExperimentID,
+			ExperimentVariant: expDecision.Variant,
 		})
 		if err := emitter.Emit(ctx, reqEnv, respEnv); err != nil {
 			cfg.Logger.WithError(err).Warn("AIQG event emission failed")
@@ -357,6 +375,71 @@ func resolveLinkage(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *t
 		}
 	}
 	return lk
+}
+
+// resolveExperiment assigns the request to an experiment variant if one's
+// cohort claims it (Phase D). Returns a zero Decision when experiments are
+// disabled or none claim the request — the event then carries no
+// experiment_id/variant. The sticky key is built from the same identity ladder
+// the attribution tiers use, so a user stays in one variant across a flow.
+// Best-effort: never fails the request.
+func resolveExperiment(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *tokens.Token, r *http.Request, respEventID string) experiments.Decision {
+	if cfg.Experiments == nil || tok == nil || routing == nil {
+		return experiments.Decision{}
+	}
+	rs := routing.Snapshot()
+	principal := tok.SourceApp
+	if principal == "" {
+		principal = tok.TokenID
+	}
+	flowID := parsed.FlowID
+	if flowID == "" {
+		flowID = parsed.TraceID
+	}
+	convID := parsed.ConversationID
+	if convID == "" {
+		convID = parsed.Baggage["session.id"]
+	}
+	id := experiments.Identity{
+		UserID:         parsed.Baggage["user.id"],
+		ConversationID: convID,
+		FlowID:         flowID,
+		PrincipalID:    principal,
+		ClientIP:       experimentClientIP(r),
+		RequestID:      respEventID, // always present — the random sticky-key fallback
+	}
+	sourceApp := parsed.SourceApp
+	if sourceApp == "" {
+		sourceApp = tok.SourceApp
+	}
+	attrs := experiments.ReqAttrs{
+		SourceApp:    sourceApp,
+		Model:        rs.Model,
+		WorkflowType: rs.Workflow,
+		Path:         r.URL.Path,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if d := cfg.Experiments.Resolve(ctx, tok.TenantID, id, attrs); d != nil {
+		return *d
+	}
+	return experiments.Decision{}
+}
+
+// experimentClientIP extracts a stable client IP for the assignment key —
+// first X-Forwarded-For hop, else RemoteAddr host. Hashing input only; not
+// stored.
+func experimentClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // headersView projects an AIQGHeaders into the read-only view the
