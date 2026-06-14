@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -464,24 +465,22 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 		anthropicReq.StopSequences = stopSeqs
 	}
 
-	// Handle tools (Anthropic's function calling) - simplified for now
+	// Handle tools (OpenAI function-calling → Anthropic tool use). The
+	// JSON-Schema in tool.Function.Parameters maps directly onto Anthropic's
+	// input_schema — Anthropic REQUIRES a non-empty input_schema (it 400s
+	// with "tools.N.custom.input_schema: Field required" otherwise), so we
+	// translate properties/required across rather than sending an empty one.
 	if len(req.Tools) > 0 {
 		var tools []anthropic.ToolUnionParam
 		for _, tool := range req.Tools {
-			if tool.Type == "function" {
-				// Convert parameters schema if available
-				var inputSchema anthropic.ToolInputSchemaParam
-				if tool.Function.Parameters != nil {
-					// For now, use an empty schema as direct conversion is complex
-					inputSchema = anthropic.ToolInputSchemaParam{}
-				}
-
-				// Create tool using the union constructor
+			if tool.Type == "function" || tool.Type == "" {
 				anthropicTool := anthropic.ToolUnionParamOfTool(
-					inputSchema,
+					toAnthropicInputSchema(tool.Function.Parameters),
 					tool.Function.Name,
 				)
-
+				if tool.Function.Description != "" {
+					anthropicTool.OfTool.Description = anthropic.String(tool.Function.Description)
+				}
 				tools = append(tools, anthropicTool)
 			}
 		}
@@ -491,8 +490,70 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 	return anthropicReq, nil
 }
 
-// convertMessage converts a unified message to Anthropic format
+// toAnthropicInputSchema translates an OpenAI tool's JSON-Schema parameters
+// (an interface{} that decodes to a map with "type"/"properties"/"required")
+// into Anthropic's ToolInputSchemaParam. Anthropic requires input_schema to be
+// present with type=object, so a tool with no/!object parameters still gets a
+// valid empty-object schema rather than an omitted field.
+func toAnthropicInputSchema(params interface{}) anthropic.ToolInputSchemaParam {
+	// Default: a valid `{"type":"object","properties":{}}` so the field is
+	// always present (Type marshals its zero value as "object").
+	schema := anthropic.ToolInputSchemaParam{Properties: map[string]interface{}{}}
+
+	m, ok := params.(map[string]interface{})
+	if !ok {
+		return schema
+	}
+	if props, ok := m["properties"]; ok && props != nil {
+		schema.Properties = props
+	}
+	if reqRaw, ok := m["required"].([]interface{}); ok {
+		required := make([]string, 0, len(reqRaw))
+		for _, r := range reqRaw {
+			if s, ok := r.(string); ok {
+				required = append(required, s)
+			}
+		}
+		if len(required) > 0 {
+			schema.Required = required
+		}
+	}
+	return schema
+}
+
+// convertMessage converts a unified (OpenAI-shaped) message to Anthropic
+// format, including the tool round-trip: a role=tool result becomes a
+// user-side tool_result block, and an assistant turn carrying tool_calls
+// becomes tool_use blocks. Without these a multi-turn tool loop breaks the
+// moment the caller sends results back.
 func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.MessageParam, error) {
+	// Tool result (role=tool): Anthropic carries results in a USER message as
+	// tool_result blocks keyed by the originating tool_use id.
+	if msg.Role == "tool" {
+		return anthropic.NewUserMessage(
+			anthropic.NewToolResultBlock(msg.ToolCallID, messageContentString(msg.Content), false),
+		), nil
+	}
+
+	// Assistant turn that issued tool calls → tool_use blocks (+ any text).
+	if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+		var blocks []anthropic.ContentBlockParamUnion
+		if s := messageContentString(msg.Content); s != "" {
+			blocks = append(blocks, anthropic.NewTextBlock(s))
+		}
+		for _, tc := range msg.ToolCalls {
+			var input any
+			if tc.Function.Arguments != "" {
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
+			}
+			if input == nil {
+				input = map[string]any{}
+			}
+			blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Function.Name))
+		}
+		return anthropic.NewAssistantMessage(blocks...), nil
+	}
+
 	// Handle content based on type and create appropriate message
 	switch content := msg.Content.(type) {
 	case string:
@@ -530,30 +591,84 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 	}
 }
 
+// messageContentString flattens a message's content (string or multimodal
+// parts) to plain text — used when emitting Anthropic tool_use / tool_result
+// blocks, which carry text only.
+func messageContentString(content interface{}) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []types.ContentPart:
+		var sb strings.Builder
+		for _, p := range c {
+			if p.Type == "text" {
+				sb.WriteString(p.Text)
+			}
+		}
+		return sb.String()
+	default:
+		return ""
+	}
+}
+
 // convertFromAnthropicResponse converts Anthropic's response to our format
 func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message, req *types.ChatRequest) *types.ChatResponse {
 	// Build choices from content blocks
 	var choices []types.Choice
 
+	// Normalize Anthropic's stop_reason to the OpenAI finish_reason vocabulary
+	// callers (and the linked-tier served-tool detection) expect:
+	// end_turn→stop, max_tokens→length, tool_use→tool_calls.
+	finishReason := string(resp.StopReason)
+	switch resp.StopReason {
+	case "end_turn", "stop_sequence":
+		finishReason = "stop"
+	case "max_tokens":
+		finishReason = "length"
+	case "tool_use":
+		finishReason = "tool_calls"
+	}
+
 	choice := types.Choice{
 		Index:        0,
-		FinishReason: string(resp.StopReason),
+		FinishReason: finishReason,
 		Message: types.Message{
 			Role:    "assistant",
 			Content: "", // Will be built from blocks
 		},
 	}
 
-	// Process content blocks - simple text extraction for now
+	// Process content blocks: concatenate text, and surface tool_use blocks
+	// as OpenAI-shaped tool_calls so the caller's agent loop sees them. The
+	// block's Input is already a JSON object → it becomes the tool_call's
+	// arguments string verbatim.
 	var textContent strings.Builder
+	var toolCalls []types.ToolCall
 
 	for _, block := range resp.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			textContent.WriteString(block.Text)
+		case "tool_use":
+			// ContentBlockUnion exposes the tool_use fields (ID/Name/Input)
+			// at the top level; Input is the args as a JSON object verbatim.
+			args := string(block.Input)
+			if args == "" {
+				args = "{}"
+			}
+			toolCalls = append(toolCalls, types.ToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: types.Function{
+					Name:      block.Name,
+					Arguments: args,
+				},
+			})
 		}
 	}
 
 	choice.Message.Content = textContent.String()
+	choice.Message.ToolCalls = toolCalls
 	choices = append(choices, choice)
 
 	// Build usage information
