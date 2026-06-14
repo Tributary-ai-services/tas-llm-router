@@ -86,6 +86,11 @@ type AIQGConfig struct {
 	// Env: AIQG_JUDGE_MODEL, AIQG_JUDGE_SAMPLE_PCT.
 	JudgeModel     string `yaml:"judge_model"`
 	JudgeSamplePct int    `yaml:"judge_sample_pct"`
+	// ShadowEvalPct (0–100) is the fraction of CONTROL-arm experiment samples
+	// to pairwise shadow-eval — replay through each variant offline + judge
+	// head-to-head. Costs ~2× per shadow sample, so default 0 (off; opt-in).
+	// Env: AIQG_SHADOW_EVAL_PCT.
+	ShadowEvalPct int `yaml:"shadow_eval_pct"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Defined here (not in
@@ -478,6 +483,11 @@ func (c *Config) loadFromEnv() {
 			c.AIQG.JudgeSamplePct = n
 		}
 	}
+	if p := os.Getenv("AIQG_SHADOW_EVAL_PCT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			c.AIQG.ShadowEvalPct = n
+		}
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -665,6 +675,7 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		LinkageRedisURL:            c.AIQG.LinkageRedisURL,
 		JudgeModel:                 c.AIQG.JudgeModel,
 		JudgeSamplePct:             c.AIQG.JudgeSamplePct,
+		ShadowEvalPct:              c.AIQG.ShadowEvalPct,
 		Kafka: server.AIQGKafkaConfig{
 			Brokers: c.AIQG.Kafka.Brokers,
 			Topic:   c.AIQG.Kafka.Topic,
