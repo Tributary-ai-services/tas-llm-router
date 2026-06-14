@@ -290,6 +290,28 @@ func (r *Resolver) Resolve(ctx context.Context, tenantID string, id Identity, at
 	return nil
 }
 
+// NonControlOverrides returns the non-control variants of an active experiment
+// for a tenant — the arms a control-arm request is shadow-evaluated against.
+// Empty when the experiment isn't active/known.
+func (r *Resolver) NonControlOverrides(ctx context.Context, tenantID, experimentID string) []Variant {
+	if r == nil {
+		return nil
+	}
+	for _, e := range r.active(ctx, tenantID) {
+		if e.ID != experimentID {
+			continue
+		}
+		out := make([]Variant, 0, len(e.Variants))
+		for _, v := range e.Variants {
+			if v.Key != "control" {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // HTTPLoader loads experiments from aiqg-dashboard-be's internal cache endpoint.
 type HTTPLoader struct {
 	HTTP              *http.Client

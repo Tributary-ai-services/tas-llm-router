@@ -168,6 +168,7 @@ type AIQGServerConfig struct {
 	// (§6.6). Empty model or pct<=0 disables judging.
 	JudgeModel     string `yaml:"judge_model"`
 	JudgeSamplePct int    `yaml:"judge_sample_pct"`
+	ShadowEvalPct  int    `yaml:"shadow_eval_pct"`
 
 	// EmitterType selects how AIQG events are published:
 	//   "log"   — logrus → Loki (default; works without infra)
@@ -327,11 +328,13 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		// scores them off the hot path with a third model. Disabled unless a
 		// judge model + sample pct + dashboard ingest are all configured.
 		server.judge = newJudgeRunner(router, config.AIQG.JudgeModel, config.AIQG.JudgeSamplePct,
+			config.AIQG.ShadowEvalPct, experimentResolver,
 			config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken, logger)
 		if server.judge != nil {
 			logger.WithFields(logrus.Fields{
 				"judge_model": config.AIQG.JudgeModel,
 				"sample_pct":  config.AIQG.JudgeSamplePct,
+				"shadow_pct":  config.AIQG.ShadowEvalPct,
 			}).Info("AIQG LLM-as-judge enabled")
 		}
 	}

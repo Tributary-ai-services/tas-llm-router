@@ -93,6 +93,11 @@ data:
   # to avoid self-preference bias. Empty model / 0 pct disables judging.
   AIQG_JUDGE_MODEL: "claude-haiku-4-5-20251001"
   AIQG_JUDGE_SAMPLE_PCT: "20"
+  # Pairwise shadow-eval (§6.3): % of CONTROL-arm experiment samples to replay
+  # through each variant offline + judge head-to-head. ~2× cost per shadow
+  # sample, so opt-in (0 = off). Raise per-experiment when a paired quality
+  # delta is wanted (pairs naturally with dry_run).
+  AIQG_SHADOW_EVAL_PCT: "0"
   # When set, the AIQG middleware uses a DashboardResolver (HTTP
   # client of aiqg-dashboard-be's /internal/auth/validate) instead of
   # the K8s-Secret-mounted token list. The Internal-Auth shared
