@@ -32,13 +32,23 @@ type Link struct {
 }
 
 // Store indexes served tool_call_ids and resolves echoed ones back to their
-// originating (flow, step). Implementations are safe for concurrent use.
+// originating (flow, step). It also indexes conversation-state hashes for the
+// prefix-chaining tier (§A.2). Implementations are safe for concurrent use.
 type Store interface {
 	// IndexToolCalls records that this (flow, step) served these tool_call_ids.
 	IndexToolCalls(ctx context.Context, tenantID string, toolCallIDs []string, link Link) error
 	// ResolveToolCalls returns the linked (flow, step) for the first of these
 	// echoed tool_call_ids that we previously served, or ok=false if none match.
 	ResolveToolCalls(ctx context.Context, tenantID string, toolCallIDs []string) (link Link, ok bool, err error)
+
+	// IndexPrefix records that serving this request left the conversation in a
+	// state whose canonical hash is stateHash, belonging to conversationID. A
+	// later request whose message-prefix hashes to stateHash is the next turn
+	// of that conversation. Tool-less multi-turn threading, zero cooperation.
+	IndexPrefix(ctx context.Context, tenantID, stateHash, conversationID string) error
+	// ResolvePrefix returns the conversationID a request continues when its
+	// message-prefix hash matches a state we previously served, or ok=false.
+	ResolvePrefix(ctx context.Context, tenantID, prefixHash string) (conversationID string, ok bool, err error)
 }
 
 // DefaultTTL bounds how long a served tool_call_id stays linkable. A tool
@@ -47,6 +57,10 @@ type Store interface {
 const DefaultTTL = time.Hour
 
 func redisKey(tenantID, id string) string { return "aiqg:tcid:" + tenantID + ":" + id }
+
+// prefixKey namespaces the prefix-chaining index separately from tool_call_ids
+// so the two tiers never collide. Value is the conversation_id.
+func prefixKey(tenantID, hash string) string { return "aiqg:pfx:" + tenantID + ":" + hash }
 
 // RedisStore is the production Store. Keys are short-TTL so the index
 // self-prunes; tenant_id is part of the key so flows never cross tenants.
@@ -105,17 +119,44 @@ func (s *RedisStore) ResolveToolCalls(ctx context.Context, tenantID string, tool
 	return Link{}, false, nil
 }
 
+func (s *RedisStore) IndexPrefix(ctx context.Context, tenantID, stateHash, conversationID string) error {
+	if s == nil || s.R == nil || stateHash == "" || conversationID == "" {
+		return nil
+	}
+	return s.R.Set(ctx, prefixKey(tenantID, stateHash), conversationID, s.TTL).Err()
+}
+
+func (s *RedisStore) ResolvePrefix(ctx context.Context, tenantID, prefixHash string) (string, bool, error) {
+	if s == nil || s.R == nil || prefixHash == "" {
+		return "", false, nil
+	}
+	v, err := s.R.Get(ctx, prefixKey(tenantID, prefixHash)).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if v == "" {
+		return "", false, nil
+	}
+	return v, true, nil
+}
+
 // MemoryStore is an in-process Store for tests and as a Redis-less fallback
 // (linkage degrades to single-process when Redis isn't configured). Unlike
 // RedisStore it doesn't TTL-evict; callers that need bounded memory in a
 // long-lived process should prefer RedisStore.
 type MemoryStore struct {
-	mu sync.Mutex
-	m  map[string]Link
+	mu  sync.Mutex
+	m   map[string]Link
+	pfx map[string]string
 }
 
 // NewMemoryStore returns an empty in-process store.
-func NewMemoryStore() *MemoryStore { return &MemoryStore{m: make(map[string]Link)} }
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{m: make(map[string]Link), pfx: make(map[string]string)}
+}
 
 func (s *MemoryStore) IndexToolCalls(_ context.Context, tenantID string, toolCallIDs []string, link Link) error {
 	s.mu.Lock()
@@ -140,6 +181,28 @@ func (s *MemoryStore) ResolveToolCalls(_ context.Context, tenantID string, toolC
 		}
 	}
 	return Link{}, false, nil
+}
+
+func (s *MemoryStore) IndexPrefix(_ context.Context, tenantID, stateHash, conversationID string) error {
+	if stateHash == "" || conversationID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pfx[prefixKey(tenantID, stateHash)] = conversationID
+	return nil
+}
+
+func (s *MemoryStore) ResolvePrefix(_ context.Context, tenantID, prefixHash string) (string, bool, error) {
+	if prefixHash == "" {
+		return "", false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.pfx[prefixKey(tenantID, prefixHash)]; ok && c != "" {
+		return c, true, nil
+	}
+	return "", false, nil
 }
 
 // Ensure both satisfy Store.

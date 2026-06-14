@@ -297,6 +297,20 @@ func resolveLinkage(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *t
 		lk.Linked = true
 	}
 
+	// Prefix chaining (§A.2): a tool-less multi-turn thread re-sends a
+	// conversation state we served as the prefix of its next request. When the
+	// prefix hash matches an indexed state, this request is provably the next
+	// turn of that conversation. Independent of the flow/step tool-echo tier —
+	// it threads conversation_id, not flow topology.
+	if rs.PrefixHash != "" {
+		if convID, ok, err := cfg.Linkage.ResolvePrefix(ctx, tenantID, rs.PrefixHash); err != nil {
+			cfg.Logger.WithError(err).Warn("aiqg prefix-chain resolve failed")
+		} else if ok {
+			lk.ConversationID = convID
+			lk.Linked = true
+		}
+	}
+
 	// Root anchor: an untagged request that SERVES tool_calls starts a flow;
 	// anchor it on this step id so children group under it. Not "linked" —
 	// there's no echo evidence yet, only an outgoing tool call.
@@ -318,6 +332,23 @@ func resolveLinkage(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *t
 	if effFlow != "" && len(rs.ServedToolCallIDs) > 0 {
 		if err := cfg.Linkage.IndexToolCalls(ctx, tenantID, rs.ServedToolCallIDs, linkage.Link{FlowID: effFlow, StepID: respEventID}); err != nil {
 			cfg.Logger.WithError(err).Warn("aiqg linkage index failed")
+		}
+	}
+
+	// Index the conversation state this response leaves, so the next turn's
+	// prefix links back. The conversation id is the one we resolved (this turn
+	// continues an existing thread) or, for a thread head, this step's id —
+	// minted as a *candidate* in the index only. A head turn's own event is NOT
+	// stamped with a conversation_id (no evidence it'll be continued), so
+	// one-shot chats never flood the Conversations view; the id surfaces only
+	// once a real continuation resolves it. Mirrors the tool-echo root anchor.
+	if rs.StateHash != "" {
+		convID := lk.ConversationID
+		if convID == "" {
+			convID = respEventID
+		}
+		if err := cfg.Linkage.IndexPrefix(ctx, tenantID, rs.StateHash, convID); err != nil {
+			cfg.Logger.WithError(err).Warn("aiqg prefix-chain index failed")
 		}
 	}
 	return lk

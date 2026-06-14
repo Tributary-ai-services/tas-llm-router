@@ -73,6 +73,14 @@ type Routing struct {
 	// pkg/aiqg/linkage on response completion.
 	echoedToolCallIDs []string
 	servedToolCallIDs []string
+
+	// prefix-chaining tier (§A.2): canonical hash of the conversation state
+	// this request CONTINUES (its message prefix up to the last assistant
+	// turn = the resolve key) and the state serving this response LEAVES
+	// (request messages + our reply = the index key). Empty when not
+	// applicable (fresh thread / tool-call-only response).
+	prefixHash string
+	stateHash  string
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -138,6 +146,12 @@ type RoutingSnapshot struct {
 	// ids our served response minted. Nil when none.
 	EchoedToolCallIDs []string
 	ServedToolCallIDs []string
+
+	// prefix-chaining tier (§A.2): resolve key (prefix of the incoming
+	// request) and index key (state left by serving this response). Empty
+	// when not applicable.
+	PrefixHash string
+	StateHash  string
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -166,6 +180,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		TagFindings:       copyCounts(r.tagFindings),
 		EchoedToolCallIDs: append([]string(nil), r.echoedToolCallIDs...),
 		ServedToolCallIDs: append([]string(nil), r.servedToolCallIDs...),
+		PrefixHash:        r.prefixHash,
+		StateHash:         r.stateHash,
 	}
 }
 
@@ -198,6 +214,42 @@ func StampServedToolCalls(ctx context.Context, ids []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.servedToolCallIDs = append(r.servedToolCallIDs, ids...)
+}
+
+// StampPrefixHash records the canonical hash of the conversation state this
+// request continues (its message prefix up to the last assistant turn) — the
+// prefix-chaining resolve key. First-write-wins; empty is a no-op.
+func StampPrefixHash(ctx context.Context, hash string) {
+	if hash == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.prefixHash == "" {
+		r.prefixHash = hash
+	}
+}
+
+// StampStateHash records the canonical hash of the conversation state serving
+// this response leaves behind (request messages + our reply) — the
+// prefix-chaining index key. First-write-wins; empty is a no-op.
+func StampStateHash(ctx context.Context, hash string) {
+	if hash == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stateHash == "" {
+		r.stateHash = hash
+	}
 }
 
 func copyCounts(in map[string]int) map[string]int {

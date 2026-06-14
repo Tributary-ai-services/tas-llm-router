@@ -196,10 +196,16 @@ type Linkage struct {
 	// child, or a minted anchor for a tool-serving root. Filling FlowID does
 	// NOT by itself mean "linked".
 	FlowID string
-	// Linked is true only when an echoed tool_call_id matched a served one
-	// (evidence) — that's what promotes identity_source to `linked`.
+	// Linked is true only when evidence matched — an echoed tool_call_id we
+	// served (§A.1) OR a message-prefix that matched a state we served
+	// (§A.2 prefix chaining). That's what promotes identity_source to `linked`.
 	Linked      bool
 	FlowStepSeq int
+	// ConversationID is the thread this request continues, proven by prefix
+	// chaining (the request's message prefix == a conversation state we
+	// previously served). Fills conversation_id only when no TAS-Conversation-Id
+	// header / baggage session.id was asserted. Empty for non-chained traffic.
+	ConversationID string
 }
 
 func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linkage) *AgentContext {
@@ -213,10 +219,15 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 		ParentStepID: lk.ParentStepID,
 		FlowStepSeq:  lk.FlowStepSeq,
 	}
-	// conversation: explicit header wins, else baggage session.id
+	// conversation: explicit header wins, else baggage session.id, else the
+	// thread proven by prefix chaining (a served-state echo). Naming, like
+	// FlowID — header always wins to preserve customer intent.
 	ac.ConversationID = h.ConversationID
 	if ac.ConversationID == "" {
 		ac.ConversationID = h.BaggageSessionID
+	}
+	if ac.ConversationID == "" {
+		ac.ConversationID = lk.ConversationID
 	}
 	// flow: explicit header wins, else traceparent trace-id, else the
 	// linked flow proven by a tool_call_id echo (shape, not naming).
