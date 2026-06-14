@@ -58,7 +58,7 @@ func main() {
 		spreadSec  = flag.Int("spread", 90, "seconds to spread a pass's events over, ending at now")
 		insecure   = flag.Bool("insecure", true, "skip TLS verification (TAS Loki uses the internal tas-ca-issuer CA)")
 
-		target     = flag.String("target", "loki", "loki: synthesize response-event log lines + push to Loki | gateway: send real attributed chat requests through llm-router-aiqg (populates Kafka→Spark→TimescaleDB)")
+		target     = flag.String("target", "loki", "loki | gateway | fingerprint-eval (untagged distinct-toolset personas → measure inferred attribution accuracy)")
 		gatewayURL = flag.String("gateway-url", "http://localhost:8086", "gateway base URL for --target=gateway (chat at /v1/chat/completions)")
 		token      = flag.String("token", os.Getenv("AIQG_TAS_AUTH_TOKEN"), "TAS-Auth gateway token for --target=gateway (or env AIQG_TAS_AUTH_TOKEN)")
 		model      = flag.String("model", "claude-haiku-4-5-20251001", "model for --target=gateway requests")
@@ -105,6 +105,18 @@ func main() {
 		}
 		gc := newGatewayClient(*gatewayURL, *token, *model, *maxTokens, *insecure)
 		runGatewayTarget(ctx, g, r, gc, splitUsers(*usersCSV), *flowsPer, *interval, *dryRun)
+		return
+	}
+
+	// fingerprint-eval: untagged distinct-toolset personas → measure inferred
+	// attribution accuracy. Prints event_id,persona ground-truth to stdout.
+	if *target == "fingerprint-eval" {
+		if strings.TrimSpace(*token) == "" && !*dryRun {
+			fmt.Fprintln(os.Stderr, "error: --target=fingerprint-eval needs --token or AIQG_TAS_AUTH_TOKEN")
+			os.Exit(2)
+		}
+		gc := newGatewayClient(*gatewayURL, *token, *model, *maxTokens, *insecure)
+		runFingerprintEval(ctx, gc, *flowsPer, *dryRun)
 		return
 	}
 
