@@ -86,6 +86,13 @@ data:
   # Deterministic `linked`-tier attribution (tool_call_id echo index,
   # docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A). Empty disables linkage.
   AIQG_LINKAGE_REDIS_URL: "redis://redis-shared.tas-shared.svc.cluster.local:6379"
+  # LLM-as-judge quality layer (docs/AIQG-EXPERIMENTS-RUNNER.md §6.6). A third
+  # model rubric-scores a sampled fraction of responses off the hot path; the
+  # score is recorded to aiqg-dashboard-be (/internal/judge) as a feedback
+  # signal for per-variant quality. Judge model differs from typical traffic
+  # to avoid self-preference bias. Empty model / 0 pct disables judging.
+  AIQG_JUDGE_MODEL: "claude-haiku-4-5-20251001"
+  AIQG_JUDGE_SAMPLE_PCT: "20"
   # When set, the AIQG middleware uses a DashboardResolver (HTTP
   # client of aiqg-dashboard-be's /internal/auth/validate) instead of
   # the K8s-Secret-mounted token list. The Internal-Auth shared

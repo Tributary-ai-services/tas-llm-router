@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -76,6 +77,15 @@ type AIQGConfig struct {
 	// the tool_call_id echo index. Empty = linkage disabled (events emit
 	// without step/parent topology). Env: AIQG_LINKAGE_REDIS_URL.
 	LinkageRedisURL string `yaml:"linkage_redis_url"`
+
+	// LLM-as-judge quality layer (docs/AIQG-EXPERIMENTS-RUNNER.md §6.6).
+	// JudgeModel is the third model that rubric-scores a sample of responses
+	// (MUST differ from production traffic's models to avoid self-preference).
+	// JudgeSamplePct (0–100) is the fraction of AIQG responses judged async,
+	// off the hot path. Judging is off when JudgeModel is empty or pct<=0.
+	// Env: AIQG_JUDGE_MODEL, AIQG_JUDGE_SAMPLE_PCT.
+	JudgeModel     string `yaml:"judge_model"`
+	JudgeSamplePct int    `yaml:"judge_sample_pct"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Defined here (not in
@@ -460,6 +470,14 @@ func (c *Config) loadFromEnv() {
 	if u := os.Getenv("AIQG_LINKAGE_REDIS_URL"); u != "" {
 		c.AIQG.LinkageRedisURL = u
 	}
+	if m := os.Getenv("AIQG_JUDGE_MODEL"); m != "" {
+		c.AIQG.JudgeModel = m
+	}
+	if p := os.Getenv("AIQG_JUDGE_SAMPLE_PCT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			c.AIQG.JudgeSamplePct = n
+		}
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -645,6 +663,8 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		DashboardURL:               c.AIQG.DashboardURL,
 		DashboardInternalAuthToken: c.AIQG.DashboardInternalAuthToken,
 		LinkageRedisURL:            c.AIQG.LinkageRedisURL,
+		JudgeModel:                 c.AIQG.JudgeModel,
+		JudgeSamplePct:             c.AIQG.JudgeSamplePct,
 		Kafka: server.AIQGKafkaConfig{
 			Brokers: c.AIQG.Kafka.Brokers,
 			Topic:   c.AIQG.Kafka.Topic,
