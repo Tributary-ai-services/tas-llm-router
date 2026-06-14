@@ -50,6 +50,9 @@ type Server struct {
 	// and there is zero behavior change for existing traffic.
 	aiqgMiddleware func(http.Handler) http.Handler
 	aiqgEmitter    events.Emitter
+	// judge runs the LLM-as-judge quality layer off the hot path. Nil when
+	// judging is disabled.
+	judge *judgeRunner
 }
 
 // ServerConfig holds server configuration
@@ -160,6 +163,11 @@ type AIQGServerConfig struct {
 	// LinkageRedisURL enables the deterministic `linked`-tier attribution
 	// (tool_call_id echo index). Empty = linkage disabled.
 	LinkageRedisURL string `yaml:"linkage_redis_url"`
+
+	// JudgeModel + JudgeSamplePct configure the LLM-as-judge quality layer
+	// (§6.6). Empty model or pct<=0 disables judging.
+	JudgeModel     string `yaml:"judge_model"`
+	JudgeSamplePct int    `yaml:"judge_sample_pct"`
 
 	// EmitterType selects how AIQG events are published:
 	//   "log"   — logrus → Loki (default; works without infra)
@@ -314,6 +322,18 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			"region":           config.AIQG.Region,
 			"resolver_enabled": resolver != nil,
 		}).Info("AIQG ingress enabled on completion routes")
+
+		// LLM-as-judge quality layer (§6.6) — samples completed responses and
+		// scores them off the hot path with a third model. Disabled unless a
+		// judge model + sample pct + dashboard ingest are all configured.
+		server.judge = newJudgeRunner(router, config.AIQG.JudgeModel, config.AIQG.JudgeSamplePct,
+			config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken, logger)
+		if server.judge != nil {
+			logger.WithFields(logrus.Fields{
+				"judge_model": config.AIQG.JudgeModel,
+				"sample_pct":  config.AIQG.JudgeSamplePct,
+			}).Info("AIQG LLM-as-judge enabled")
+		}
 	}
 
 	return server, nil
@@ -853,6 +873,10 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	if metadata != nil {
 		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
 	}
+
+	// AIQG LLM-as-judge (§6.6): fire a sampled, async quality score off the
+	// hot path. No-op when judging is disabled / unsampled / not AIQG.
+	s.judge.maybeJudge(r.Context(), w, req, resp)
 
 	// Add routing metadata to response
 	resp.RouterMetadata = metadata
