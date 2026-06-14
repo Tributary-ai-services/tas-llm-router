@@ -62,6 +62,51 @@ func TestPrefixChain_ToolOnlyResponseHasNoStateHash(t *testing.T) {
 	}
 }
 
+func tool(name string) types.Tool {
+	return types.Tool{Type: "function", Function: types.Function{Name: name}}
+}
+
+func TestAgentFingerprint_GateAndStability(t *testing.T) {
+	// A bare chat (no tools / response_format / stop) is not fingerprintable.
+	bare := &types.ChatRequest{Model: "gpt-4o-mini", Messages: []types.Message{userMsg("hi")}}
+	if h := agentFingerprint(bare); h != "" {
+		t.Errorf("bare chat should not be fingerprinted, got %q", h)
+	}
+
+	// A request declaring tools fingerprints, and tool-array order doesn't matter.
+	a := &types.ChatRequest{Model: "gpt-4o-mini", Tools: []types.Tool{tool("get_weather"), tool("search")}}
+	b := &types.ChatRequest{Model: "gpt-4o-mini", Tools: []types.Tool{tool("search"), tool("get_weather")}}
+	fa, fb := agentFingerprint(a), agentFingerprint(b)
+	if fa == "" {
+		t.Fatal("tool-bearing request should fingerprint")
+	}
+	if fa != fb {
+		t.Error("tool ordering must not change the fingerprint")
+	}
+
+	// A different toolset → different fingerprint.
+	c := &types.ChatRequest{Model: "gpt-4o-mini", Tools: []types.Tool{tool("get_weather")}}
+	if agentFingerprint(c) == fa {
+		t.Error("a different toolset must change the fingerprint")
+	}
+
+	// Same toolset, different model → different fingerprint (config tie-breaker).
+	d := &types.ChatRequest{Model: "gpt-4o", Tools: []types.Tool{tool("get_weather"), tool("search")}}
+	if agentFingerprint(d) == fa {
+		t.Error("model is part of the config signature")
+	}
+}
+
+func TestAgentFingerprint_MaxTokensIgnored(t *testing.T) {
+	mt1, mt2 := 8, 4096
+	base := func(mt int) *types.ChatRequest {
+		return &types.ChatRequest{Model: "gpt-4o-mini", MaxTokens: &mt, Tools: []types.Tool{tool("search")}}
+	}
+	if agentFingerprint(base(mt1)) != agentFingerprint(base(mt2)) {
+		t.Error("max_tokens must NOT split one agent's fingerprint")
+	}
+}
+
 func TestPrefixChain_DistinctConversationsDiffer(t *testing.T) {
 	a := conversationStateHash(
 		&types.ChatRequest{Messages: []types.Message{userMsg("A")}}, respWith("reply-A"))

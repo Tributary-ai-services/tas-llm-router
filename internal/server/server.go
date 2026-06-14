@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -516,6 +517,9 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// request continues, so the middleware can recognize a tool-less
 	// multi-turn thread it previously served.
 	middleware.StampPrefixHash(r.Context(), conversationPrefixHash(&req))
+	// AIQG (fingerprinted tier): structural signature (toolset + config) so
+	// untagged programmatic traffic resolves to an inferred agent surrogate.
+	middleware.StampFingerprint(r.Context(), agentFingerprint(&req))
 
 	// Gatekeeper: check bypass token
 	scanBypassed := false
@@ -929,6 +933,75 @@ func conversationStateHash(req *types.ChatRequest, resp *types.ChatResponse) str
 	msgs = append(msgs, req.Messages...)
 	msgs = append(msgs, types.Message{Role: "assistant", Content: content})
 	return hashMessages(msgs)
+}
+
+// agentFingerprint computes the request's structural signature for the
+// fingerprinted tier (§B): the toolset (sorted tool/function names + their
+// param schemas) plus the config shape (model, sampling params, stop,
+// response_format). Programmatic agents pin these per code path and rarely
+// randomize them, so the same signature recurring is strong evidence of the
+// same agent type — even with zero identifying headers.
+//
+// Returns "" for a request with no fingerprintable structure (no tools /
+// functions / response_format / stop): a bare chat (model + free-text
+// messages) is too generic to attribute, and fingerprinting it would collapse
+// every ad-hoc call into one phantom agent. max_tokens and seed are
+// deliberately excluded — they're the config fields most likely to vary
+// per-call, which would wrongly split one agent into many.
+func agentFingerprint(req *types.ChatRequest) string {
+	if req == nil {
+		return ""
+	}
+	if len(req.Tools) == 0 && len(req.Functions) == 0 && req.ResponseFormat == nil && len(req.Stop) == 0 {
+		return ""
+	}
+	type toolSig struct {
+		Name   string      `json:"n"`
+		Params interface{} `json:"p,omitempty"`
+	}
+	var tools []toolSig
+	for _, t := range req.Tools {
+		tools = append(tools, toolSig{Name: t.Function.Name, Params: t.Function.Parameters})
+	}
+	for _, f := range req.Functions {
+		tools = append(tools, toolSig{Name: f.Name, Params: f.Parameters})
+	}
+	// Sort so tool-array reordering doesn't change the identity.
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+
+	stop := append([]string(nil), req.Stop...)
+	sort.Strings(stop)
+
+	var rf interface{}
+	if req.ResponseFormat != nil {
+		rf = req.ResponseFormat
+	}
+
+	sig := struct {
+		Tools          []toolSig   `json:"tools,omitempty"`
+		Model          string      `json:"model,omitempty"`
+		Temperature    *float32    `json:"temp,omitempty"`
+		TopP           *float32    `json:"top_p,omitempty"`
+		FreqPenalty    *float32    `json:"freq_pen,omitempty"`
+		PresPenalty    *float32    `json:"pres_pen,omitempty"`
+		Stop           []string    `json:"stop,omitempty"`
+		ResponseFormat interface{} `json:"rf,omitempty"`
+	}{
+		Tools:          tools,
+		Model:          req.Model,
+		Temperature:    req.Temperature,
+		TopP:           req.TopP,
+		FreqPenalty:    req.FrequencyPenalty,
+		PresPenalty:    req.PresencePenalty,
+		Stop:           stop,
+		ResponseFormat: rf,
+	}
+	b, err := json.Marshal(sig)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // extractResponseContent extracts text content from a ChatResponse.

@@ -285,6 +285,11 @@ func resolveLinkage(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *t
 	rs := routing.Snapshot()
 	tenantID := tok.TenantID
 
+	// Fingerprinted tier (§B): pass the request's structural signature to the
+	// builder, which scopes it per (tenant, principal) into an AgentSurrogateID.
+	// Independent of the deterministic store lookups below.
+	lk.Fingerprint = rs.Fingerprint
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 

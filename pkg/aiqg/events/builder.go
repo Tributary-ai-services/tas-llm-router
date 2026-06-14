@@ -2,6 +2,7 @@ package events
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"net"
 	"net/http"
@@ -206,6 +207,12 @@ type Linkage struct {
 	// previously served). Fills conversation_id only when no TAS-Conversation-Id
 	// header / baggage session.id was asserted. Empty for non-chained traffic.
 	ConversationID string
+	// Fingerprint is the request's structural signature — a hash of its
+	// sorted tool names + param schemas + config tuple (model, sampling, stop,
+	// response_format). Empty unless the request carries a fingerprintable
+	// structure. Combined with (tenant, principal) in buildAgentContext to mint
+	// the per-customer AgentSurrogateID for the `fingerprinted` tier (§B).
+	Fingerprint string
 }
 
 func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linkage) *AgentContext {
@@ -261,12 +268,46 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 		ac.IdentitySource = "unattributed"
 	}
 
+	// Fingerprinted tier (§B): when the request leaks a structural signature
+	// (tools / response_format / stop), mint a per-(tenant, principal)
+	// surrogate id. Always recorded for the asserted-vs-inferred cross-check
+	// (§E). It only PROMOTES identity when nothing stronger than the principal
+	// tier resolved — a fingerprint is weaker evidence than baggage / asserted
+	// / trace / linked, but stronger than "just a token + IP". The (tenant,
+	// principal) scoping means two customers running the same OSS agent never
+	// collide into one surrogate.
+	if lk.Fingerprint != "" {
+		ac.AgentSurrogateID = agentSurrogateID(t.TenantID, ac.PrincipalID, lk.Fingerprint)
+		switch ac.IdentitySource {
+		case "principal", "transport", "unattributed":
+			if ac.AgentID == "" {
+				ac.AgentID = ac.AgentSurrogateID
+			}
+			ac.IdentitySource = "fingerprinted"
+		}
+	}
+
 	if ac.AgentID == "" && ac.AgentName == "" && ac.UserID == "" &&
 		ac.ConversationID == "" && ac.FlowID == "" && ac.PrincipalID == "" && ac.ClientIP == "" &&
 		ac.StepID == "" && ac.ParentStepID == "" {
 		return nil
 	}
 	return ac
+}
+
+// agentSurrogateID mints the fingerprinted-tier identity: a short, stable id
+// scoped to (tenant, principal) so the same structural signature recurs as one
+// inferred agent for a customer, and never collides across customers. The
+// "fp_" prefix marks it as inferred (vs an asserted TAS-Agent-Id) wherever it
+// surfaces in agent_id.
+func agentSurrogateID(tenantID, principalID, fingerprint string) string {
+	h := sha256.New()
+	h.Write([]byte(tenantID))
+	h.Write([]byte{0})
+	h.Write([]byte(principalID))
+	h.Write([]byte{0})
+	h.Write([]byte(fingerprint))
+	return "fp_" + hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // applyIPMode gates a raw client IP per the deployment's capture mode:

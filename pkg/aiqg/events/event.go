@@ -143,6 +143,17 @@ type AgentContext struct {
 	StepID       string `json:"step_id,omitempty"`
 	ParentStepID string `json:"parent_step_id,omitempty"`
 	FlowStepSeq  int    `json:"flow_step_seq,omitempty"`
+
+	// AgentSurrogateID is the inferred agent-type fingerprint (the
+	// `fingerprinted` tier, docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §B): a
+	// per-(tenant, principal) hash of the request's toolset + config tuple.
+	// Programmatic callers leak a stable identity through the tools they
+	// declare and the sampling config they pin, even with zero headers.
+	// Always set when the request carries a fingerprintable structure
+	// (tools / response_format / stop), so an asserted-vs-inferred mismatch
+	// can be surfaced (§E). When no stronger tier resolved, it also fills
+	// AgentID and IdentitySource becomes "fingerprinted".
+	AgentSurrogateID string `json:"agent_surrogate_id,omitempty"`
 }
 
 // ResponseEvent mirrors aether-shared/data-models/aiqg/response-event.md §2.2.
