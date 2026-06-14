@@ -81,6 +81,12 @@ type Routing struct {
 	// applicable (fresh thread / tool-call-only response).
 	prefixHash string
 	stateHash  string
+
+	// fingerprinted tier (§B): the request's structural signature (sorted
+	// tool names + param schemas + config tuple). Empty when the request
+	// carries nothing fingerprintable. Combined with (tenant, principal) by
+	// the events builder to mint the AgentSurrogateID.
+	fingerprint string
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -152,6 +158,10 @@ type RoutingSnapshot struct {
 	// when not applicable.
 	PrefixHash string
 	StateHash  string
+
+	// fingerprinted tier (§B): the request's structural signature. Empty
+	// when nothing fingerprintable.
+	Fingerprint string
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -182,6 +192,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		ServedToolCallIDs: append([]string(nil), r.servedToolCallIDs...),
 		PrefixHash:        r.prefixHash,
 		StateHash:         r.stateHash,
+		Fingerprint:       r.fingerprint,
 	}
 }
 
@@ -249,6 +260,23 @@ func StampStateHash(ctx context.Context, hash string) {
 	defer r.mu.Unlock()
 	if r.stateHash == "" {
 		r.stateHash = hash
+	}
+}
+
+// StampFingerprint records the request's structural signature for the
+// fingerprinted tier (§B). First-write-wins; empty is a no-op.
+func StampFingerprint(ctx context.Context, fp string) {
+	if fp == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fingerprint == "" {
+		r.fingerprint = fp
 	}
 }
 
