@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
@@ -19,6 +20,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
@@ -151,6 +153,10 @@ type AIQGServerConfig struct {
 	DashboardURL               string `yaml:"dashboard_url"`
 	DashboardInternalAuthToken string `yaml:"dashboard_internal_auth_token"`
 
+	// LinkageRedisURL enables the deterministic `linked`-tier attribution
+	// (tool_call_id echo index). Empty = linkage disabled.
+	LinkageRedisURL string `yaml:"linkage_redis_url"`
+
 	// EmitterType selects how AIQG events are published:
 	//   "log"   — logrus → Loki (default; works without infra)
 	//   "kafka" — sarama SyncProducer → Kafka topic (durable, partitioned)
@@ -263,6 +269,19 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			logger.Info("AIQG policy resolver: none — events emit without resolved_policy_bundle")
 		}
 
+		// Deterministic `linked`-tier store (tool_call_id echo index).
+		// Redis-backed when AIQG_LINKAGE_REDIS_URL is set; nil otherwise
+		// (linkage disabled — events emit without step/parent topology).
+		var linkageStore linkage.Store
+		if config.AIQG.LinkageRedisURL != "" {
+			if opt, err := redis.ParseURL(config.AIQG.LinkageRedisURL); err != nil {
+				logger.WithError(err).Warn("AIQG linkage: invalid AIQG_LINKAGE_REDIS_URL; linkage disabled")
+			} else {
+				linkageStore = linkage.NewRedisStore(redis.NewClient(opt), 0)
+				logger.WithField("redis_addr", opt.Addr).Info("AIQG linkage: tool_call_id echo index enabled (linked tier)")
+			}
+		}
+
 		server.aiqgMiddleware = middleware.NewAIQG(middleware.AIQGConfig{
 			Strict:         config.AIQG.Strict,
 			Logger:         logger,
@@ -271,6 +290,7 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			IPCaptureMode:  config.AIQG.IPCaptureMode,
 			Resolver:       resolver,
 			PolicyResolver: policyResolver,
+			Linkage:        linkageStore,
 		})
 		logger.WithFields(logrus.Fields{
 			"strict":           config.AIQG.Strict,
@@ -487,6 +507,9 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// the CLEAR latency scorer uses a sensible SLA when the caller
 	// didn't send a TAS-Workflow header. Empty result is a no-op.
 	middleware.StampWorkflow(r.Context(), workflow.Classify(&req))
+	// AIQG (linked tier): tool_call_ids this request echoes (role=tool) so
+	// the middleware can prove which flow/step it continues.
+	middleware.StampEchoedToolCalls(r.Context(), echoedToolCallIDs(&req))
 
 	// Gatekeeper: check bypass token
 	scanBypassed := false
@@ -625,6 +648,9 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 	}
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
+		// AIQG (linked tier): tool_call_ids this response served, so a later
+		// request echoing them links back to this step.
+		middleware.StampServedToolCalls(r.Context(), servedToolCallIDs(resp))
 	}
 	if metadata != nil {
 		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
@@ -779,6 +805,9 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	}
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
+		// AIQG (linked tier): tool_call_ids this response served, so a later
+		// request echoing them links back to this step.
+		middleware.StampServedToolCalls(r.Context(), servedToolCallIDs(resp))
 	}
 	if metadata != nil {
 		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
@@ -790,6 +819,39 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// echoedToolCallIDs returns the tool_call_ids this request echoes back in
+// role=tool messages — the linked-tier resolve key (the request is provably
+// the next step of the flow whose response served those ids).
+func echoedToolCallIDs(req *types.ChatRequest) []string {
+	if req == nil {
+		return nil
+	}
+	var ids []string
+	for _, m := range req.Messages {
+		if m.ToolCallID != "" {
+			ids = append(ids, m.ToolCallID)
+		}
+	}
+	return ids
+}
+
+// servedToolCallIDs returns the tool_call_ids our response minted — the
+// linked-tier index key (a later request echoing them links to this step).
+func servedToolCallIDs(resp *types.ChatResponse) []string {
+	if resp == nil {
+		return nil
+	}
+	var ids []string
+	for _, ch := range resp.Choices {
+		for _, tc := range ch.Message.ToolCalls {
+			if tc.ID != "" {
+				ids = append(ids, tc.ID)
+			}
+		}
+	}
+	return ids
 }
 
 // extractResponseContent extracts text content from a ChatResponse.

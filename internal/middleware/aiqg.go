@@ -31,13 +31,16 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
@@ -84,6 +87,11 @@ type AIQGConfig struct {
 	// the middleware falls back to policy.Default() so the event
 	// always has a resolution (the "every request resolves" gate).
 	PolicyResolver policy.Resolver
+
+	// Linkage is the deterministic `linked`-tier store (tool_call_id echo
+	// index, docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A). Nil disables linkage —
+	// events emit without step/parent topology, same as pre-C2a behavior.
+	Linkage linkage.Store
 }
 
 // NewAIQG returns the middleware constructor. The returned handler is a
@@ -231,11 +239,18 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	// routing sidecar is read at the same moment, so any vendor/model
 	// stamps made by the handler reach the event.
 	defer func() {
+		// Linked tier: resolve the flow/step this request continues (it
+		// echoed a tool_call_id we served) and index the ids this response
+		// served (so the next step links back here). Uses a fresh context —
+		// the request context may already be cancelled in this deferred path.
+		lk := resolveLinkage(cfg, parsed, routing, resolvedToken, respEventID)
+
 		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
 			HTTPStatus:      sw.status(),
 			Region:          cfg.Region,
 			IPCaptureMode:   cfg.IPCaptureMode,
 			ResponseEventID: respEventID,
+			Linkage:         lk,
 			ResolvedPolicyBundle: &events.ResolvedPolicyBundle{
 				BundleID:   bundleResolution.BundleID,
 				BundleName: bundleResolution.BundleName,
@@ -249,6 +264,63 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	defer instrumentation.StampComplete(ctx)
 
 	next.ServeHTTP(sw, r.WithContext(ctx))
+}
+
+// resolveLinkage runs the deterministic `linked`-tier resolution + indexing
+// (docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A) for one request/response:
+//   - resolve the tool_call_ids this request echoed → the (flow, step) we
+//     served them from = the parent step + the flow this request continues;
+//   - index the tool_call_ids this response served under the effective flow
+//     so the NEXT request echoing them links back to this step.
+//
+// Uses a fresh context — the request context may already be cancelled in the
+// deferred path this runs from. Best-effort: any store error is logged and
+// degrades to no linkage rather than failing the (already-served) request.
+func resolveLinkage(cfg AIQGConfig, parsed AIQGHeaders, routing *Routing, tok *tokens.Token, respEventID string) events.Linkage {
+	lk := events.Linkage{StepID: respEventID}
+	if cfg.Linkage == nil || tok == nil || routing == nil {
+		return lk
+	}
+	hv := headersView(parsed)
+	rs := routing.Snapshot()
+	tenantID := tok.TenantID
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Resolve: did this request echo a tool_call we served? (evidence)
+	if link, ok, err := cfg.Linkage.ResolveToolCalls(ctx, tenantID, rs.EchoedToolCallIDs); err != nil {
+		cfg.Logger.WithError(err).Warn("aiqg linkage resolve failed")
+	} else if ok {
+		lk.ParentStepID = link.StepID
+		lk.FlowID = link.FlowID
+		lk.Linked = true
+	}
+
+	// Root anchor: an untagged request that SERVES tool_calls starts a flow;
+	// anchor it on this step id so children group under it. Not "linked" —
+	// there's no echo evidence yet, only an outgoing tool call.
+	if lk.FlowID == "" && hv.FlowID == "" && hv.TraceID == "" && len(rs.ServedToolCallIDs) > 0 {
+		lk.FlowID = respEventID
+	}
+
+	// Effective flow the event will carry (mirrors the builder precedence:
+	// asserted header > traceparent > linked/anchor).
+	effFlow := hv.FlowID
+	if effFlow == "" {
+		effFlow = hv.TraceID
+	}
+	if effFlow == "" {
+		effFlow = lk.FlowID
+	}
+
+	// Index served ids under (effFlow, respEventID) so a later echo links here.
+	if effFlow != "" && len(rs.ServedToolCallIDs) > 0 {
+		if err := cfg.Linkage.IndexToolCalls(ctx, tenantID, rs.ServedToolCallIDs, linkage.Link{FlowID: effFlow, StepID: respEventID}); err != nil {
+			cfg.Logger.WithError(err).Warn("aiqg linkage index failed")
+		}
+	}
+	return lk
 }
 
 // headersView projects an AIQGHeaders into the read-only view the

@@ -65,6 +65,14 @@ type Routing struct {
 	// /api/v1/metrics/tags endpoint (which shows "what matchers are
 	// firing most often for this tenant"). Direction-agnostic.
 	tagFindings map[string]int
+
+	// linked tier (docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A): tool_call_ids
+	// this request echoed back in role=tool messages (the resolve key) and
+	// the ids our served response minted (the index key). The middleware
+	// resolves echoed→(flow,step) and indexes served→(flow,step) via
+	// pkg/aiqg/linkage on response completion.
+	echoedToolCallIDs []string
+	servedToolCallIDs []string
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -125,6 +133,11 @@ type RoutingSnapshot struct {
 	// Gatekeeper pattern_id → count for this request. Nil when no
 	// findings. Drives /api/v1/metrics/tags.
 	TagFindings map[string]int
+
+	// linked tier: tool_call_ids this request echoed (role=tool) and the
+	// ids our served response minted. Nil when none.
+	EchoedToolCallIDs []string
+	ServedToolCallIDs []string
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -134,24 +147,57 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return RoutingSnapshot{
-		Vendor:           r.vendor,
-		Model:            r.model,
-		Streaming:        r.streaming,
-		StreamingSet:     r.streamSet,
-		PromptTokens:     r.promptTokens,
-		CompletionTokens: r.completionTokens,
-		UsageSet:         r.usageSet,
-		InboundFindings:  copyCounts(r.inboundFindings),
-		OutboundFindings: copyCounts(r.outboundFindings),
-		ScanRan:          r.scanRan,
-		FinishReason:     r.finishReason,
-		AttemptCount:     r.attemptCount,
-		FallbackUsed:     r.fallbackUsed,
-		RetrySet:         r.retrySet,
-		Workflow:         r.workflow,
-		NISTFindings:     copyCounts(r.nistFindings),
-		TagFindings:      copyCounts(r.tagFindings),
+		Vendor:            r.vendor,
+		Model:             r.model,
+		Streaming:         r.streaming,
+		StreamingSet:      r.streamSet,
+		PromptTokens:      r.promptTokens,
+		CompletionTokens:  r.completionTokens,
+		UsageSet:          r.usageSet,
+		InboundFindings:   copyCounts(r.inboundFindings),
+		OutboundFindings:  copyCounts(r.outboundFindings),
+		ScanRan:           r.scanRan,
+		FinishReason:      r.finishReason,
+		AttemptCount:      r.attemptCount,
+		FallbackUsed:      r.fallbackUsed,
+		RetrySet:          r.retrySet,
+		Workflow:          r.workflow,
+		NISTFindings:      copyCounts(r.nistFindings),
+		TagFindings:       copyCounts(r.tagFindings),
+		EchoedToolCallIDs: append([]string(nil), r.echoedToolCallIDs...),
+		ServedToolCallIDs: append([]string(nil), r.servedToolCallIDs...),
 	}
+}
+
+// StampEchoedToolCalls records the tool_call_ids this request echoed back in
+// role=tool messages — the linked-tier resolve key. Append semantics (a
+// request can carry several tool results).
+func StampEchoedToolCalls(ctx context.Context, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.echoedToolCallIDs = append(r.echoedToolCallIDs, ids...)
+}
+
+// StampServedToolCalls records the tool_call_ids our response minted — the
+// linked-tier index key (a future request echoing them links to this step).
+func StampServedToolCalls(ctx context.Context, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.servedToolCallIDs = append(r.servedToolCallIDs, ids...)
 }
 
 func copyCounts(in map[string]int) map[string]int {
