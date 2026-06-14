@@ -83,6 +83,9 @@ data:
   AIQG_ENABLED: "true"
   AIQG_STRICT: "false"
   AIQG_REGION: "us-east"
+  # Deterministic `linked`-tier attribution (tool_call_id echo index,
+  # docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A). Empty disables linkage.
+  AIQG_LINKAGE_REDIS_URL: "redis://redis-shared.tas-shared.svc.cluster.local:6379"
   # When set, the AIQG middleware uses a DashboardResolver (HTTP
   # client of aiqg-dashboard-be's /internal/auth/validate) instead of
   # the K8s-Secret-mounted token list. The Internal-Auth shared
