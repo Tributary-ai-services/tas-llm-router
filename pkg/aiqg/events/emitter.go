@@ -156,6 +156,25 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		respFields["completion_tokens"] = ta.CompletionTokens
 		respFields["total_tokens"] = ta.TotalTokens
 		respFields["total_cost_usd"] = ta.TotalCostUSD
+		// Cost decomposition (CLEAR v0.2) — promote as FIELDS (never
+		// stream labels: these are high-cardinality numerics). The
+		// Loki-fallback backend unwraps these; only present on priced
+		// traffic where the decomposer ran (ReductionMode set).
+		if ta.ReductionMode != "" {
+			respFields["reduction_mode"] = ta.ReductionMode
+			respFields["actual_cost_usd"] = ta.ActualCostUSD
+			respFields["projected_direct_payload_waste_usd"] = ta.ProjectedDirectPayloadWasteUSD
+			respFields["direct_payload_waste_usd"] = ta.DirectPayloadWasteUSD
+			respFields["projected_reduction_relevance_usd"] = ta.ProjectedReductionRelevanceUSD
+			respFields["projected_reduction_slm_usd"] = ta.ProjectedReductionSLMUSD
+			respFields["projected_reduction_combined_usd"] = ta.ProjectedReductionCombinedUSD
+			respFields["induced_output_waste_estimated_usd"] = ta.InducedOutputWasteEstimatedUSD
+			respFields["genuine_post_model_waste_usd"] = ta.GenuinePostModelWasteUSD
+			respFields["gateway_addressable_pct"] = ta.GatewayAddressablePct
+			if ta.ContextEfficiencyRatio != nil {
+				respFields["context_efficiency_ratio"] = *ta.ContextEfficiencyRatio
+			}
+		}
 	}
 	// Promote the timing decomposition so LogQL can unwrap each
 	// component directly. instrumentation.Snapshot captures the full

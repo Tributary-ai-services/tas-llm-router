@@ -258,6 +258,34 @@ type TokenAccounting struct {
 	OutputCostUSD       float64 `json:"output_cost_usd"`
 	TotalCostUSD        float64 `json:"total_cost_usd"`
 	ModelPricingVersion string  `json:"model_pricing_version,omitempty"`
+
+	// --- Cost decomposition (CLEAR v0.2, Contract v1 — projected) ---
+	// All additive + omitempty; populated only for priced traffic when
+	// the decomposer runs. See pkg/clear/cost_decomposer.go and
+	// aether-shared/data-models/aiqg/token-accounting.md.
+	ActualCostUSD    float64 `json:"actual_cost_usd,omitempty"`    // billed total (invariant denominator); = TotalCostUSD in v1
+	ActualCostSource string  `json:"actual_cost_source,omitempty"` // "vendor_usage" | "computed"
+	ReductionMode    string  `json:"reduction_mode,omitempty"`     // always "projected" in v1
+
+	// Direct payload waste — projected basis. The bare DirectPayloadWaste*
+	// are the documented alias (= projected) kept for the existing CHECK +
+	// dashboards (relabel "projected" in UI).
+	ProjectedDirectPayloadWasteTokens int     `json:"projected_direct_payload_waste_tokens,omitempty"`
+	ProjectedDirectPayloadWasteUSD    float64 `json:"projected_direct_payload_waste_usd,omitempty"`
+	DirectPayloadWasteTokens          int     `json:"direct_payload_waste_tokens,omitempty"`
+	DirectPayloadWasteUSD             float64 `json:"direct_payload_waste_usd,omitempty"`
+
+	// Per-method projected reductions + confidence.
+	ProjectedReductionRelevanceUSD        float64 `json:"projected_reduction_relevance_usd,omitempty"`
+	ProjectedReductionRelevanceConfidence string  `json:"projected_reduction_relevance_confidence,omitempty"`
+	ProjectedReductionSLMUSD              float64 `json:"projected_reduction_slm_usd,omitempty"`
+	ProjectedReductionSLMConfidence       string  `json:"projected_reduction_slm_confidence,omitempty"`
+	ProjectedReductionCombinedUSD         float64 `json:"projected_reduction_combined_usd,omitempty"`
+
+	InducedOutputWasteEstimatedUSD float64  `json:"induced_output_waste_estimated_usd,omitempty"` // 0 in v1
+	GenuinePostModelWasteUSD       float64  `json:"genuine_post_model_waste_usd,omitempty"`
+	GatewayAddressablePct          float64  `json:"gateway_addressable_pct,omitempty"`
+	ContextEfficiencyRatio         *float64 `json:"context_efficiency_ratio,omitempty"` // pointer: 0.0 vs absent
 }
 
 // AssuranceSummary is the lightweight per-event view of Gatekeeper
