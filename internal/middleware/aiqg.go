@@ -37,6 +37,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -205,7 +206,12 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	// stash on the request context so events.Build can stamp it on
 	// the response event. Errors degrade to Default() so "every event
 	// has a resolution" is upheld even when the resolver is down.
-	var bundleResolution policy.Resolution
+	// Initial resolution at receipt (header / source_app / path only).
+	// The completion handler refines it at routing time via
+	// ResolveBundleForRouting once model + workflow are known. A holder on
+	// ctx lets the deferred emit read whichever resolution is current.
+	bundleResolution := &bundleResolutionHolder{res: policy.Default()}
+	ctx = withBundleResolution(ctx, bundleResolution)
 	if cfg.PolicyResolver != nil && resolvedToken != nil {
 		res, err := cfg.PolicyResolver.Resolve(ctx, policy.ResolveRequest{
 			TenantID:           resolvedToken.TenantID,
@@ -224,9 +230,18 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 				"bundle":    parsed.PolicyBundle,
 			}).Warn("AIQG policy resolver returned error; defaulting to observe-all")
 		}
-		bundleResolution = res
-	} else {
-		bundleResolution = policy.Default()
+		bundleResolution.set(res)
+		// Stash for routing-time refinement. Skipped when an explicit
+		// TAS-Policy-Bundle header already pinned the bundle — model /
+		// workflow matching can't override an operator's explicit choice.
+		if parsed.PolicyBundle == "" {
+			ctx = withPolicyResolve(ctx, &policyResolveCtx{
+				resolver:  cfg.PolicyResolver,
+				tenantID:  resolvedToken.TenantID,
+				accountID: resolvedToken.AIQGAccountID,
+				sourceApp: parsed.SourceApp,
+			})
+		}
 	}
 
 	sw := &statusCapturingResponseWriter{ResponseWriter: w}
@@ -279,11 +294,14 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 			IPCaptureMode:   cfg.IPCaptureMode,
 			ResponseEventID: respEventID,
 			Linkage:         lk,
-			ResolvedPolicyBundle: &events.ResolvedPolicyBundle{
-				BundleID:   bundleResolution.BundleID,
-				BundleName: bundleResolution.BundleName,
-				Source:     bundleResolution.Source,
-			},
+			ResolvedPolicyBundle: func() *events.ResolvedPolicyBundle {
+				res := bundleResolution.get()
+				return &events.ResolvedPolicyBundle{
+					BundleID:   res.BundleID,
+					BundleName: res.BundleName,
+					Source:     res.Source,
+				}
+			}(),
 			ExperimentID:      expSnap.ExperimentID,
 			ExperimentVariant: expSnap.ExperimentVariant,
 		})
@@ -429,6 +447,77 @@ func ResolveExperimentForRouting(ctx context.Context, model, workflowType, path 
 		StampExperiment(ctx, d.ExperimentID, d.Variant)
 	}
 	return d
+}
+
+// bundleResolutionHolder is a mutable, concurrency-safe cell for the
+// request's policy resolution. The middleware seeds it at receipt; the
+// completion handler refines it at routing time (ResolveBundleForRouting);
+// the deferred emit reads whichever value is current.
+type bundleResolutionHolder struct {
+	mu  sync.Mutex
+	res policy.Resolution
+}
+
+func (h *bundleResolutionHolder) set(r policy.Resolution) {
+	h.mu.Lock()
+	h.res = r
+	h.mu.Unlock()
+}
+
+func (h *bundleResolutionHolder) get() policy.Resolution {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.res
+}
+
+type bundleResolutionCtxKey struct{}
+
+func withBundleResolution(ctx context.Context, h *bundleResolutionHolder) context.Context {
+	return context.WithValue(ctx, bundleResolutionCtxKey{}, h)
+}
+
+// policyResolveCtx carries what ResolveBundleForRouting needs to re-resolve
+// the bundle at routing time. Only stashed when no explicit bundle header
+// was set (an explicit header is final).
+type policyResolveCtx struct {
+	resolver  policy.Resolver
+	tenantID  string
+	accountID string
+	sourceApp string
+}
+
+type policyResolveCtxKey struct{}
+
+func withPolicyResolve(ctx context.Context, pc *policyResolveCtx) context.Context {
+	return context.WithValue(ctx, policyResolveCtxKey{}, pc)
+}
+
+// ResolveBundleForRouting re-resolves the policy bundle once the requested
+// model + workflow are known (routing time), so route rules that target by
+// model/workflow take effect. Best-effort: on any error it keeps the
+// receipt-time resolution. No-op when an explicit header already pinned the
+// bundle (the policy-resolve ctx isn't stashed in that case) or outside
+// AIQG mode.
+func ResolveBundleForRouting(ctx context.Context, model, workflowType, path string) {
+	pc, _ := ctx.Value(policyResolveCtxKey{}).(*policyResolveCtx)
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if pc == nil || holder == nil || pc.resolver == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	res, err := pc.resolver.Resolve(rctx, policy.ResolveRequest{
+		TenantID:      pc.tenantID,
+		AIQGAccountID: pc.accountID,
+		SourceApp:     pc.sourceApp,
+		Path:          path,
+		Model:         model,
+		WorkflowType:  workflowType,
+	})
+	if err != nil {
+		return
+	}
+	holder.set(res)
 }
 
 // experimentIdentity builds the sticky-key ladder from the request's parsed

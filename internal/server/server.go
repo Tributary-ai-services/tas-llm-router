@@ -543,6 +543,12 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// the CLEAR latency scorer uses a sensible SLA when the caller
 	// didn't send a TAS-Workflow header. Empty result is a no-op.
 	wf := workflow.Classify(&req)
+	// AIQG (Phase 4.1): refine the policy bundle now that the requested
+	// model + workflow are known, so route rules targeting by model/workflow
+	// take effect. Matches the REQUESTED model (before any experiment
+	// override), consistent with experiment cohort matching below. No-op
+	// outside AIQG / when an explicit bundle header pinned the choice.
+	middleware.ResolveBundleForRouting(r.Context(), req.Model, wf, r.URL.Path)
 	// AIQG experiments (Phase D): resolve the variant claiming this request on
 	// the REQUESTED model + workflow (the cohort matches what the caller
 	// asked), then — for a running experiment — apply the variant's override
