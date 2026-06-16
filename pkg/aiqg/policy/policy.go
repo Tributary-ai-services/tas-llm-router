@@ -55,6 +55,11 @@ type ResolveRequest struct {
 	PolicyBundleHeader string // raw TAS-Policy-Bundle header value
 	SourceApp          string
 	Path               string
+	// Routing attributes — only known at routing time, so the gateway
+	// re-resolves then (ResolveBundleForRouting). Empty at receipt.
+	Model        string
+	WorkflowType string
+	Vendor       string
 }
 
 // DashboardResolver calls aiqg-dashboard-be's POST /internal/policy/resolve.
@@ -99,6 +104,9 @@ type resolveRequest struct {
 	PolicyBundleHeader string `json:"policy_bundle_header,omitempty"`
 	SourceApp          string `json:"source_app,omitempty"`
 	Path               string `json:"path,omitempty"`
+	Model              string `json:"model,omitempty"`
+	WorkflowType       string `json:"workflow_type,omitempty"`
+	Vendor             string `json:"vendor,omitempty"`
 }
 
 type resolveResponse struct {
@@ -136,6 +144,9 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		PolicyBundleHeader: req.PolicyBundleHeader,
 		SourceApp:          req.SourceApp,
 		Path:               req.Path,
+		Model:              req.Model,
+		WorkflowType:       req.WorkflowType,
+		Vendor:             req.Vendor,
 	})
 	if err != nil {
 		return Default(), fmt.Errorf("policy.DashboardResolver: marshal: %w", err)
