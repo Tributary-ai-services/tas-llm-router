@@ -183,6 +183,38 @@ type RelevanceOverride struct {
 	Ratio     float64
 }
 
+// ReduceText runs the extractor on a single content blob and returns the
+// REDUCED content alongside the measurement. This is the apply primitive
+// (Plan #7 Phase 3): callers that want to actually shrink the payload use
+// the returned content; measure-only callers (MeasureReduction) discard it.
+// query is the relevance anchor; rel applies per-policy relevance tuning.
+func (c *Client) ReduceText(ctx context.Context, content []byte, query string, rel RelevanceOverride) (reduced []byte, m *ReductionMeasurement, err error) {
+	if c.extractor == nil {
+		return nil, nil, fmt.Errorf("gatekeeper: extractor not configured")
+	}
+	if len(content) == 0 {
+		return nil, nil, fmt.Errorf("gatekeeper: no content to reduce")
+	}
+	er, err := c.extractor.Extract(ctx, extract.ExtractRequest{
+		Content:            content,
+		Query:              query,
+		ContentType:        "chat",
+		RelevanceThreshold: rel.Threshold,
+		TopKChunks:         rel.TopK,
+		TopKRatio:          rel.Ratio,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return er.Content, &ReductionMeasurement{
+		OriginalBytes:           er.OriginalSize,
+		ExtractedBytes:          er.ExtractedSize,
+		SizeAfterRelevanceBytes: er.SizeAfterRelevance,
+		ChunksProcessed:         er.ChunksProcessed,
+		ChunksRetained:          er.ChunksRetained,
+	}, nil
+}
+
 // MeasureReduction runs the extractor on the given messages purely to
 // MEASURE how much context the relevance step would drop — it never
 // mutates anything. Returns an error when the extractor isn't configured
