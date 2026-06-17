@@ -212,6 +212,11 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	// ctx lets the deferred emit read whichever resolution is current.
 	bundleResolution := &bundleResolutionHolder{res: policy.Default()}
 	ctx = withBundleResolution(ctx, bundleResolution)
+
+	// Holder for an optional shadow payload-reduction measurement, filled
+	// by the completion handler's goroutine and read by the deferred emit.
+	reductionMeasurement := &reductionMeasurementHolder{}
+	ctx = withReductionMeasurement(ctx, reductionMeasurement)
 	if cfg.PolicyResolver != nil && resolvedToken != nil {
 		res, err := cfg.PolicyResolver.Resolve(ctx, policy.ResolveRequest{
 			TenantID:           resolvedToken.TenantID,
@@ -302,8 +307,9 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 					Source:     res.Source,
 				}
 			}(),
-			ExperimentID:      expSnap.ExperimentID,
-			ExperimentVariant: expSnap.ExperimentVariant,
+			ExperimentID:         expSnap.ExperimentID,
+			ExperimentVariant:    expSnap.ExperimentVariant,
+			ReductionMeasurement: reductionMeasurement.getWait(reductionEmitWait),
 		})
 		if err := emitter.Emit(ctx, reqEnv, respEnv); err != nil {
 			cfg.Logger.WithError(err).Warn("AIQG event emission failed")
@@ -474,6 +480,96 @@ type bundleResolutionCtxKey struct{}
 
 func withBundleResolution(ctx context.Context, h *bundleResolutionHolder) context.Context {
 	return context.WithValue(ctx, bundleResolutionCtxKey{}, h)
+}
+
+// reductionMeasurementHolder is a concurrency-safe cell for the shadow
+// payload-reduction measurement (Plan #7 Phase 2). The completion handler
+// fills it from a goroutine running concurrently with the vendor call; the
+// deferred emit reads whatever is present (best-effort — absent if the
+// measurement didn't finish before emit).
+// reductionEmitWait bounds how long the deferred emit blocks for an
+// in-flight shadow measurement. The embed-only extract (all-minilm) is
+// sub-second for typical chat payloads; this is generous headroom.
+const reductionEmitWait = 5 * time.Second
+
+type reductionMeasurementHolder struct {
+	mu      sync.Mutex
+	m       *events.ReductionMeasurement
+	pending bool
+	done    chan struct{}
+}
+
+// expect marks that a shadow measurement is in flight so getWait blocks
+// (bounded) for the result instead of returning nil immediately.
+func (h *reductionMeasurementHolder) expect() {
+	h.mu.Lock()
+	if h.done == nil {
+		h.done = make(chan struct{})
+	}
+	h.pending = true
+	h.mu.Unlock()
+}
+
+func (h *reductionMeasurementHolder) set(m *events.ReductionMeasurement) {
+	h.mu.Lock()
+	h.m = m
+	h.pending = false
+	if h.done != nil {
+		close(h.done)
+		h.done = nil
+	}
+	h.mu.Unlock()
+}
+
+// getWait returns the measurement, waiting up to timeout if a shadow run
+// was started (expect) but hasn't landed yet. Called from the deferred
+// emit, which runs after the client response is flushed — so the wait adds
+// no client-facing latency, only a small delay to event emission.
+func (h *reductionMeasurementHolder) getWait(timeout time.Duration) *events.ReductionMeasurement {
+	h.mu.Lock()
+	if !h.pending {
+		m := h.m
+		h.mu.Unlock()
+		return m
+	}
+	done := h.done
+	h.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(timeout):
+		}
+	}
+	h.mu.Lock()
+	m := h.m
+	h.mu.Unlock()
+	return m
+}
+
+type reductionMeasurementCtxKey struct{}
+
+func withReductionMeasurement(ctx context.Context, h *reductionMeasurementHolder) context.Context {
+	return context.WithValue(ctx, reductionMeasurementCtxKey{}, h)
+}
+
+// ExpectReductionMeasurement signals that a shadow measurement goroutine has
+// been launched for this request, so the deferred emit waits (bounded) for
+// the result rather than emitting before it lands. Call BEFORE starting the
+// goroutine. No-op if no holder is on the context.
+func ExpectReductionMeasurement(ctx context.Context) {
+	if h, ok := ctx.Value(reductionMeasurementCtxKey{}).(*reductionMeasurementHolder); ok {
+		h.expect()
+	}
+}
+
+// StampReductionMeasurement records a completed shadow measurement on the
+// request so the emitted event carries the Contract v2 measured fields.
+// Called from the gateway's shadow goroutine; safe after the request
+// context is cancelled (it writes to a holder, not the ctx).
+func StampReductionMeasurement(ctx context.Context, m *events.ReductionMeasurement) {
+	if h, ok := ctx.Value(reductionMeasurementCtxKey{}).(*reductionMeasurementHolder); ok {
+		h.set(m)
+	}
 }
 
 // policyResolveCtx carries what ResolveBundleForRouting needs to re-resolve

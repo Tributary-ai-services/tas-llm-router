@@ -155,6 +155,24 @@ type BuildOptions struct {
 	// request (Phase D). Empty for untouched traffic.
 	ExperimentID      string
 	ExperimentVariant string
+
+	// ReductionMeasurement is the result of a shadow payload-reduction
+	// run (Plan #7 Phase 2). Nil when no extraction ran (the common
+	// case — projected-only). When set on priced traffic, Build fills the
+	// Contract v2 measured fields on TokenAccounting.
+	ReductionMeasurement *ReductionMeasurement
+}
+
+// ReductionMeasurement carries the byte sizes from a real (shadow)
+// extractor run so the builder can convert them to measured token/USD
+// reduction. Bytes (not tokens) because the extractor works on bytes;
+// conversion happens once in pkg/clear.
+type ReductionMeasurement struct {
+	Mode                    string // "shadow" | "active"
+	Sampled                 bool
+	OriginalBytes           int
+	ExtractedBytes          int // after all enabled steps (= after relevance when SLM off)
+	SizeAfterRelevanceBytes int
 }
 
 // Build constructs the paired (RequestEnvelope, ResponseEnvelope) from
@@ -478,6 +496,23 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			ta.InducedOutputWasteEstimatedUSD = d.InducedOutputWasteEstimatedUSD
 			ta.GenuinePostModelWasteUSD = d.GenuinePostModelWasteUSD
 			ta.GatewayAddressablePct = d.GatewayAddressablePct
+
+			// Measured reduction (Contract v2) — a real shadow/active
+			// extractor run. Cost only; quality deltas need a baseline
+			// re-run (left unmeasured). Bytes→tokens once via pkg/clear.
+			if rm := opts.ReductionMeasurement; rm != nil && rm.OriginalBytes > 0 {
+				reducedBytes := rm.OriginalBytes - rm.ExtractedBytes
+				if reducedBytes < 0 {
+					reducedBytes = 0
+				}
+				reducedTokens := clear.TokensFromBytes(reducedBytes)
+				reducedUSD := (float64(reducedTokens) / 1000.0) * inputRate
+				ta.ReductionMode = rm.Mode // "shadow" / "active" (overrides "projected")
+				ta.ReductionSampled = rm.Sampled
+				ta.ActualDirectPayloadReductionTokens = reducedTokens
+				ta.ActualDirectPayloadReductionUSD = reducedUSD
+				ta.ActualReductionRelevanceUSD = reducedUSD // relevance is the only enabled step
+			}
 		}
 		tokenAcct = ta
 	}

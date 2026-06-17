@@ -9,6 +9,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/Tributary-ai-services/Gatekeeper/pkg/extract"
 	"github.com/Tributary-ai-services/Gatekeeper/pkg/pipeline"
 	"github.com/Tributary-ai-services/Gatekeeper/pkg/scan"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
@@ -31,6 +32,22 @@ type Config struct {
 
 	Inbound  ScanDirectionConfig `yaml:"inbound"`
 	Outbound ScanDirectionConfig `yaml:"outbound"`
+
+	// Extraction configures the shadow payload-reduction measurement
+	// (Plan #7 Phase 2). When disabled (default), MeasureReduction is a
+	// no-op and the gateway never calls the extractor — preserving the
+	// pre-Phase-2 behavior. The actual run is further gated per-request
+	// by the resolved bundle's reduction policy.
+	Extraction ExtractionConfig `yaml:"extraction"`
+}
+
+// ExtractionConfig wires the Ollama-backed extractor used for shadow
+// payload-reduction measurement.
+type ExtractionConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	OllamaURL      string `yaml:"ollama_url"`       // e.g. http://ollama.tas-shared:11434
+	EmbedModel     string `yaml:"embed_model"`      // e.g. all-minilm
+	MinContentSize int    `yaml:"min_content_size"` // extractor floor (bytes)
 }
 
 // ScanPolicy controls which messages are scanned based on role and trust metadata.
@@ -87,6 +104,7 @@ func DefaultConfig() Config {
 // Client wraps the Gatekeeper pipeline processor for LLM Router integration.
 type Client struct {
 	processor pipeline.Processor
+	extractor extract.Extractor // nil unless Extraction.Enabled — shadow measurement only
 	config    Config
 	logger    *logrus.Logger
 }
@@ -114,10 +132,75 @@ func New(cfg Config, logger *logrus.Logger) (*Client, error) {
 
 	processor := pipeline.NewProcessor(scanner, pipeline.WithConfig(procConfig))
 
+	// Optional extractor for shadow payload-reduction measurement. Built
+	// only when configured; embeddings-only (relevance step) — the SLM
+	// step needs a GPU. The embedder talks to Ollama via SLM.URL (see
+	// extract.NewExtractor). Failure to init is non-fatal: shadow
+	// measurement just stays off.
+	var extractor extract.Extractor
+	if cfg.Extraction.Enabled {
+		ec := extract.DefaultExtractorConfig()
+		ec.EnableEmbedding = true
+		ec.EnableSLM = false
+		if cfg.Extraction.EmbedModel != "" {
+			ec.Embedding.Model = cfg.Extraction.EmbedModel
+		}
+		ec.SLM.URL = cfg.Extraction.OllamaURL // extract.NewEmbedder reads the Ollama URL from SLM.URL
+		if cfg.Extraction.MinContentSize > 0 {
+			ec.MinContentSize = cfg.Extraction.MinContentSize
+		}
+		if ex, err := extract.NewExtractor(ec); err != nil {
+			logger.WithError(err).Warn("gatekeeper: extractor init failed; shadow reduction disabled")
+		} else {
+			extractor = ex
+		}
+	}
+
 	return &Client{
 		processor: processor,
+		extractor: extractor,
 		config:    cfg,
 		logger:    logger,
+	}, nil
+}
+
+// ReductionMeasurement is the byte-level result of a real (shadow)
+// extractor run, for the gateway to convert to measured token/USD savings.
+type ReductionMeasurement struct {
+	OriginalBytes           int
+	ExtractedBytes          int
+	SizeAfterRelevanceBytes int
+	ChunksProcessed         int
+	ChunksRetained          int
+}
+
+// MeasureReduction runs the extractor on the given messages purely to
+// MEASURE how much context the relevance step would drop — it never
+// mutates anything. Returns an error when the extractor isn't configured
+// or the run fails (callers treat that as "no measurement"). query is the
+// relevance anchor (typically the latest user turn).
+func (c *Client) MeasureReduction(ctx context.Context, messages []types.Message, query string) (*ReductionMeasurement, error) {
+	if c.extractor == nil {
+		return nil, fmt.Errorf("gatekeeper: extractor not configured")
+	}
+	content := extractMessagesText(messages)
+	if len(content) == 0 {
+		return nil, fmt.Errorf("gatekeeper: no content to measure")
+	}
+	er, err := c.extractor.Extract(ctx, extract.ExtractRequest{
+		Content:     content,
+		Query:       query,
+		ContentType: "chat",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ReductionMeasurement{
+		OriginalBytes:           er.OriginalSize,
+		ExtractedBytes:          er.ExtractedSize,
+		SizeAfterRelevanceBytes: er.SizeAfterRelevance,
+		ChunksProcessed:         er.ChunksProcessed,
+		ChunksRetained:          er.ChunksRetained,
 	}, nil
 }
 
@@ -262,6 +345,9 @@ func (c *Client) ShouldBlock(result *pipeline.ProcessResult, direction string) b
 
 // Close releases resources.
 func (c *Client) Close() error {
+	if c.extractor != nil {
+		_ = c.extractor.Close()
+	}
 	if c.processor != nil {
 		return c.processor.Close()
 	}

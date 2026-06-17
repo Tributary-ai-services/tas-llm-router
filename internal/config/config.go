@@ -122,6 +122,17 @@ type GatekeeperConfig struct {
 	ScanTimeout       time.Duration       `yaml:"scan_timeout"`
 	Inbound           ScanDirectionConfig `yaml:"inbound"`
 	Outbound          ScanDirectionConfig `yaml:"outbound"`
+	Extraction        ExtractionConfig    `yaml:"extraction"`
+}
+
+// ExtractionConfig wires the Ollama-backed extractor used for AIQG shadow
+// payload-reduction measurement (Plan #7 Phase 2). Disabled by default;
+// enabled only on the AIQG gateway via env (AIQG_EXTRACTION_*).
+type ExtractionConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	OllamaURL      string `yaml:"ollama_url"`       // e.g. http://ollama.tas-shared:11434
+	EmbedModel     string `yaml:"embed_model"`      // e.g. all-minilm
+	MinContentSize int    `yaml:"min_content_size"` // extractor floor (bytes)
 }
 
 // ScanPolicyConfig controls which messages are scanned based on role and trust metadata.
@@ -444,6 +455,23 @@ func (c *Config) loadFromEnv() {
 	if st := os.Getenv("GATEKEEPER_SCAN_TIMEOUT"); st != "" {
 		if d, err := time.ParseDuration(st); err == nil {
 			c.Gatekeeper.ScanTimeout = d
+		}
+	}
+
+	// AIQG shadow payload-reduction extractor (Plan #7 Phase 2). Off unless
+	// AIQG_EXTRACTION_ENABLED=true — only the AIQG gateway sets these.
+	if enabled := os.Getenv("AIQG_EXTRACTION_ENABLED"); enabled == "true" {
+		c.Gatekeeper.Extraction.Enabled = true
+	}
+	if u := os.Getenv("AIQG_EXTRACTION_OLLAMA_URL"); u != "" {
+		c.Gatekeeper.Extraction.OllamaURL = u
+	}
+	if m := os.Getenv("AIQG_EXTRACTION_EMBED_MODEL"); m != "" {
+		c.Gatekeeper.Extraction.EmbedModel = m
+	}
+	if n := os.Getenv("AIQG_EXTRACTION_MIN_CONTENT_SIZE"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil {
+			c.Gatekeeper.Extraction.MinContentSize = v
 		}
 	}
 

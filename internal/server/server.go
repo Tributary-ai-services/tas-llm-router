@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
+	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -640,6 +642,43 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// AIQG payload-reduction shadow measurement (Plan #7 Phase 2). When a
+	// resolved reduction policy is in shadow/active mode, run the real
+	// extractor on a sample of size-eligible traffic purely to MEASURE how
+	// much context the relevance step would drop. Shadow never mutates the
+	// payload — the original request is routed to the vendor unchanged. The
+	// extract runs in a goroutine concurrent with the vendor call so it adds
+	// no client-facing latency; the deferred AIQG emit waits (bounded) for
+	// the result and stamps the Contract v2 measured fields onto the event.
+	if red, _ := middleware.ResolvedReduction(r.Context()); red.RunsExtractor() && s.gatekeeper != nil {
+		promptBytes := messagesByteLen(req.Messages)
+		if red.EligibleBySize(clear.TokensFromBytes(promptBytes)) && sampleHit(red.SampleRate) {
+			msgs := req.Messages
+			query := lastUserText(msgs)
+			mode := red.Mode
+			parentCtx := context.WithoutCancel(r.Context())
+			middleware.ExpectReductionMeasurement(parentCtx)
+			go func() {
+				mctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
+				defer cancel()
+				m, err := s.gatekeeper.MeasureReduction(mctx, msgs, query)
+				if err != nil || m == nil {
+					// Stamp a nil-free "ran but empty" result so the deferred
+					// emit stops waiting instead of blocking the full timeout.
+					middleware.StampReductionMeasurement(parentCtx, nil)
+					return
+				}
+				middleware.StampReductionMeasurement(parentCtx, &events.ReductionMeasurement{
+					Mode:                    mode,
+					Sampled:                 true,
+					OriginalBytes:           m.OriginalBytes,
+					ExtractedBytes:          m.ExtractedBytes,
+					SizeAfterRelevanceBytes: m.SizeAfterRelevanceBytes,
+				})
+			}()
+		}
+	}
+
 	// Route the request
 	metadata, provider, err := s.router.Route(r.Context(), &req)
 	if err != nil {
@@ -1092,6 +1131,69 @@ func applyExperimentOverride(req *types.ChatRequest, override json.RawMessage) {
 	if o.Params.MaxTokens != nil {
 		req.MaxTokens = o.Params.MaxTokens
 	}
+}
+
+// messageContentString flattens a Message.Content (string or
+// []ContentPart for multimodal) into plain text for size/relevance
+// measurement. Non-text parts (images) contribute nothing.
+func messageContentString(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []types.ContentPart:
+		var b strings.Builder
+		for _, p := range v {
+			if p.Type == "text" {
+				b.WriteString(p.Text)
+			}
+		}
+		return b.String()
+	case []interface{}:
+		// JSON-decoded multimodal content arrives as []interface{} of maps.
+		var b strings.Builder
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				if t, _ := m["text"].(string); t != "" {
+					b.WriteString(t)
+				}
+			}
+		}
+		return b.String()
+	default:
+		return ""
+	}
+}
+
+// messagesByteLen is a coarse byte size of the full prompt, used only for
+// the reduction MinTokens size gate.
+func messagesByteLen(messages []types.Message) int {
+	n := 0
+	for _, m := range messages {
+		n += len(messageContentString(m.Content))
+	}
+	return n
+}
+
+// lastUserText returns the text of the latest user-role message — the
+// relevance anchor for shadow extraction.
+func lastUserText(messages []types.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messageContentString(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+// sampleHit reports whether this request is in the shadow-measurement
+// sample. A rate <= 0 means "measure all eligible traffic" (the natural
+// default for a shadow policy with no explicit sample_rate); >= 1 also
+// always hits.
+func sampleHit(rate float64) bool {
+	if rate <= 0 || rate >= 1 {
+		return true
+	}
+	return rand.Float64() < rate
 }
 
 // extractResponseContent extracts text content from a ChatResponse.
