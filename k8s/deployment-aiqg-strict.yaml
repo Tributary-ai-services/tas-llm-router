@@ -84,6 +84,19 @@ spec:
         # Shared token store with the internal Deployment.
         - name: AIQG_TOKENS_FILE
           value: /app/secrets/aiqg/aiqg-tokens.yaml
+        # AIQG payload-reduction shadow extractor (Plan #7 Phase 2a).
+        # Enabled on the AIQG gateway ONLY — the internal llm-router
+        # Deployment leaves these unset so it never runs the extractor.
+        # Embeddings-only relevance step via Ollama (all-minilm); the SLM
+        # step needs a GPU and stays disabled.
+        - name: AIQG_EXTRACTION_ENABLED
+          value: "true"
+        - name: AIQG_EXTRACTION_OLLAMA_URL
+          value: http://ollama.tas-shared:11434
+        - name: AIQG_EXTRACTION_EMBED_MODEL
+          value: all-minilm
+        - name: AIQG_EXTRACTION_MIN_CONTENT_SIZE
+          value: "2000"
 
         # tcpSocket (not httpGet /health) matches the live internal
         # Deployment pattern. The /health endpoint legitimately returns
