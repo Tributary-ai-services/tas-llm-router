@@ -286,6 +286,22 @@ type TokenAccounting struct {
 	GenuinePostModelWasteUSD       float64  `json:"genuine_post_model_waste_usd,omitempty"`
 	GatewayAddressablePct          float64  `json:"gateway_addressable_pct,omitempty"`
 	ContextEfficiencyRatio         *float64 `json:"context_efficiency_ratio,omitempty"` // pointer: 0.0 vs absent
+
+	// --- Measured reduction (Contract v2 — Phase 2 shadow/active) ---
+	// Populated only when the real Gatekeeper extractor ran on this
+	// request (reduction_mode = shadow|active). Empty under Contract v1
+	// (projected). The execution slice fills these; the contract is
+	// defined here so emitter/consumers/docs are ready. See
+	// aether-shared/data-models/aiqg/extraction-policy.md.
+	ReductionSampled                   bool    `json:"reduction_sampled,omitempty"` // request was in the shadow sample
+	ActualDirectPayloadReductionTokens int     `json:"actual_direct_payload_reduction_tokens,omitempty"`
+	ActualDirectPayloadReductionUSD    float64 `json:"actual_direct_payload_reduction_usd,omitempty"`
+	ActualReductionRelevanceUSD        float64 `json:"actual_reduction_relevance_usd,omitempty"`
+	ActualReductionSLMUSD              float64 `json:"actual_reduction_slm_usd,omitempty"`
+	// Quality deltas vs the un-reduced baseline (shadow eval). Pointers
+	// to distinguish "measured 0 change" from "not measured".
+	ReductionEfficacyDelta  *float64 `json:"reduction_efficacy_delta,omitempty"`
+	ReductionAssuranceDelta *float64 `json:"reduction_assurance_delta,omitempty"`
 }
 
 // AssuranceSummary is the lightweight per-event view of Gatekeeper
