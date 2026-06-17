@@ -29,19 +29,19 @@ type modelPricingEntry struct {
 // slice will eventually pull per-account overrides.
 var modelPricing = map[string]modelPricingEntry{
 	// OpenAI
-	"openai:gpt-4o-mini":           {InputCostPer1K: 0.00015, OutputCostPer1K: 0.00060},
-	"openai:gpt-4o":                {InputCostPer1K: 0.00250, OutputCostPer1K: 0.01000},
-	"openai:gpt-4-turbo":           {InputCostPer1K: 0.01000, OutputCostPer1K: 0.03000},
-	"openai:gpt-3.5-turbo":         {InputCostPer1K: 0.00050, OutputCostPer1K: 0.00150},
+	"openai:gpt-4o-mini":   {InputCostPer1K: 0.00015, OutputCostPer1K: 0.00060},
+	"openai:gpt-4o":        {InputCostPer1K: 0.00250, OutputCostPer1K: 0.01000},
+	"openai:gpt-4-turbo":   {InputCostPer1K: 0.01000, OutputCostPer1K: 0.03000},
+	"openai:gpt-3.5-turbo": {InputCostPer1K: 0.00050, OutputCostPer1K: 0.00150},
 
 	// Anthropic — Claude 4.x family (current TAS deployment, see
 	// tas-llm-router/configs/config.yaml). Keep rates in sync with that
 	// file; the config and this table can drift independently because
 	// the config doesn't feed the scorer (the table is the
 	// authoritative source for CLEAR.Cost).
-	"anthropic:claude-opus-4-6":            {InputCostPer1K: 0.01500, OutputCostPer1K: 0.07500},
-	"anthropic:claude-sonnet-4-6":          {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
-	"anthropic:claude-haiku-4-5-20251001":  {InputCostPer1K: 0.00080, OutputCostPer1K: 0.00400},
+	"anthropic:claude-opus-4-6":           {InputCostPer1K: 0.01500, OutputCostPer1K: 0.07500},
+	"anthropic:claude-sonnet-4-6":         {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
+	"anthropic:claude-haiku-4-5-20251001": {InputCostPer1K: 0.00080, OutputCostPer1K: 0.00400},
 
 	// Anthropic — Claude 3.x family (legacy, kept for replay /
 	// historical re-scoring; remove once Spark re-score has caught up
@@ -79,6 +79,39 @@ func DollarCost(vendor, model string, promptTokens, completionTokens int) (cost 
 	}
 	cost = (float64(promptTokens)/1000.0)*inputRate + (float64(completionTokens)/1000.0)*outputRate
 	return cost, true
+}
+
+// Cost is the dollar breakdown of one request, returned by ActualCost.
+// It's the *billed* cost in Contract v1 (= the invariant denominator the
+// cost decomposition is bounded against). Priced=false when the
+// vendor:model pricing isn't known — callers must not fabricate waste on
+// unpriced traffic.
+type Cost struct {
+	InputUSD  float64
+	OutputUSD float64
+	TotalUSD  float64
+	Source    string // "vendor_usage" (counts from the vendor) | "computed"
+	Priced    bool
+}
+
+// ActualCost computes the billed dollar cost of a request from token
+// counts + the model's rates. In Contract v1 this equals the existing
+// DollarCost total; it's surfaced separately as `actual_cost_usd` so the
+// cost-decomposition fields have a stable denominator. usageFromVendor
+// distinguishes vendor-reported usage from gateway-estimated counts
+// (recorded as actual_cost_source).
+func ActualCost(vendor, model string, promptTokens, completionTokens int, usageFromVendor bool) Cost {
+	inputRate, outputRate, found := LookupPricing(vendor, model)
+	if !found {
+		return Cost{Priced: false}
+	}
+	in := (float64(promptTokens) / 1000.0) * inputRate
+	out := (float64(completionTokens) / 1000.0) * outputRate
+	src := "computed"
+	if usageFromVendor {
+		src = "vendor_usage"
+	}
+	return Cost{InputUSD: in, OutputUSD: out, TotalUSD: in + out, Source: src, Priced: true}
 }
 
 // scoreCost converts the request's USD cost into a 0-100 score with a

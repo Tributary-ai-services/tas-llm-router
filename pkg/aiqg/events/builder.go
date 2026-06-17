@@ -438,6 +438,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		FinishReason:               finishReason,
 		AttemptCount:               routing.AttemptCount,
 		FallbackUsed:               routing.FallbackUsed,
+		InboundBloatFindings:       bloatCount(routing.TagFindings),
 	}
 	var tokenAcct *TokenAccounting
 	if routing.UsageSet {
@@ -456,6 +457,27 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			ta.OutputCostUSD = (float64(completion) / 1000.0) * outputRate
 			ta.TotalCostUSD = ta.InputCostUSD + ta.OutputCostUSD
 			ta.ModelPricingVersion = clear.PricingVersion
+
+			// Cost decomposition (CLEAR v0.2, Contract v1 — projected).
+			// Only on priced traffic; never fabricate waste otherwise.
+			actual := clear.ActualCost(routing.Vendor, routing.Model, prompt, completion, routing.UsageSet)
+			d := clear.DecomposeCost(clearInput, actual)
+			ta.ActualCostUSD = actual.TotalUSD
+			ta.ActualCostSource = actual.Source
+			ta.ReductionMode = d.ReductionMode
+			ta.ContextEfficiencyRatio = d.ContextEfficiencyRatio
+			ta.ProjectedDirectPayloadWasteTokens = d.DirectPayloadWasteTokens
+			ta.ProjectedDirectPayloadWasteUSD = d.DirectPayloadWasteUSD
+			ta.DirectPayloadWasteTokens = d.DirectPayloadWasteTokens // alias = projected
+			ta.DirectPayloadWasteUSD = d.DirectPayloadWasteUSD       // alias = projected
+			ta.ProjectedReductionRelevanceUSD = d.ProjectedReductionRelevanceUSD
+			ta.ProjectedReductionRelevanceConfidence = d.ProjectedReductionRelevanceConfidence
+			ta.ProjectedReductionSLMUSD = d.ProjectedReductionSLMUSD
+			ta.ProjectedReductionSLMConfidence = d.ProjectedReductionSLMConfidence
+			ta.ProjectedReductionCombinedUSD = d.ProjectedReductionCombinedUSD
+			ta.InducedOutputWasteEstimatedUSD = d.InducedOutputWasteEstimatedUSD
+			ta.GenuinePostModelWasteUSD = d.GenuinePostModelWasteUSD
+			ta.GatewayAddressablePct = d.GatewayAddressablePct
 		}
 		tokenAcct = ta
 	}
@@ -579,6 +601,16 @@ func sumCounts(m map[string]int) int {
 		total += v
 	}
 	return total
+}
+
+// bloatCount sums the inbound bloat / instruction-stuffing matches from
+// the per-pattern TagFindings map — the signal the cost decomposer uses
+// to discount context efficiency. nil-safe.
+func bloatCount(tagFindings map[string]int) int {
+	if tagFindings == nil {
+		return 0
+	}
+	return tagFindings["aiqg-bloated-context"] + tagFindings["aiqg-instruction-stuffing"]
 }
 
 // worstSeverityIn returns the highest severity present across either

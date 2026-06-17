@@ -14,10 +14,10 @@
 //   - Cost, Efficacy, Assurance, Reliability — signatures defined,
 //     return nil pointers (distinct from "scored as zero"). Filled by
 //     future slices:
-//       * Cost: needs token-accounting from response body
-//       * Efficacy: needs response-body capture + structural-validity check
-//       * Assurance: needs Gatekeeper finding integration
-//       * Reliability: needs conversation-threading + retry detection
+//   - Cost: needs token-accounting from response body
+//   - Efficacy: needs response-body capture + structural-validity check
+//   - Assurance: needs Gatekeeper finding integration
+//   - Reliability: needs conversation-threading + retry detection
 //   - Composite — equal-weight average of every dimension that produced
 //     a non-nil score (per build-vs-reuse §7.5). Nil when zero dimensions
 //     were scored.
@@ -32,8 +32,10 @@ package clear
 // `clear-v<major>.<minor>-<phase>`.
 //
 // MVP (v0.1): Latency only. Cost/Efficacy/Assurance/Reliability stubbed.
-// v0.2 will add Cost once token-accounting plumbing lands.
-const Version = "clear-v0.1-mvp"
+// v0.2 (cost-decomp): adds the projected cost decomposition (see
+// cost_decomposer.go) emitted alongside the scores. Spark re-scores rows
+// scored under the prior version when this bumps.
+const Version = "clear-v0.2-cost-decomp"
 
 // Score is a 0-100 dimension or composite score. The spec
 // (response-event.md §"Why smallint not numeric") uses int16 for storage
@@ -88,6 +90,13 @@ type Input struct {
 	AssuranceScanRan           bool
 	InboundFindingsBySeverity  map[string]int
 	OutboundFindingsBySeverity map[string]int
+
+	// InboundBloatFindings counts inbound bloat/instruction-stuffing
+	// matches (aiqg-bloated-context + aiqg-instruction-stuffing). Used by
+	// the cost decomposer to discount context-efficiency — a strong
+	// signal the prompt carries droppable padding. Not a CLEAR score
+	// input; consumed only by DecomposeCost.
+	InboundBloatFindings int
 
 	// Vendor finish_reason for Efficacy scoring. Empty string means
 	// the vendor never returned one (gateway-blocked, streaming
