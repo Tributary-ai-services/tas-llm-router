@@ -86,6 +86,12 @@ func NewApplication(configPath string) (*Application, error) {
 					PreScannedValue: "pre_scanned",
 				},
 			},
+			Extraction: gatekeeper.ExtractionConfig{
+				Enabled:        cfg.Gatekeeper.Extraction.Enabled,
+				OllamaURL:      cfg.Gatekeeper.Extraction.OllamaURL,
+				EmbedModel:     cfg.Gatekeeper.Extraction.EmbedModel,
+				MinContentSize: cfg.Gatekeeper.Extraction.MinContentSize,
+			},
 		}
 
 		gkClient, err := gatekeeper.New(gkCfg, logger)

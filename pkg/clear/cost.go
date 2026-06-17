@@ -81,6 +81,20 @@ func DollarCost(vendor, model string, promptTokens, completionTokens int) (cost 
 	return cost, true
 }
 
+// bytesPerToken is the coarse char→token ratio used to convert byte
+// sizes (from the Gatekeeper extractor) into token counts. ~4 bytes/token
+// for English text. The single byte→token conversion point in the gateway
+// (per Plan #7) so projected and measured reductions speak the same unit.
+const bytesPerToken = 4.0
+
+// TokensFromBytes converts a byte size to an estimated token count.
+func TokensFromBytes(b int) int {
+	if b <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(b) / bytesPerToken))
+}
+
 // Cost is the dollar breakdown of one request, returned by ActualCost.
 // It's the *billed* cost in Contract v1 (= the invariant denominator the
 // cost decomposition is bounded against). Priced=false when the

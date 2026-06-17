@@ -117,6 +117,14 @@ gatekeeper:
     scan_profile: "full"
     trust_tier: "partner"
     block_on_critical: false   # Log but don't block - document content may trigger false positives
+  # AIQG shadow payload-reduction extractor (Plan #7 Phase 2). Off by default;
+  # enabled only on the AIQG gateway (env AIQG_EXTRACTION_ENABLED=true). Shadow
+  # mode measures relevance-based context reduction without mutating payloads.
+  extraction:
+    enabled: false
+    ollama_url: "http://ollama.tas-shared:11434"   # AIQG_EXTRACTION_OLLAMA_URL
+    embed_model: "all-minilm"                       # AIQG_EXTRACTION_EMBED_MODEL
+    min_content_size: 2000                          # AIQG_EXTRACTION_MIN_CONTENT_SIZE (bytes)
 
 logging:
   level: "info"
