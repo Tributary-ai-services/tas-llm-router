@@ -556,8 +556,13 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// asked), then — for a running experiment — apply the variant's override
 	// (model swap / param sweep) BEFORE routing + stamping, so the event
 	// reflects the SERVED config. dry_run returns Apply=false (stamped only).
+	var expReduction *policy.ReductionPolicy
 	if d := middleware.ResolveExperimentForRouting(r.Context(), req.Model, wf, r.URL.Path); d != nil && d.Apply {
 		applyExperimentOverride(&req, d.Override)
+		// An extraction variant carries a `reduction` block in its override.
+		// It takes precedence over the bundle's resolved reduction and, in
+		// apply mode, actually shrinks the payload below (Plan #7 Phase 3).
+		expReduction = parseOverrideReduction(d.Override)
 	}
 	// AIQG: stamp the (possibly overridden) model + streaming flag onto the
 	// routing sidecar so the response event carries them. No-op outside AIQG.
@@ -642,46 +647,55 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// AIQG payload-reduction shadow measurement (Plan #7 Phase 2). When a
-	// resolved reduction policy is in shadow/active mode, run the real
-	// extractor on a sample of size-eligible traffic purely to MEASURE how
-	// much context the relevance step would drop. Shadow never mutates the
-	// payload — the original request is routed to the vendor unchanged. The
-	// extract runs in a goroutine concurrent with the vendor call so it adds
-	// no client-facing latency; the deferred AIQG emit waits (bounded) for
-	// the result and stamps the Contract v2 measured fields onto the event.
-	if red, _ := middleware.ResolvedReduction(r.Context()); red.RunsExtractor() && s.gatekeeper != nil {
+	// AIQG payload-reduction (Plan #7 Phase 2/3). The effective reduction is
+	// an applying experiment variant's reduction (Phase 3, takes precedence
+	// and MUTATES the payload) or the bundle's resolved reduction (Phase 2,
+	// shadow — measure only). Both run the real Gatekeeper extractor.
+	red := expReduction
+	if red == nil {
+		red, _ = middleware.ResolvedReduction(r.Context())
+	}
+	if red.RunsExtractor() && s.gatekeeper != nil {
 		promptBytes := messagesByteLen(req.Messages)
 		if red.EligibleBySize(clear.TokensFromBytes(promptBytes)) && sampleHit(red.SampleRate) {
-			msgs := req.Messages
-			query := lastUserText(msgs)
+			query := lastUserText(req.Messages)
 			mode := red.Mode
-			// Honor the bundle's per-method relevance tuning (threshold /
-			// top-K). Zero fields fall back to the extractor's env defaults.
+			// Honor per-method relevance tuning (threshold / top-K); zero
+			// fields fall back to the extractor's env defaults.
 			var rel gatekeeper.RelevanceOverride
 			if rs := red.Steps.Relevance; rs != nil {
 				rel = gatekeeper.RelevanceOverride{Threshold: rs.Threshold, TopK: rs.TopK, Ratio: rs.TopKRatio}
 			}
-			parentCtx := context.WithoutCancel(r.Context())
-			middleware.ExpectReductionMeasurement(parentCtx)
-			go func() {
-				mctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
-				defer cancel()
-				m, err := s.gatekeeper.MeasureReduction(mctx, msgs, query, rel)
-				if err != nil || m == nil {
-					// Stamp a nil-free "ran but empty" result so the deferred
-					// emit stops waiting instead of blocking the full timeout.
-					middleware.StampReductionMeasurement(parentCtx, nil)
-					return
-				}
-				middleware.StampReductionMeasurement(parentCtx, &events.ReductionMeasurement{
-					Mode:                    mode,
-					Sampled:                 true,
-					OriginalBytes:           m.OriginalBytes,
-					ExtractedBytes:          m.ExtractedBytes,
-					SizeAfterRelevanceBytes: m.SizeAfterRelevanceBytes,
-				})
-			}()
+			if red.Applies() {
+				// APPLY (active): reduce the largest context message in place
+				// BEFORE routing, so the vendor sees the smaller payload. This
+				// is synchronous — the added latency is part of what an
+				// extraction experiment measures. Gated to experiment-claimed
+				// running variants (expReduction) or an active bundle.
+				s.applyReductionInline(r.Context(), &req, query, rel, mode)
+			} else {
+				// SHADOW (measure-only): run concurrently with the vendor call
+				// so it adds no client latency; the deferred emit waits for it.
+				msgs := req.Messages
+				parentCtx := context.WithoutCancel(r.Context())
+				middleware.ExpectReductionMeasurement(parentCtx)
+				go func() {
+					mctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
+					defer cancel()
+					m, err := s.gatekeeper.MeasureReduction(mctx, msgs, query, rel)
+					if err != nil || m == nil {
+						middleware.StampReductionMeasurement(parentCtx, nil)
+						return
+					}
+					middleware.StampReductionMeasurement(parentCtx, &events.ReductionMeasurement{
+						Mode:                    mode,
+						Sampled:                 true,
+						OriginalBytes:           m.OriginalBytes,
+						ExtractedBytes:          m.ExtractedBytes,
+						SizeAfterRelevanceBytes: m.SizeAfterRelevanceBytes,
+					})
+				}()
+			}
 		}
 	}
 
@@ -1200,6 +1214,80 @@ func sampleHit(rate float64) bool {
 		return true
 	}
 	return rand.Float64() < rate
+}
+
+// parseOverrideReduction pulls a `reduction` block out of an experiment
+// variant's override JSON and parses it as a ReductionPolicy. Returns nil
+// when the override has no reduction config (the common model-swap case).
+func parseOverrideReduction(override json.RawMessage) *policy.ReductionPolicy {
+	if len(override) == 0 {
+		return nil
+	}
+	var o struct {
+		Reduction json.RawMessage `json:"reduction"`
+	}
+	if err := json.Unmarshal(override, &o); err != nil || len(o.Reduction) == 0 {
+		return nil
+	}
+	rp, err := policy.ParseReduction(o.Reduction)
+	if err != nil {
+		return nil
+	}
+	return rp
+}
+
+// largestReducibleMessageIndex returns the index of the biggest context
+// message to reduce — the longest by text length, EXCLUDING the latest user
+// message (the relevance anchor / question, which must stay intact). Returns
+// -1 when there's nothing safe to reduce (e.g. a lone question).
+func largestReducibleMessageIndex(messages []types.Message) int {
+	lastUser := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			lastUser = i
+			break
+		}
+	}
+	best, bestLen := -1, 0
+	for i, m := range messages {
+		if i == lastUser {
+			continue
+		}
+		if n := len(messageContentString(m.Content)); n > bestLen {
+			best, bestLen = i, n
+		}
+	}
+	return best
+}
+
+// applyReductionInline reduces the largest context message in place before
+// routing, so the vendor sees the smaller payload (Plan #7 Phase 3 apply).
+// Synchronous by design — the added latency is part of what an extraction
+// experiment measures. No-op (payload unchanged, no stamp) when there's
+// nothing to reduce or the extractor didn't shrink it.
+func (s *Server) applyReductionInline(ctx context.Context, req *types.ChatRequest, query string, rel gatekeeper.RelevanceOverride, mode string) {
+	idx := largestReducibleMessageIndex(req.Messages)
+	if idx < 0 {
+		return
+	}
+	original := messageContentString(req.Messages[idx].Content)
+	if original == "" {
+		return
+	}
+	mctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	reduced, m, err := s.gatekeeper.ReduceText(mctx, []byte(original), query, rel)
+	if err != nil || m == nil || len(reduced) == 0 || len(reduced) >= len(original) {
+		return // failed or didn't help → leave the payload unchanged
+	}
+	req.Messages[idx].Content = string(reduced)
+	middleware.StampReductionMeasurement(ctx, &events.ReductionMeasurement{
+		Mode:                    mode,
+		Sampled:                 true,
+		OriginalBytes:           m.OriginalBytes,
+		ExtractedBytes:          m.ExtractedBytes,
+		SizeAfterRelevanceBytes: m.SizeAfterRelevanceBytes,
+	})
 }
 
 // extractResponseContent extracts text content from a ChatResponse.
