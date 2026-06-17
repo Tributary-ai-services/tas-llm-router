@@ -174,6 +174,20 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 			if ta.ContextEfficiencyRatio != nil {
 				respFields["context_efficiency_ratio"] = *ta.ContextEfficiencyRatio
 			}
+			// Measured reduction (Contract v2) — only when the real
+			// extractor ran (shadow/active). Absent under projected.
+			if ta.ReductionMode == "shadow" || ta.ReductionMode == "active" {
+				respFields["reduction_sampled"] = ta.ReductionSampled
+				respFields["actual_direct_payload_reduction_usd"] = ta.ActualDirectPayloadReductionUSD
+				respFields["actual_reduction_relevance_usd"] = ta.ActualReductionRelevanceUSD
+				respFields["actual_reduction_slm_usd"] = ta.ActualReductionSLMUSD
+				if ta.ReductionEfficacyDelta != nil {
+					respFields["reduction_efficacy_delta"] = *ta.ReductionEfficacyDelta
+				}
+				if ta.ReductionAssuranceDelta != nil {
+					respFields["reduction_assurance_delta"] = *ta.ReductionAssuranceDelta
+				}
+			}
 		}
 	}
 	// Promote the timing decomposition so LogQL can unwrap each
