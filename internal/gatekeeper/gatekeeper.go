@@ -174,12 +174,22 @@ type ReductionMeasurement struct {
 	ChunksRetained          int
 }
 
+// RelevanceOverride carries per-bundle relevance tuning (from an AIQG
+// policy bundle's reduction.steps.relevance) into a measurement run. Zero
+// fields fall back to the extractor's configured defaults.
+type RelevanceOverride struct {
+	Threshold float64
+	TopK      int
+	Ratio     float64
+}
+
 // MeasureReduction runs the extractor on the given messages purely to
 // MEASURE how much context the relevance step would drop — it never
 // mutates anything. Returns an error when the extractor isn't configured
 // or the run fails (callers treat that as "no measurement"). query is the
-// relevance anchor (typically the latest user turn).
-func (c *Client) MeasureReduction(ctx context.Context, messages []types.Message, query string) (*ReductionMeasurement, error) {
+// relevance anchor (typically the latest user turn). rel applies the
+// resolved bundle's relevance tuning (zero fields = extractor defaults).
+func (c *Client) MeasureReduction(ctx context.Context, messages []types.Message, query string, rel RelevanceOverride) (*ReductionMeasurement, error) {
 	if c.extractor == nil {
 		return nil, fmt.Errorf("gatekeeper: extractor not configured")
 	}
@@ -188,9 +198,12 @@ func (c *Client) MeasureReduction(ctx context.Context, messages []types.Message,
 		return nil, fmt.Errorf("gatekeeper: no content to measure")
 	}
 	er, err := c.extractor.Extract(ctx, extract.ExtractRequest{
-		Content:     content,
-		Query:       query,
-		ContentType: "chat",
+		Content:            content,
+		Query:              query,
+		ContentType:        "chat",
+		RelevanceThreshold: rel.Threshold,
+		TopKChunks:         rel.TopK,
+		TopKRatio:          rel.Ratio,
 	})
 	if err != nil {
 		return nil, err

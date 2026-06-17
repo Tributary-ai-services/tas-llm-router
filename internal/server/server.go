@@ -656,12 +656,18 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			msgs := req.Messages
 			query := lastUserText(msgs)
 			mode := red.Mode
+			// Honor the bundle's per-method relevance tuning (threshold /
+			// top-K). Zero fields fall back to the extractor's env defaults.
+			var rel gatekeeper.RelevanceOverride
+			if rs := red.Steps.Relevance; rs != nil {
+				rel = gatekeeper.RelevanceOverride{Threshold: rs.Threshold, TopK: rs.TopK, Ratio: rs.TopKRatio}
+			}
 			parentCtx := context.WithoutCancel(r.Context())
 			middleware.ExpectReductionMeasurement(parentCtx)
 			go func() {
 				mctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
 				defer cancel()
-				m, err := s.gatekeeper.MeasureReduction(mctx, msgs, query)
+				m, err := s.gatekeeper.MeasureReduction(mctx, msgs, query, rel)
 				if err != nil || m == nil {
 					// Stamp a nil-free "ran but empty" result so the deferred
 					// emit stops waiting instead of blocking the full timeout.
