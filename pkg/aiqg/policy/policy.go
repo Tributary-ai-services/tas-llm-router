@@ -28,6 +28,12 @@ type Resolution struct {
 	BundleID   string
 	BundleName string
 	Source     string
+	// Reduction is the resolved bundle's payload-reduction config (raw
+	// JSON; the `reduction` block of PolicyBundle.Spec). Empty when the
+	// bundle has no extraction policy. Parse with ParseReduction. Plan #7
+	// Phase 2: the gateway reads this to shadow/apply the Gatekeeper
+	// extract pipeline. Today it's only carried + parsed, not executed.
+	Reduction json.RawMessage
 }
 
 // Default returns the sentinel resolution used when the resolver is
@@ -110,9 +116,10 @@ type resolveRequest struct {
 }
 
 type resolveResponse struct {
-	BundleID   string `json:"bundle_id"`
-	BundleName string `json:"bundle_name"`
-	Source     string `json:"source"`
+	BundleID   string          `json:"bundle_id"`
+	BundleName string          `json:"bundle_name"`
+	Source     string          `json:"source"`
+	Reduction  json.RawMessage `json:"reduction,omitempty"`
 }
 
 // ErrResolverBadRequest is returned when the dashboard rejects the
@@ -172,7 +179,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
 			return Default(), fmt.Errorf("policy.DashboardResolver: decode 200: %w", err)
 		}
-		return Resolution{BundleID: v.BundleID, BundleName: v.BundleName, Source: v.Source}, nil
+		return Resolution{BundleID: v.BundleID, BundleName: v.BundleName, Source: v.Source, Reduction: v.Reduction}, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log
 		// distinctly so operators see "your TAS-Policy-Bundle header

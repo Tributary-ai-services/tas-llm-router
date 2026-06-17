@@ -492,6 +492,20 @@ func withPolicyResolve(ctx context.Context, pc *policyResolveCtx) context.Contex
 	return context.WithValue(ctx, policyResolveCtxKey{}, pc)
 }
 
+// ResolvedReduction returns the parsed payload-reduction policy for the
+// current request (from the resolved bundle's Spec.reduction), or nil
+// when there's none / outside AIQG mode. Plan #7 Phase 2: the extraction
+// decision point will call this once it's wired to run/shadow Gatekeeper
+// extract. Best-effort: a malformed policy returns (nil, err) so the
+// caller logs and falls back to projected-only.
+func ResolvedReduction(ctx context.Context) (*policy.ReductionPolicy, error) {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return nil, nil
+	}
+	return policy.ParseReduction(holder.get().Reduction)
+}
+
 // ResolveBundleForRouting re-resolves the policy bundle once the requested
 // model + workflow are known (routing time), so route rules that target by
 // model/workflow take effect. Best-effort: on any error it keeps the

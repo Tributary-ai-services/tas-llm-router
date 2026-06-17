@@ -108,7 +108,8 @@ func TestStaticResolver(t *testing.T) {
 	want := Resolution{BundleID: "x", BundleName: "y", Source: "tenant_active"}
 	r := StaticResolver{Result: want}
 	got, err := r.Resolve(context.Background(), ResolveRequest{TenantID: "t"})
-	if err != nil || got != want {
+	// Resolution carries a json.RawMessage (uncomparable), so compare fields.
+	if err != nil || got.BundleID != want.BundleID || got.BundleName != want.BundleName || got.Source != want.Source {
 		t.Errorf("got %+v err=%v want %+v err=nil", got, err, want)
 	}
 }
