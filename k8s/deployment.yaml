@@ -60,6 +60,19 @@ spec:
         # logs a warning and runs in the no-resolver permissive path.
         - name: AIQG_TOKENS_FILE
           value: /app/secrets/aiqg/aiqg-tokens.yaml
+        # AIQG payload-reduction extractor (Plan #7 Phase 4 Slice D) — rolled
+        # cluster-wide so the apply path works on the main gateway too, not
+        # just llm-router-aiqg. Embeddings-only (all-minilm); SLM off (no GPU).
+        # Active reduction is per-bundle (spec.reduction.mode) + ramp/kill-switch
+        # /auto-rollback gated. Break-glass: AIQG_EXTRACTION_APPLY_DISABLED=true.
+        - name: AIQG_EXTRACTION_ENABLED
+          value: "true"
+        - name: AIQG_EXTRACTION_OLLAMA_URL
+          value: http://ollama.tas-shared:11434
+        - name: AIQG_EXTRACTION_EMBED_MODEL
+          value: all-minilm
+        - name: AIQG_EXTRACTION_MIN_CONTENT_SIZE
+          value: "2000"
 
         resources:
           requests:
