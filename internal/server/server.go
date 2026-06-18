@@ -44,8 +44,13 @@ type Server struct {
 	validationMiddleware *middleware.ValidationMiddleware
 	gatekeeper           *gatekeeper.Client
 	gatekeeperConfig     *gatekeeper.Config
-	bypassManager        *gatekeeper.BypassManager
-	bypassHandler        *gatekeeper.BypassHandler
+	// extractionApplyDisabled is the global break-glass kill-switch for
+	// active payload reduction (Plan #7 Phase 4). When true the gateway
+	// never APPLIES a reduction — active bundles downgrade to shadow
+	// measurement — without an image rebuild. Set from AIQG_EXTRACTION_APPLY_DISABLED.
+	extractionApplyDisabled bool
+	bypassManager           *gatekeeper.BypassManager
+	bypassHandler           *gatekeeper.BypassHandler
 
 	// AIQG ingress wire-up. aiqgMiddleware is nil when AIQG is disabled
 	// in config, in which case completion handlers register unwrapped
@@ -348,6 +353,9 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 func (s *Server) SetGatekeeper(client *gatekeeper.Client, cfg *gatekeeper.Config, bypass *gatekeeper.BypassManager) {
 	s.gatekeeper = client
 	s.gatekeeperConfig = cfg
+	if cfg != nil {
+		s.extractionApplyDisabled = cfg.Extraction.ApplyDisabled
+	}
 	if bypass != nil {
 		s.bypassManager = bypass
 		s.bypassHandler = gatekeeper.NewBypassHandler(bypass, s.logger)
@@ -657,25 +665,30 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	if red.RunsExtractor() && s.gatekeeper != nil {
 		promptBytes := messagesByteLen(req.Messages)
-		if red.EligibleBySize(clear.TokensFromBytes(promptBytes)) && sampleHit(red.SampleRate) {
+		if red.EligibleBySize(clear.TokensFromBytes(promptBytes)) {
 			query := lastUserText(req.Messages)
-			mode := red.Mode
 			// Honor per-method relevance tuning (threshold / top-K); zero
 			// fields fall back to the extractor's env defaults.
 			var rel gatekeeper.RelevanceOverride
 			if rs := red.Steps.Relevance; rs != nil {
 				rel = gatekeeper.RelevanceOverride{Threshold: rs.Threshold, TopK: rs.TopK, Ratio: rs.TopKRatio}
 			}
-			if red.Applies() {
+			// Active applies to the sampled fraction (the ramp knob); the
+			// global break-glass kill-switch downgrades active → shadow. The
+			// ramp remainder routes normally (projected fields still emitted),
+			// while shadow mode measures on its sampled fraction. (Plan #7
+			// Phase 4 slice A.)
+			sampled := sampleHit(red.SampleRate)
+			switch {
+			case red.Applies() && !s.extractionApplyDisabled && sampled:
 				// APPLY (active): reduce the largest context message in place
-				// BEFORE routing, so the vendor sees the smaller payload. This
-				// is synchronous — the added latency is part of what an
-				// extraction experiment measures. Gated to experiment-claimed
-				// running variants (expReduction) or an active bundle.
-				s.applyReductionInline(r.Context(), &req, query, rel, mode)
-			} else {
-				// SHADOW (measure-only): run concurrently with the vendor call
-				// so it adds no client latency; the deferred emit waits for it.
+				// BEFORE routing, so the vendor sees the smaller payload.
+				// Synchronous — the added latency is real and measured.
+				s.applyReductionInline(r.Context(), &req, query, rel, "active")
+			case red.RunsExtractor() && sampled:
+				// SHADOW (measure-only): shadow mode, or a kill-switched active
+				// bundle downgraded to measurement. Runs concurrently with the
+				// vendor call so it adds no client latency.
 				msgs := req.Messages
 				parentCtx := context.WithoutCancel(r.Context())
 				middleware.ExpectReductionMeasurement(parentCtx)
@@ -688,7 +701,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					middleware.StampReductionMeasurement(parentCtx, &events.ReductionMeasurement{
-						Mode:                    mode,
+						Mode:                    "shadow",
 						Sampled:                 true,
 						OriginalBytes:           m.OriginalBytes,
 						ExtractedBytes:          m.ExtractedBytes,
