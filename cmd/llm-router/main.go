@@ -91,6 +91,7 @@ func NewApplication(configPath string) (*Application, error) {
 				OllamaURL:      cfg.Gatekeeper.Extraction.OllamaURL,
 				EmbedModel:     cfg.Gatekeeper.Extraction.EmbedModel,
 				MinContentSize: cfg.Gatekeeper.Extraction.MinContentSize,
+				ApplyDisabled:  cfg.Gatekeeper.Extraction.ApplyDisabled,
 			},
 		}
 

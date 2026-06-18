@@ -133,6 +133,7 @@ type ExtractionConfig struct {
 	OllamaURL      string `yaml:"ollama_url"`       // e.g. http://ollama.tas-shared:11434
 	EmbedModel     string `yaml:"embed_model"`      // e.g. all-minilm
 	MinContentSize int    `yaml:"min_content_size"` // extractor floor (bytes)
+	ApplyDisabled  bool   `yaml:"apply_disabled"`   // Phase 4 kill-switch: never APPLY active reduction
 }
 
 // ScanPolicyConfig controls which messages are scanned based on role and trust metadata.
@@ -473,6 +474,11 @@ func (c *Config) loadFromEnv() {
 		if v, err := strconv.Atoi(n); err == nil {
 			c.Gatekeeper.Extraction.MinContentSize = v
 		}
+	}
+	// Phase 4 break-glass kill-switch — when "true", active reduction never
+	// mutates payloads (downgrades to shadow). Default off.
+	if d := os.Getenv("AIQG_EXTRACTION_APPLY_DISABLED"); d == "true" {
+		c.Gatekeeper.Extraction.ApplyDisabled = true
 	}
 
 	// AIQG ingress — env overrides for the simple scalars. Tokens are

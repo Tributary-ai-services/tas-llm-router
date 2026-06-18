@@ -48,6 +48,12 @@ type ExtractionConfig struct {
 	OllamaURL      string `yaml:"ollama_url"`       // e.g. http://ollama.tas-shared:11434
 	EmbedModel     string `yaml:"embed_model"`      // e.g. all-minilm
 	MinContentSize int    `yaml:"min_content_size"` // extractor floor (bytes)
+	// ApplyDisabled is the global break-glass kill-switch for ACTIVE payload
+	// reduction (Plan #7 Phase 4). When true, active bundles still resolve but
+	// the gateway never mutates the payload — they downgrade to shadow
+	// measurement. Shadow/projected are unaffected. Toggle via env without an
+	// image rebuild.
+	ApplyDisabled bool `yaml:"apply_disabled"`
 }
 
 // ScanPolicy controls which messages are scanned based on role and trust metadata.
