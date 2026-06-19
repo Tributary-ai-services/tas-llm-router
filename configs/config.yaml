@@ -125,6 +125,16 @@ gatekeeper:
     ollama_url: "http://ollama.tas-shared:11434"   # AIQG_EXTRACTION_OLLAMA_URL
     embed_model: "all-minilm"                       # AIQG_EXTRACTION_EMBED_MODEL
     min_content_size: 2000                          # AIQG_EXTRACTION_MIN_CONTENT_SIZE (bytes)
+    # Optional SLM rewrite/compression step (Plan #7). Relevance always runs on
+    # Ollama; the SLM step can run on a cloud model so it works without a local
+    # GPU. Off by default — enabling it makes a cloud LLM call per reduced
+    # request (cost + latency), so measure net savings before leaving it on.
+    slm_enabled: false                              # AIQG_EXTRACTION_SLM_ENABLED
+    slm_provider: "openai"                          # AIQG_EXTRACTION_SLM_PROVIDER (ollama|openai|anthropic)
+    slm_model: "gpt-4o-mini"                        # AIQG_EXTRACTION_SLM_MODEL
+    slm_base_url: ""                                # AIQG_EXTRACTION_SLM_BASE_URL (blank = provider default)
+    slm_api_key: ""                                 # AIQG_EXTRACTION_SLM_API_KEY (from secret)
+    slm_max_tokens: 1024                            # AIQG_EXTRACTION_SLM_MAX_TOKENS
 
 logging:
   level: "info"
