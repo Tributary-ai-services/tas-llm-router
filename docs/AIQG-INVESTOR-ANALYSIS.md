@@ -1,11 +1,16 @@
 # AIQG — Investor Positioning Analysis
 
-**Status:** Working analysis — 2026-06-12.
+**Status:** Working analysis — 2026-06-12; **IP section revised 2026-06-19** to
+reflect the completed FTO claim-read and the six-candidate provisional brief.
 **Inputs:** [`AIQG-EXTENSION.md`](./AIQG-EXTENSION.md),
 [`AIQG-AGENT-FLOW-ATTRIBUTION.md`](./AIQG-AGENT-FLOW-ATTRIBUTION.md),
 [`AIQG-AGENT-IDENTITY-RESEARCH.md`](./AIQG-AGENT-IDENTITY-RESEARCH.md),
 [`AIQG-EXPERIMENTS-RUNNER.md`](./AIQG-EXPERIMENTS-RUNNER.md).
-**Companion:** [`AIQG-PATENT-ANALYSIS.md`](./AIQG-PATENT-ANALYSIS.md)
+**Companions:** [`AIQG-PATENT-ANALYSIS.md`](./AIQG-PATENT-ANALYSIS.md),
+[`AIQG-PROVISIONAL-BRIEF.md`](./AIQG-PROVISIONAL-BRIEF.md) (Candidates 1–6),
+[`AIQG-FTO-CLAIM-READ.md`](./AIQG-FTO-CLAIM-READ.md),
+[`AIQG-PATENT-SCOUT-AUTOLEARNING.md`](./AIQG-PATENT-SCOUT-AUTOLEARNING.md),
+[`AIQG-PATENT-ML-IN-LOOP.md`](./AIQG-PATENT-ML-IN-LOOP.md)
 
 ## Summary
 
@@ -48,7 +53,11 @@ Competitors stop at dashboards. The Experiments Runner makes the measurement
 actionable: detect that a workflow is over-provisioned on gpt-4o → run a
 guardrailed, sticky, non-inferiority A/B against 4o-mini → quantified verdict.
 That's Statsig/LaunchDarkly-for-LLM-routing, executed at the gateway so it
-again needs no app changes.
+again needs no app changes. **Scout** sharpens this: it mines the customer's own
+traffic for the cheaper-model swaps worth testing and estimates the
+**time-to-verdict before launch** ("this swap would take ≈3 weeks to prove at 5%
+exposure"), so the optimization loop opens with a prioritized, feasibility-sized
+list rather than a blank experiment form.
 
 The **Gatekeeper-impact experiment** is a unique proof-point: we can *show
 customers data* that the security layer doesn't degrade answer quality — a
@@ -71,15 +80,23 @@ de-risks the "proprietary schema lock-in" objection.
 - **Deterministic floor**: the token-echo and prefix-chain tiers are
   proof-not-probability, so the headline capability holds even if fingerprint
   clustering underperforms.
-- **IP option**: a provisional on the inference tier (see
-  `AIQG-PATENT-ANALYSIS.md`) turns the wedge into a defensibility story beyond
-  "we built a nice proxy."
+- **IP option, now de-risked**: the defensibility story is no longer
+  hypothetical. A **six-candidate provisional** is drafted
+  (`AIQG-PROVISIONAL-BRIEF.md`) — the zero-cooperation attribution tier
+  (content-propagation graph, tool-call echo, graded identity ladder,
+  fingerprint registry) plus identity-ladder-keyed sticky experimentation and
+  Scout's pre-launch time-to-verdict — and the **FTO claim-read is done**
+  (`AIQG-FTO-CLAIM-READ.md`): no high-risk read against the four located
+  patents, and the strongest candidate (content-propagation graph) is clear of
+  all four. A second filing track (autolearning + SLM/ML-in-loop, e.g.
+  self-labeling a classifier from the protocol's forced echo) is scoped behind a
+  bandit-routing prior-art search.
 
 ## Risks an investor will probe (be ready)
 
 | Risk | Honest counter |
 |---|---|
-| FTO overhang on metering/billing (4 located USPTO patents, claims unread) | Scoped: gates billing use only, not observability; FTO pass is planned and cheap relative to the raise |
+| FTO overhang on metering/billing (4 located USPTO patents) | **Claim-read now done** (`AIQG-FTO-CLAIM-READ.md`): no high-risk read on any of our six techniques. Only Dynatrace US 10,924,326 is a medium on per-agent metering — gates *billing-grade* use, not observability, and our inference-only (no injected correlation id) design is the documented design-around. Counsel opinion on that one patent is the remaining cheap step |
 | Inference precision/recall unproven | The validation harness with known ground truth (`cmd/demo-traffic --untagged`) is already built; deterministic tiers set a high floor |
 | OTel GenAI conventions are experimental | Names pinned; additive schema means renames are migrations, not breakage |
 | Hyperscalers bundle basic gateway attribution | They'll ship header-based (self-asserted) attribution; the inferred tier + registry is the differentiated layer |
@@ -88,7 +105,13 @@ de-risks the "proprietary schema lock-in" objection.
 ## Concrete next steps
 
 1. **Run the untagged validation** and publish precision/recall per inference
-   tier internally — the single best artifact for the pitch deck.
-2. **FTO claim-read** before diligence surfaces it for us.
-3. Keep the inferred-attribution design non-public until the
-   provisional-vs-defensive-publication decision is made.
+   tier internally — the single best artifact for the pitch deck, and the
+   reduction-to-practice exhibit for the provisional.
+2. **File the six-candidate provisional** (`AIQG-PROVISIONAL-BRIEF.md`) before
+   any public disclosure; commission the counsel opinion on Dynatrace
+   10,924,326 ahead of any billing-grade metering. *(FTO claim-read — done.)*
+3. **Prototype one ML-in-loop claim** for the second track — the self-labeling
+   classifier (M1) or feedback-recalibrated SLM judge (M2) — to turn the
+   autolearning story from idea into a demonstrable, defensible asset.
+4. Keep the inferred-attribution, autolearning, and ML-in-loop designs
+   non-public until each provisional is on file.

@@ -1,4 +1,4 @@
-# AIQG — Provisional Patent Filing Brief (Candidates 1–5)
+# AIQG — Provisional Patent Filing Brief (Candidates 1–6)
 
 **Status:** Draft for patent counsel — 2026-06-19. Technical drafting aid, **not
 legal advice**; claim scope and filing strategy require a patent attorney.
@@ -45,7 +45,7 @@ the API shape, not merely statistically likely. On top of that deterministic
 floor, agent *type* identity can be inferred statistically from the structural
 signals programmatic callers do not randomize.
 
-## 5. Independent-claim concepts (the five candidates)
+## 5. Independent-claim concepts (the six candidates)
 
 ### Candidate 1 — Content-propagation graph (strongest; design-only)
 
@@ -146,17 +146,47 @@ Gatekeeper-impact non-inferiority design. Depends on Candidates 2–4: the
 identity ladder is the assignment key, which is what no instrumentation-
 dependent competitor can replicate.
 
+### Candidate 6 — Pre-launch time-to-verdict from observed per-model variance (Scout)
+
+A method that, **before any experiment is launched**, estimates an experiment's
+feasibility from the gateway's own traffic:
+1. aggregating historical traffic per `(vendor, model)` over a window and
+   computing the **mean and standard deviation** of cost, latency, and the
+   decomposed CLEAR quality (`/api/v1/metrics/by-vendor` returns
+   `cost_stddev` / `latency_stddev` per vendor/model);
+2. for a proposed incumbent→candidate swap at a default exposure, computing the
+   **sample size to statistical significance** from those observed variances
+   (`requests_to_significance ≈ (z / Δmean)² · (σ_a² + σ_b²)`) and converting it
+   to a **time-to-verdict** at the model's observed request rate;
+3. **surfacing that estimate before the operator commits** ("≈ N days" or
+   "traffic too thin"), flagging when the projected verdict time exceeds a
+   threshold (~90 days);
+4. *(dependent)* mining the same traffic for cost/latency-reducing swaps with
+   comparable quality, **disclosing the historical confounding**, and
+   one-click materializing the suggestion into the properly-powered controlled
+   experiment of Candidate 5.
+
+*Why novel:* A/B power analysis is textbook, but computing it **up front from
+per-model variance harvested from the same live gateway traffic the experiment
+will run on** — to triage which swaps are even worth testing and tell the
+operator the time/cost before a single request is split — turns power analysis
+from a post-hoc check into a **prioritization filter**. Pairs with Candidate 5
+(it sizes the experiment that Candidate 5 then runs).
+
 ## 6. Reduction to practice / enablement evidence
 
 - **Shipped 2026-06-11 (`aiqg-v5.24`):** locked identity model, `TAS-*` +
   `traceparent` + `baggage` header contract, `AgentContext` event sub-struct,
   emitter field promotion, `/api/v1/events`, Traffic Explorer. Establishes the
   event schema and resolution-ladder plumbing the claims build on.
-- **Shipped 2026-06-18 (Candidate 5):** the experiment Runner + verdict engine
-  (cohort assignment, z-test non-inferiority `verdict.go` / `significance.go`,
-  guardrails, Scout). Establishes reduction to practice for the experimentation
-  substrate; the design-extension to file is **keying assignment stickiness on
-  the inferred identity ladder** (rather than a self-asserted cohort id).
+- **Shipped 2026-06-18 (Candidates 5 & 6):** the experiment Runner + verdict
+  engine (cohort assignment, z-test non-inferiority `verdict.go` /
+  `significance.go`, guardrails) **and Scout** — the by-vendor per-model
+  variance endpoint plus the pre-launch time-to-verdict estimate (Candidate 6 is
+  shipped as described). Establishes reduction to practice for the
+  experimentation substrate; the design-extension to file for Candidate 5 is
+  **keying assignment stickiness on the inferred identity ladder** (rather than
+  a self-asserted cohort id).
 - **Design-only (to be built before/at filing):** the inference engine —
   `tool_call_id` echo + prefix chaining + content-propagation chunking +
   fingerprint ensemble + registry.
@@ -178,20 +208,21 @@ documented in the FTO companion.
 
 ## 8. Recommended filing scope and sequence
 
-1. **File one provisional covering Candidates 1–5 as a family** before any
+1. **File one provisional covering Candidates 1–6 as a family** before any
    public disclosure — Candidates 1–4 share the "gateway recognizes its own
-   served output" core, and Candidate 5 consumes that same inferred-identity
-   ladder as its experiment-assignment key, so all five are strongest claimed
-   together. Lean provisional over defensive publication for these moat-bearing
-   pieces.
+   served output" core, Candidate 5 consumes that same inferred-identity ladder
+   as its experiment-assignment key, and Candidate 6 (Scout) sizes the
+   experiment Candidate 5 runs, so all six are strongest claimed together. Lean
+   provisional over defensive publication for these moat-bearing pieces.
 2. **Before filing:** run `cmd/demo-traffic --untagged`, capture per-tier
    precision/recall, and fold the numbers + architecture diagrams into the
    provisional as enablement.
 3. **In parallel, counsel-led FTO read** focused on Dynatrace 10,924,326 and
    the `tool_call_id`-echo / per-agent-metering techniques before any
    billing-grade use.
-4. **Keep CLEAR scoring** and the Scout/autolearning ML candidates
-   (see [`AIQG-PATENT-SCOUT-AUTOLEARNING.md`](./AIQG-PATENT-SCOUT-AUTOLEARNING.md),
+4. **Keep CLEAR scoring** and the autolearning + ML-in-loop candidates
+   (A-series and M-series — see
+   [`AIQG-PATENT-SCOUT-AUTOLEARNING.md`](./AIQG-PATENT-SCOUT-AUTOLEARNING.md),
    [`AIQG-PATENT-ML-IN-LOOP.md`](./AIQG-PATENT-ML-IN-LOOP.md)) for a later,
    separate filing decision — out of scope here, pending the bandit/
    auto-experimentation prior-art search.
