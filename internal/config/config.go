@@ -134,6 +134,13 @@ type ExtractionConfig struct {
 	EmbedModel     string `yaml:"embed_model"`      // e.g. all-minilm
 	MinContentSize int    `yaml:"min_content_size"` // extractor floor (bytes)
 	ApplyDisabled  bool   `yaml:"apply_disabled"`   // Phase 4 kill-switch: never APPLY active reduction
+	// SLM rewrite step — optional cloud-backed compression (Plan #7 SLM unblock).
+	SLMEnabled   bool   `yaml:"slm_enabled"`
+	SLMProvider  string `yaml:"slm_provider"` // ollama | openai | anthropic
+	SLMModel     string `yaml:"slm_model"`
+	SLMBaseURL   string `yaml:"slm_base_url"`
+	SLMAPIKey    string `yaml:"slm_api_key"`
+	SLMMaxTokens int    `yaml:"slm_max_tokens"`
 }
 
 // ScanPolicyConfig controls which messages are scanned based on role and trust metadata.
@@ -479,6 +486,27 @@ func (c *Config) loadFromEnv() {
 	// mutates payloads (downgrades to shadow). Default off.
 	if d := os.Getenv("AIQG_EXTRACTION_APPLY_DISABLED"); d == "true" {
 		c.Gatekeeper.Extraction.ApplyDisabled = true
+	}
+	// SLM rewrite step (Plan #7 SLM unblock) — cloud-backed compression.
+	if e := os.Getenv("AIQG_EXTRACTION_SLM_ENABLED"); e == "true" {
+		c.Gatekeeper.Extraction.SLMEnabled = true
+	}
+	if p := os.Getenv("AIQG_EXTRACTION_SLM_PROVIDER"); p != "" {
+		c.Gatekeeper.Extraction.SLMProvider = p
+	}
+	if m := os.Getenv("AIQG_EXTRACTION_SLM_MODEL"); m != "" {
+		c.Gatekeeper.Extraction.SLMModel = m
+	}
+	if u := os.Getenv("AIQG_EXTRACTION_SLM_BASE_URL"); u != "" {
+		c.Gatekeeper.Extraction.SLMBaseURL = u
+	}
+	if k := os.Getenv("AIQG_EXTRACTION_SLM_API_KEY"); k != "" {
+		c.Gatekeeper.Extraction.SLMAPIKey = k
+	}
+	if n := os.Getenv("AIQG_EXTRACTION_SLM_MAX_TOKENS"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil {
+			c.Gatekeeper.Extraction.SLMMaxTokens = v
+		}
 	}
 
 	// AIQG ingress — env overrides for the simple scalars. Tokens are

@@ -92,6 +92,12 @@ func NewApplication(configPath string) (*Application, error) {
 				EmbedModel:     cfg.Gatekeeper.Extraction.EmbedModel,
 				MinContentSize: cfg.Gatekeeper.Extraction.MinContentSize,
 				ApplyDisabled:  cfg.Gatekeeper.Extraction.ApplyDisabled,
+				SLMEnabled:     cfg.Gatekeeper.Extraction.SLMEnabled,
+				SLMProvider:    cfg.Gatekeeper.Extraction.SLMProvider,
+				SLMModel:       cfg.Gatekeeper.Extraction.SLMModel,
+				SLMBaseURL:     cfg.Gatekeeper.Extraction.SLMBaseURL,
+				SLMAPIKey:      cfg.Gatekeeper.Extraction.SLMAPIKey,
+				SLMMaxTokens:   cfg.Gatekeeper.Extraction.SLMMaxTokens,
 			},
 		}
 

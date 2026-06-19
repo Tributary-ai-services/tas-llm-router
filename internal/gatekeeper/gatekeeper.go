@@ -54,6 +54,16 @@ type ExtractionConfig struct {
 	// measurement. Shadow/projected are unaffected. Toggle via env without an
 	// image rebuild.
 	ApplyDisabled bool `yaml:"apply_disabled"`
+
+	// SLM rewrite step (Plan #7). The relevance/embedding step always runs on
+	// Ollama; the optional SLM compression step can run on a cloud provider so
+	// it works without a local GPU. Disabled by default.
+	SLMEnabled   bool   `yaml:"slm_enabled"`
+	SLMProvider  string `yaml:"slm_provider"` // ollama | openai | anthropic
+	SLMModel     string `yaml:"slm_model"`    // e.g. gpt-4o-mini, claude-haiku-4-5-20251001, phi3.5
+	SLMBaseURL   string `yaml:"slm_base_url"` // optional override; provider default otherwise
+	SLMAPIKey    string `yaml:"slm_api_key"`  // bearer / x-api-key for cloud providers
+	SLMMaxTokens int    `yaml:"slm_max_tokens"`
 }
 
 // ScanPolicy controls which messages are scanned based on role and trust metadata.
@@ -147,13 +157,30 @@ func New(cfg Config, logger *logrus.Logger) (*Client, error) {
 	if cfg.Extraction.Enabled {
 		ec := extract.DefaultExtractorConfig()
 		ec.EnableEmbedding = true
-		ec.EnableSLM = false
 		if cfg.Extraction.EmbedModel != "" {
 			ec.Embedding.Model = cfg.Extraction.EmbedModel
 		}
-		ec.SLM.URL = cfg.Extraction.OllamaURL // extract.NewEmbedder reads the Ollama URL from SLM.URL
+		// Embeddings always run on Ollama; its own URL is decoupled from the
+		// SLM step so the SLM can target a cloud provider.
+		ec.Embedding.URL = cfg.Extraction.OllamaURL
 		if cfg.Extraction.MinContentSize > 0 {
 			ec.MinContentSize = cfg.Extraction.MinContentSize
+		}
+		// Optional SLM compression step. Provider "ollama" needs a local GPU;
+		// "openai"/"anthropic" route the rewrite to a cloud model (Plan #7
+		// SLM unblock). Default off → relevance-only reduction.
+		ec.EnableSLM = cfg.Extraction.SLMEnabled
+		if cfg.Extraction.SLMEnabled {
+			ec.SLM = extract.SLMConfig{
+				Provider:  cfg.Extraction.SLMProvider,
+				URL:       cfg.Extraction.SLMBaseURL,
+				Model:     cfg.Extraction.SLMModel,
+				APIKey:    cfg.Extraction.SLMAPIKey,
+				MaxTokens: cfg.Extraction.SLMMaxTokens,
+			}
+			if cfg.Extraction.SLMProvider == extract.SLMProviderOllama && cfg.Extraction.SLMBaseURL == "" {
+				ec.SLM.URL = cfg.Extraction.OllamaURL // local SLM shares the Ollama endpoint
+			}
 		}
 		if ex, err := extract.NewExtractor(ec); err != nil {
 			logger.WithError(err).Warn("gatekeeper: extractor init failed; shadow reduction disabled")
