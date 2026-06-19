@@ -511,7 +511,22 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 				ta.ReductionSampled = rm.Sampled
 				ta.ActualDirectPayloadReductionTokens = reducedTokens
 				ta.ActualDirectPayloadReductionUSD = reducedUSD
-				ta.ActualReductionRelevanceUSD = reducedUSD // relevance is the only enabled step
+				// Split the measured saving across the two steps via the
+				// post-relevance size: relevance = original−afterRelevance,
+				// SLM = afterRelevance−extracted. When afterRelevance is unknown
+				// (0) attribute it all to relevance (relevance-only run).
+				usdFor := func(b int) float64 {
+					if b < 0 {
+						b = 0
+					}
+					return (float64(clear.TokensFromBytes(b)) / 1000.0) * inputRate
+				}
+				if rm.SizeAfterRelevanceBytes > 0 {
+					ta.ActualReductionRelevanceUSD = usdFor(rm.OriginalBytes - rm.SizeAfterRelevanceBytes)
+					ta.ActualReductionSLMUSD = usdFor(rm.SizeAfterRelevanceBytes - rm.ExtractedBytes)
+				} else {
+					ta.ActualReductionRelevanceUSD = reducedUSD
+				}
 			}
 		}
 		tokenAcct = ta
