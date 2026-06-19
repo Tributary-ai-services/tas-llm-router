@@ -1,4 +1,4 @@
-# AIQG — Provisional Patent Filing Brief (Candidates 1–4)
+# AIQG — Provisional Patent Filing Brief (Candidates 1–5)
 
 **Status:** Draft for patent counsel — 2026-06-19. Technical drafting aid, **not
 legal advice**; claim scope and filing strategy require a patent attorney.
@@ -45,7 +45,7 @@ the API shape, not merely statistically likely. On top of that deterministic
 floor, agent *type* identity can be inferred statistically from the structural
 signals programmatic callers do not randomize.
 
-## 5. Independent-claim concepts (the four candidates)
+## 5. Independent-claim concepts (the five candidates)
 
 ### Candidate 1 — Content-propagation graph (strongest; design-only)
 
@@ -123,12 +123,40 @@ mining); the **composition — per-(tenant,principal) ensemble + version lineage
 human-labels-clusters registry + semi-supervised calibration from tagged
 traffic** — has no surveyed precedent.
 
+### Candidate 5 — Identity-ladder-keyed sticky experimentation on live gateway traffic
+
+A system that runs controlled experiments (A/B) on live LLM-gateway traffic by:
+1. assigning each request to a variant and keeping the assignment **sticky
+   across a conversation/flow by keying stickiness on the inferred identity
+   ladder** — so un-instrumented callers, recognized only by the deterministic
+   linkage tier or by fingerprint cluster, still receive **coherent,
+   non-flip-flopping splits** they never opted into;
+2. enforcing **claim-on-match mutual exclusion** so overlapping experiments do
+   not contaminate each other's cohorts;
+3. computing a **non-inferiority verdict** on the decomposed CLEAR quality vector
+   plus a strict objective win on cost/latency to decide ship/no-ship;
+4. *(Gatekeeper-impact variant)* running **shadow pairwise evaluation** to prove
+   the security layer's rewrites (PII redaction, tokenization) do not degrade
+   answer quality.
+
+*Why novel:* gateway A/B testing exists; the differentiator is **assignment
+stickiness riding the zero-cooperation inferred identity ladder** — coherent
+experiment cohorts for callers that never opted in — combined with the
+Gatekeeper-impact non-inferiority design. Depends on Candidates 2–4: the
+identity ladder is the assignment key, which is what no instrumentation-
+dependent competitor can replicate.
+
 ## 6. Reduction to practice / enablement evidence
 
 - **Shipped 2026-06-11 (`aiqg-v5.24`):** locked identity model, `TAS-*` +
   `traceparent` + `baggage` header contract, `AgentContext` event sub-struct,
   emitter field promotion, `/api/v1/events`, Traffic Explorer. Establishes the
   event schema and resolution-ladder plumbing the claims build on.
+- **Shipped 2026-06-18 (Candidate 5):** the experiment Runner + verdict engine
+  (cohort assignment, z-test non-inferiority `verdict.go` / `significance.go`,
+  guardrails, Scout). Establishes reduction to practice for the experimentation
+  substrate; the design-extension to file is **keying assignment stickiness on
+  the inferred identity ladder** (rather than a self-asserted cohort id).
 - **Design-only (to be built before/at filing):** the inference engine —
   `tool_call_id` echo + prefix chaining + content-propagation chunking +
   fingerprint ensemble + registry.
@@ -150,18 +178,23 @@ documented in the FTO companion.
 
 ## 8. Recommended filing scope and sequence
 
-1. **File one provisional covering Candidates 1–4 as a family** before any
-   public disclosure — the four share the "gateway recognizes its own served
-   output" core and are strongest claimed together. Lean provisional over
-   defensive publication for these moat-bearing pieces.
+1. **File one provisional covering Candidates 1–5 as a family** before any
+   public disclosure — Candidates 1–4 share the "gateway recognizes its own
+   served output" core, and Candidate 5 consumes that same inferred-identity
+   ladder as its experiment-assignment key, so all five are strongest claimed
+   together. Lean provisional over defensive publication for these moat-bearing
+   pieces.
 2. **Before filing:** run `cmd/demo-traffic --untagged`, capture per-tier
    precision/recall, and fold the numbers + architecture diagrams into the
    provisional as enablement.
 3. **In parallel, counsel-led FTO read** focused on Dynatrace 10,924,326 and
    the `tool_call_id`-echo / per-agent-metering techniques before any
    billing-grade use.
-4. **Keep candidate 5** (identity-ladder-keyed sticky experimentation) and
-   **CLEAR scoring** for a later, separate filing decision — out of scope here.
+4. **Keep CLEAR scoring** and the Scout/autolearning ML candidates
+   (see [`AIQG-PATENT-SCOUT-AUTOLEARNING.md`](./AIQG-PATENT-SCOUT-AUTOLEARNING.md),
+   [`AIQG-PATENT-ML-IN-LOOP.md`](./AIQG-PATENT-ML-IN-LOOP.md)) for a later,
+   separate filing decision — out of scope here, pending the bandit/
+   auto-experimentation prior-art search.
 
 ## 9. Disclosure hygiene (statutory-bar guard)
 
