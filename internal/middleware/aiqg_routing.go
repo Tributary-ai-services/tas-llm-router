@@ -21,14 +21,16 @@ import (
 // can't accidentally overwrite an earlier decision with a fallback
 // guess.
 type Routing struct {
-	mu               sync.Mutex
-	vendor           string
-	model            string
-	streaming        bool
-	streamSet        bool
-	promptTokens     int
-	completionTokens int
-	usageSet         bool
+	mu                  sync.Mutex
+	vendor              string
+	model               string
+	streaming           bool
+	streamSet           bool
+	promptTokens        int
+	completionTokens    int
+	cacheCreationTokens int
+	cacheReadTokens     int
+	usageSet            bool
 
 	// Gatekeeper findings — counts per severity per direction. The
 	// scanRan flag distinguishes "scan ran, no findings" (Healthy
@@ -117,9 +119,11 @@ type RoutingSnapshot struct {
 	// finish_reason=content_filter responses) from "vendor never
 	// returned a usage block" (the events package emits the former
 	// as `prompt_tokens: 0`, the latter omits the field).
-	PromptTokens     int
-	CompletionTokens int
-	UsageSet         bool
+	PromptTokens        int
+	CompletionTokens    int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	UsageSet            bool
 
 	// Gatekeeper scan results, severity-count maps per direction.
 	// ScanRan distinguishes "scan ran, no findings" from "scan never
@@ -181,30 +185,32 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return RoutingSnapshot{
-		Vendor:            r.vendor,
-		Model:             r.model,
-		Streaming:         r.streaming,
-		StreamingSet:      r.streamSet,
-		PromptTokens:      r.promptTokens,
-		CompletionTokens:  r.completionTokens,
-		UsageSet:          r.usageSet,
-		InboundFindings:   copyCounts(r.inboundFindings),
-		OutboundFindings:  copyCounts(r.outboundFindings),
-		ScanRan:           r.scanRan,
-		FinishReason:      r.finishReason,
-		AttemptCount:      r.attemptCount,
-		FallbackUsed:      r.fallbackUsed,
-		RetrySet:          r.retrySet,
-		Workflow:          r.workflow,
-		NISTFindings:      copyCounts(r.nistFindings),
-		TagFindings:       copyCounts(r.tagFindings),
-		EchoedToolCallIDs: append([]string(nil), r.echoedToolCallIDs...),
-		ServedToolCallIDs: append([]string(nil), r.servedToolCallIDs...),
-		PrefixHash:        r.prefixHash,
-		StateHash:         r.stateHash,
-		Fingerprint:       r.fingerprint,
-		ExperimentID:      r.experimentID,
-		ExperimentVariant: r.experimentVariant,
+		Vendor:              r.vendor,
+		Model:               r.model,
+		Streaming:           r.streaming,
+		StreamingSet:        r.streamSet,
+		PromptTokens:        r.promptTokens,
+		CompletionTokens:    r.completionTokens,
+		CacheCreationTokens: r.cacheCreationTokens,
+		CacheReadTokens:     r.cacheReadTokens,
+		UsageSet:            r.usageSet,
+		InboundFindings:     copyCounts(r.inboundFindings),
+		OutboundFindings:    copyCounts(r.outboundFindings),
+		ScanRan:             r.scanRan,
+		FinishReason:        r.finishReason,
+		AttemptCount:        r.attemptCount,
+		FallbackUsed:        r.fallbackUsed,
+		RetrySet:            r.retrySet,
+		Workflow:            r.workflow,
+		NISTFindings:        copyCounts(r.nistFindings),
+		TagFindings:         copyCounts(r.tagFindings),
+		EchoedToolCallIDs:   append([]string(nil), r.echoedToolCallIDs...),
+		ServedToolCallIDs:   append([]string(nil), r.servedToolCallIDs...),
+		PrefixHash:          r.prefixHash,
+		StateHash:           r.stateHash,
+		Fingerprint:         r.fingerprint,
+		ExperimentID:        r.experimentID,
+		ExperimentVariant:   r.experimentVariant,
 	}
 }
 
@@ -419,7 +425,7 @@ func StampStreaming(ctx context.Context, streaming bool) {
 // both counts zero is still treated as a valid stamp (UsageSet flips
 // true) so the event distinguishes "vendor returned 0 tokens" from
 // "vendor never returned a usage block".
-func StampTokenUsage(ctx context.Context, promptTokens, completionTokens int) {
+func StampTokenUsage(ctx context.Context, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int) {
 	r := RoutingFromContext(ctx)
 	if r == nil {
 		return
@@ -429,6 +435,8 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens int) {
 	if !r.usageSet {
 		r.promptTokens = promptTokens
 		r.completionTokens = completionTokens
+		r.cacheCreationTokens = cacheCreationTokens
+		r.cacheReadTokens = cacheReadTokens
 		r.usageSet = true
 	}
 }

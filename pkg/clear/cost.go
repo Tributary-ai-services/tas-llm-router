@@ -101,12 +101,30 @@ func TokensFromBytes(b int) int {
 // vendor:model pricing isn't known — callers must not fabricate waste on
 // unpriced traffic.
 type Cost struct {
-	InputUSD  float64
-	OutputUSD float64
-	TotalUSD  float64
-	Source    string // "vendor_usage" (counts from the vendor) | "computed"
-	Priced    bool
+	InputUSD         float64 // uncached input tokens at the full input rate
+	CacheCreationUSD float64 // cache-write (creation) tokens at CacheWriteMultiplier × input
+	CacheReadUSD     float64 // cache-read (hit) tokens at CacheReadMultiplier × input
+	OutputUSD        float64
+	TotalUSD         float64
+	Source           string // "vendor_usage" (counts from the vendor) | "computed"
+	Priced           bool
+	CacheAware       bool // true when cache-token counts were supplied (CacheCreation/CacheRead priced)
 }
+
+// Cache-rate multipliers, applied to a model's input rate. Every major
+// provider prices cached tokens as a fraction/multiple of the input rate
+// rather than as a separate per-model column, so we derive them here
+// instead of widening modelPricingEntry:
+//
+//	cache-READ  (hit)      = 0.10× the input rate  (Anthropic; ~90% off)
+//	cache-WRITE (creation) = 1.25× the input rate  (Anthropic, 5-minute TTL)
+//
+// The 1-hour-TTL write premium (2×) is not modeled — the gateway does not
+// request 1-hour caching. Sources + cross-provider variation: AIQG_CACHING_PRIMER.md §4.
+const (
+	CacheReadMultiplier  = 0.10
+	CacheWriteMultiplier = 1.25
+)
 
 // ActualCost computes the billed dollar cost of a request from token
 // counts + the model's rates. In Contract v1 this equals the existing
@@ -126,6 +144,45 @@ func ActualCost(vendor, model string, promptTokens, completionTokens int, usageF
 		src = "vendor_usage"
 	}
 	return Cost{InputUSD: in, OutputUSD: out, TotalUSD: in + out, Source: src, Priced: true}
+}
+
+// CacheAwareCost prices a request using the vendor's cache-token breakdown.
+// It is the cache-aware analog of ActualCost: instead of billing every input
+// token at the full rate, it splits input into three classes at their real
+// rates —
+//
+//	uncachedInput  × inputRate                          (full rate)
+//	cacheCreation  × inputRate × CacheWriteMultiplier   (1.25×)
+//	cacheRead      × inputRate × CacheReadMultiplier     (0.10×)
+//
+// This matches provider billing (e.g. Anthropic's usage reports input_tokens
+// EXCLUSIVE of cache tokens, plus cache_creation_input_tokens and
+// cache_read_input_tokens separately). Passing 0 for both cache counts yields
+// exactly ActualCost's number, so callers with no cache data are unaffected.
+// Returns Priced=false when the vendor:model pair isn't in the table.
+func CacheAwareCost(vendor, model string, uncachedInput, cacheCreation, cacheRead, completion int, usageFromVendor bool) Cost {
+	inputRate, outputRate, found := LookupPricing(vendor, model)
+	if !found {
+		return Cost{Priced: false}
+	}
+	in := (float64(uncachedInput) / 1000.0) * inputRate
+	cw := (float64(cacheCreation) / 1000.0) * inputRate * CacheWriteMultiplier
+	cr := (float64(cacheRead) / 1000.0) * inputRate * CacheReadMultiplier
+	out := (float64(completion) / 1000.0) * outputRate
+	src := "computed"
+	if usageFromVendor {
+		src = "vendor_usage"
+	}
+	return Cost{
+		InputUSD:         in,
+		CacheCreationUSD: cw,
+		CacheReadUSD:     cr,
+		OutputUSD:        out,
+		TotalUSD:         in + cw + cr + out,
+		Source:           src,
+		Priced:           true,
+		CacheAware:       true,
+	}
 }
 
 // scoreCost converts the request's USD cost into a 0-100 score with a

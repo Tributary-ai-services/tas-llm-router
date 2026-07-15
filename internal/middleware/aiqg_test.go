@@ -564,7 +564,7 @@ func TestAIQG_TokenUsageStampedReachesEventAndCost(t *testing.T) {
 	stampingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		StampVendor(r.Context(), "openai")
 		StampModel(r.Context(), "gpt-4o-mini")
-		StampTokenUsage(r.Context(), 1000, 500)
+		StampTokenUsage(r.Context(), 1000, 500, 0, 0)
 		w.WriteHeader(http.StatusOK)
 	})
 
