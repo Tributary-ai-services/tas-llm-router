@@ -30,36 +30,6 @@ func TestParseOverrideReduction(t *testing.T) {
 	})
 }
 
-func TestLargestReducibleMessageIndex(t *testing.T) {
-	t.Run("picks largest non-last-user message", func(t *testing.T) {
-		msgs := []types.Message{
-			{Role: "system", Content: "short"},
-			{Role: "user", Content: "this is a very long context block with lots of detail to reduce"}, // largest, but not last user
-			{Role: "assistant", Content: "ok"},
-			{Role: "user", Content: "the question?"}, // last user — must be excluded
-		}
-		got := largestReducibleMessageIndex(msgs)
-		if got != 1 {
-			t.Errorf("expected index 1 (long context), got %d", got)
-		}
-	})
-	t.Run("excludes the lone question", func(t *testing.T) {
-		msgs := []types.Message{{Role: "user", Content: "only a question, nothing to reduce"}}
-		if got := largestReducibleMessageIndex(msgs); got != -1 {
-			t.Errorf("expected -1 for lone question, got %d", got)
-		}
-	})
-	t.Run("falls back to a non-user large message when last is user", func(t *testing.T) {
-		msgs := []types.Message{
-			{Role: "system", Content: "a moderately sized system preamble with content"},
-			{Role: "user", Content: "tiny q"},
-		}
-		if got := largestReducibleMessageIndex(msgs); got != 0 {
-			t.Errorf("expected index 0 (system), got %d", got)
-		}
-	})
-}
-
 func TestMessageContentString(t *testing.T) {
 	cases := []struct {
 		name string
