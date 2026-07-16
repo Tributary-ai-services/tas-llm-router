@@ -20,7 +20,7 @@ Verified 2026-07-16 across the monorepo:
 |---|---|---|---|
 | **tas-llm-router** | ✅ "linked" | `pkg/pipeline`, `pkg/scan`, `pkg/extract`, `pkg/types` | **Scans → blocks/reports. Never redacts** (§1.1) |
 | **tas-mcp** | ✅ "MCP Proxy (linked)", with its own integration section | **`pkg/extract` only** | **Reduction. No scanning at all** — it uses Gatekeeper as a text reducer, not a gatekeeper |
-| **audimodal** | ✅ listed | — | **Nothing.** Not in `go.mod` |
+| **audimodal** | ✅ listed | — (not in `go.mod`) | **Its own DLP** — `pkg/dlp`, 17 files / 4,736 lines, live in `cmd/dlpworker` + `cmd/assembler`. Gatekeeper was **extracted from it** (§4a) |
 | **aether-be** | ✅ listed | — | **Nothing.** Not in `go.mod` |
 
 So the "unified content scanning layer shared across TAS services" is **one
@@ -76,9 +76,11 @@ Three reasons, in descending order of force:
 (Part B); attestation so the two don't double-scan (Part C); the cache
 interaction (§6).
 
-**Out:** audimodal / aether-be integration (they have none; separate work, no
-caching dependency). Rewriting `Gatekeeper/CLAUDE.md` — a docs fix, tracked
-separately (§10.4).
+**Also in:** audimodal (Part D) — **not** a greenfield integration; it is a
+*migration* off a live 4,736-line DLP of its own (§5).
+
+**Out:** aether-be (no scanning, no DLP, no caching dependency — a separate
+question). Rewriting `Gatekeeper/CLAUDE.md` — a docs fix (§10.4, G5).
 
 ---
 
@@ -189,6 +191,78 @@ has per-server config (per-server `spec.reduce` opt-in), so per-server
 
 ---
 
+## 4a. Part D — audimodal: a migration, not an integration
+
+**audimodal is the one service that already has real DLP.** "Integrating
+Gatekeeper" here means **retiring `pkg/dlp` in favour of Gatekeeper** — a
+consolidation with regression risk, not an addition.
+
+- `audimodal/pkg/dlp` — **17 Go files, 4,736 lines**: `patterns/`, `compliance/`,
+  `scanner/`, `service.go`, `interfaces.go`, `types/`.
+- **It is live**, wired into two binaries: `cmd/dlpworker` (a dedicated DLP
+  worker) and `cmd/assembler`.
+- It has a real test suite encoding expected behaviour — `ssn_test`,
+  `creditcard_test`, `hipaa_test`, `gdpr_test`, `pci_test`, `ccpa_test`, plus
+  benchmarks.
+- **Gatekeeper was extracted *from* it.** `Gatekeeper/CLAUDE.md` §"Migration from
+  Existing Code" literally says to take the DLP pipeline and PII patterns from
+  audimodal. This is the parent, not a new consumer.
+
+### 4a.1 The migration is a coverage *gain* — verified, not assumed
+
+The obvious fear is that swapping a working 4.7k-line DLP for the library
+extracted from it loses detections. **The opposite is true:**
+
+| | audimodal `pkg/dlp` | Gatekeeper |
+|---|---|---|
+| **PII matchers** | **5** — ssn, credit_card, email, phone_number, ip_address (`patterns/matchers.go`) | **21** (`configs/rules/pii.yaml`) |
+| **Also detects** | — | bank_account, passport, drivers_license, date_of_birth, address, name, medical_record_number |
+| **Secrets** | **none** | aws_access_key, aws_secret_key, azure_key, gcp_key, api_key, jwt_token, oauth_token, private_key, connection_string |
+| **Compliance** | ccpa, gdpr, hipaa, pci-dss | + sox, soc2, eu_ai_act, iso_27001, nist_ai_rmf, nist_csf |
+| **Injection** | **none** | ✅ `injection.yaml` |
+
+Gatekeeper is a **strict superset** of audimodal's matcher set.
+
+> **The sharpest argument isn't consolidation — it's the secrets gap.** audimodal
+> ingests customer documents and **cannot detect a cloud credential in one**. No
+> AWS key, no private key, no connection string. A customer uploading a config
+> file, a `.env`, a runbook, or a support export puts credentials through a
+> pipeline that has no matcher for them. Gatekeeper has had those patterns the
+> whole time; audimodal just never got them, because the extraction went one way
+> and never came back.
+
+### 4a.2 What the migration must not break
+
+- **Behaviour parity on the 5 shared matchers.** audimodal's tests encode the
+  current contract (SSN/credit-card edge cases, framework mappings). **Port the
+  test suite and run it against Gatekeeper** — it is the migration's acceptance
+  gate, and it is the reason to do this incrementally rather than by deletion.
+- **False-positive rate.** Going 5 → 21 matchers on document content will surface
+  new findings. On document ingestion that means new *blocks* or *quarantines*.
+  **Run the new matchers in log-only mode first** (the draft→enforce staging used
+  everywhere else in AIQG), or a routine upload starts failing on a `name` or
+  `address` match.
+- **Throughput.** `pkg/dlp` has benchmarks; document ingestion is bulk, unlike
+  the router's per-request path. ⚠️ Gatekeeper's speed story is Hyperscan, but
+  **prod builds `nohs`** (the regexp engine) — so the migration must be
+  benchmarked against `pkg/dlp` **as actually built**, not against the Hyperscan
+  number in Gatekeeper's docs.
+- **The `dlpworker` binary is a product surface**, not just a library call. Its
+  interface and outputs may be depended on downstream.
+
+### 4a.3 Direction: adapter first, deletion later
+
+Do **not** rip out `pkg/dlp`. Put Gatekeeper behind audimodal's existing
+`dlp.Interfaces` seam (it already has one), run **both** engines in shadow on
+real ingestion traffic, diff the findings, and retire `pkg/dlp` only once the
+diff is understood. The shadow step is cheap and it is the only way to learn the
+false-positive delta before it blocks a customer upload.
+
+This mirrors the discipline that has already paid twice in this workstream: the
+P0 probe measures before enabling, and C4's S1 shadows before serving.
+
+---
+
 ## 5. Part C — attestation, so we don't scan twice
 
 `Gatekeeper/pkg/attest` exists and the router already sets
@@ -230,10 +304,18 @@ for deploying Databunker once rather than working around it twice.
 | **G3** | **Databunker + attestation** | Deploy Databunker; `EnableAttestation = true`; MCP mints, router honors → skip rate. Unblocks G4. | Skip rate > 0; measured |
 | **G4** | **Tokenize round-trip** | `WithTokenizer` + `EnableTokenization`; outbound detokenize incl. **streaming** (§3.3); authorization + `LogAudit`. | PII-subject route preserves answer quality |
 | **G5** | **Docs** | Correct `Gatekeeper/CLAUDE.md` to the real surface (§1). | — |
+| **G6** | **audimodal: shadow** | Gatekeeper behind audimodal's `dlp.Interfaces` seam; run **both** engines on real ingestion; diff findings; port `pkg/dlp`'s test suite as the parity gate; benchmark **`nohs`-built** vs `pkg/dlp`. | FP delta understood; parity on the 5 shared matchers |
+| **G7** | **audimodal: cut over** | Enable the 16 new matchers **log-only** first (secrets especially), then enforce; retire `pkg/dlp`. | No routine-upload regression |
 
 **G1 alone unblocks C1/C4** — it's the only hard caching dependency, and it needs
-nothing deployed. G2 is the security win. G3/G4 are the "do we run Databunker"
-decision, and should be taken as one.
+nothing deployed. G2 is the security win on the LLM path. **G6/G7 close the
+secrets gap on the document path** (§4a.1) and are independent of everything
+else — they touch no caching, no Databunker, no attestation. G3/G4 are the "do we
+run Databunker" decision, and should be taken as one.
+
+**These are four independent tracks**, deliberately: G1 (caching precondition),
+G2 (MCP tool-result scanning), G6/G7 (audimodal consolidation + secrets), G3/G4
+(Databunker). Only G3→G4 has a hard ordering.
 
 ---
 
@@ -257,7 +339,11 @@ decision, and should be taken as one.
    `WithTokenizer` + outbound detokenize + streaming.
 2. **tas-mcp** — G2: `pkg/scan` in `internal/reduction`; scan→redact→reduce at
    `reducing_processor.go:128`; per-server trust tier.
-3. **aether-shared/k8s-shared-infrastructure** — G3: Databunker deployment +
+3. **audimodal** — G6: Gatekeeper behind the `dlp.Interfaces` seam; dual-run +
+   finding diff; port `pkg/dlp` tests as the parity gate; benchmark `nohs` vs
+   `pkg/dlp`. G7: enable the 16 new matchers log-only → enforce; retire
+   `pkg/dlp`. (Add `Gatekeeper` to `go.mod` — it isn't there today.)
+4. **aether-shared/k8s-shared-infrastructure** — G3: Databunker deployment +
    key custody.
 4. **Gatekeeper** — G5: correct `CLAUDE.md`; consider a nil-tokenizer guard in
    `tokenizeFindings` (today it's guarded only at the call site,
