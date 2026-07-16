@@ -298,6 +298,75 @@ Caveat: `ResolvePrefix` covers the **messages** tier. The **tools+system** tier
 (§4.1) — probably the larger prize — isn't hashed today. Extending the same
 normalizer to hash `(model, tools, system)` is small and self-contained.
 
+### 9.1 Production evidence (Loki, 30 days, measured 2026-07-16)
+
+Queried `{namespace="tas-llm-router", container="llm-router"}` over 30d:
+
+| | |
+|---|---|
+| `chat/completions` requests | **341** |
+| AIQG response events parsed | **168** |
+| Models | `claude-haiku-4-5` (156 events, 540,908 input tok) · `claude-opus-4-6` (12 events, 372 input tok) — **100% Anthropic** |
+| Total prompt tokens | **541,280** |
+| Total completion tokens | **13,356** |
+| **Input : output ratio** | **41 : 1** |
+| Total cost | **$0.8832** |
+| **Events with any `cache_*` token** | **0** |
+| **Nonzero cache tokens, ever** | **0** |
+
+**Not one cached token in 30 days**, across 168 real Anthropic requests. Absence is
+conclusive rather than ambiguous: `builder.go:491` populates the fields only
+`if routing.CacheCreationTokens > 0 || routing.CacheReadTokens > 0`, and they are
+`omitempty` — so a missing key means a true zero, not a logging gap.
+
+**The read side is fully wired and has never fired.** The whole chain exists:
+`provider.go:199` → `types.Usage` (`responses.go:38`) → `StampTokenUsage`
+(`server.go:779`) → `aiqg_routing.go:194` → `builder.go:491` → the event's
+`token_accounting` block — plus `CacheAwareTotalCostUSD` and `pkg/clear/cost.go`'s
+`CacheAwareCost` with the correct 1.25× write / 0.10× read multipliers.
+
+> **We built, tested, and deployed complete cache-aware accounting for a feature
+> the gateway cannot turn on.** That is §1 restated as an artifact: not an
+> oversight of analysis, but a gap in the request path that the analysis layer
+> already anticipated.
+
+The **41:1 input:output ratio** is exactly the input-dominated shape
+`AIQG_CACHING_PRIMER.md` §1 describes — the shape prompt caching exists to fix.
+One observed request spent **70,122 prompt tokens on 4 completion tokens**, on
+Haiku 4.5 (minimum cacheable prefix 4096 — clears it 17× over).
+
+**Two honest limits on this evidence:**
+
+1. **Volume is trivial** — $0.88 over 30 days. This is a test/demo cluster, so the
+   *absolute* saving forgone is a rounding error and proves nothing about
+   production value. What it proves is **structural**: the mechanism is inert.
+2. **It does not show we are losing money.** Much of this traffic is
+   latency-experiment flows (`flow_id: latexp-60000-*`) whose padding is plausibly
+   unique per request — and a cache never hits on a prefix that never repeats.
+   **Whether these prefixes repeat is exactly what P0 measures**, and is the
+   difference between "the lever is unavailable" (proven here) and "the lever
+   would pay" (not yet shown).
+
+### 9.2 Observability gaps found while measuring
+
+Incidental, but worth fixing — file separately, do not fold into this feature:
+
+- **`llm-router` and `llm-router-aiqg` are indistinguishable in Loki.** Both
+  deployments run in `tas-llm-router` with the **same container name**
+  (`llm-router`), and the log stream carries **no `pod` or `app` label** — only
+  `container` and `job`. Every query in §9.1 necessarily aggregates both. Since
+  Plan #7's shadow reduction is live on **`llm-router-aiqg` only**, per-deployment
+  attribution is not currently possible from logs.
+- **The `aiqg` namespace does not appear in Loki's `namespace` label values**,
+  despite being present in Alloy's on-disk regex
+  (`alloy-configmap.yaml:37`) and active in-cluster for 41d. Either the deployed
+  ConfigMap drifted from the repo, or nothing there logs. Relevant because
+  `aiqg-dashboard-be` lives there.
+- **The Loki ingress fails TLS verification** (`https://loki.tas.scharber.com` →
+  `curl exit 60`); the internal `tas-ca-issuer` CA isn't trusted by default
+  clients, so the CLAUDE.md port-forward fallback is currently the *only* working
+  path, not a fallback.
+
 ---
 
 ## 10. Phasing
