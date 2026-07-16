@@ -443,17 +443,77 @@ before concluding anything:
 | **Unstable tool list** — tools render at position 0, so a per-request tool set caches nothing | P0 measures it; surface as a bug against the origin, don't paper over it |
 | **Origin sends `cache_control` we override in `auto`** | Documented precedence; `passthrough` and `off` always available |
 | **Silent zero-hit** | Alert on `cache_read_tokens == 0` for `auto` routes (§8) |
-| **Redaction instability would break prefixes** | ✅ **Checked — not a risk.** Every Gatekeeper strategy is deterministic and content-derived: `generateToken` and `generateHash` are SHA-256 of the value (`Gatekeeper/pkg/scan/redaction.go:295,302`), placeholders are a static map, masking is character-derived. Redaction is **cache-safe**, and the redacted form is *canonical* — it normalizes away PII variance. ⚠️ The separate **Databunker** tokenize path (`pkg/tokenize/databunker.go`) is **not** verified here — if it mints vault tokens per call rather than per value, it would break prefixes (§11 Q2) |
+| **Redaction instability would break prefixes** | ✅ **Not a risk — for a blunter reason than expected: the router does not redact at all** (§11.1). Nothing mutates the prompt between the client and the vendor, so there is no transform that could destabilize a prefix. (Were redaction enabled, it would still be safe: every `pkg/scan` strategy is deterministic and content-derived — `generateToken`/`generateHash` are SHA-256 of the value, `redaction.go:295,302`.) |
 | **Reduction re-editing the cached prefix** | Reduce-at-source only — already the design (`AIQG_CACHE_SAFE_REDUCTION.md`); this doc is the reason that discipline pays |
+
+### 11.1 🚨 The router does not redact — it scans and blocks
+
+Found while resolving Q2. Verified end-to-end; it invalidates a premise in the
+sibling caching docs, so it is recorded here rather than in a comment.
+
+**`tas-llm-router` never modifies prompt content. It scans, and it blocks or
+reports. Content reaches the vendor byte-for-byte as the client sent it.**
+
+The chain, each link checked:
+
+| Link | Fact |
+|---|---|
+| Router → pipeline | `pipeline.NewProcessor(scanner, WithConfig(procConfig))` — **no `WithTokenizer`** (`internal/gatekeeper/gatekeeper.go:149`) |
+| Tokenization | `EnableTokenization` unset by `DefaultProcessorConfig()` → **false**; call double-guarded (`default_processor.go:184`) |
+| Pipeline redaction | **The pipeline never redacts.** `RedactionEngine` appears only in `pkg/scan`; the pipeline's *only* content-mutating path is the disabled tokenizer |
+| Scanner | `ScanWithRedaction` exists (`default_scanner.go:406`) but the pipeline calls plain `Scan`. The engine is used only for `GeneratePreview` (safe finding display, `:262`) |
+| Inbound scan | `ScanMessages` extracts text into a *separate* string to scan; it never mutates `messages`. The handler then blocks (403), sets `X-TAS-Scan-Status`, and stamps finding counts — **it never rewrites `req.Messages`** (`server.go:641-679`) |
+| Outbound scan | Same shape: scan → `ShouldBlock` → block or pass (`server.go:926`) |
+| Result | `ProcessResult.RedactedContent` is never populated, and no router code reads it |
+
+**Why this matters here (mildly):** the pre-scan vs post-scan hashing question in
+§9 is **moot** — pre-scan and post-scan content are identical, so `cachePrefixHash`
+is exact rather than conservative. The documented under-count bias cannot occur
+today. Good news, and it simplifies P0.
+
+**Why it matters a lot next door (the real point):** both sibling designs assume a
+redaction that does not exist.
+
+- [`AIQG-CACHING.md`](AIQG-CACHING.md) §2/§3/§5 and
+  [`AIQG-SEMANTIC-CACHING.md`](AIQG-SEMANTIC-CACHING.md) §4.1 specify caching the
+  **"post-scan (redacted) prompt"** so the cache "never keys on or stores raw
+  PII". **Today, post-scan == pre-scan.** A cache built on that premise as written
+  would store **raw PII bodies at rest in Redis**, TTL'd but unredacted — while
+  the doc claims the opposite.
+- The semantic design's claim that redaction is a **hit-rate win** (it
+  "normalizes away the PII that would otherwise make every prompt unique") is
+  likewise inoperative: there is nothing normalizing anything.
+
+**This does not break those designs — it converts an assumed property into an
+explicit prerequisite.** Enabling redaction in the router is a precondition of
+any response-cache work (C1 or C4), not a detail of it. Sequenced correctly, it
+is also cheap: the machinery exists (`ScanWithRedaction`, a deterministic
+`RedactionEngine`), it is simply not wired.
+
+Note this is **orthogonal to prompt caching** (this doc): vendor prompt caching
+sends the same bytes either way and stores nothing on our side. The prerequisite
+lands on the *response*-caching docs, which persist bodies.
 
 **Open questions:**
 
 1. **Default mode** — `passthrough` (recommended, §5) or `auto`? **P0 answers it
    with data; don't decide now.** *Owner: whoever reads the P0 numbers.*
-2. **Databunker tokenize determinism** — does `pkg/tokenize/databunker.go` return a
-   stable token per value, or a fresh one per call? A per-call token breaks *both*
-   prompt caching and the §9 linkage index. **Verify before P2.** The in-band
-   `pkg/scan/redaction.go` path is confirmed safe.
+2. ~~**Databunker tokenize determinism**~~ — ✅ **RESOLVED: not a blocker, because
+   it is not in the router's path at all.** The Databunker tokenizer is dead code
+   here, triple-gated:
+   - The router never calls `WithTokenizer` — it builds
+     `pipeline.NewProcessor(scanner, pipeline.WithConfig(procConfig))`
+     (`internal/gatekeeper/gatekeeper.go:149`), so `p.tokenizer` is **nil**.
+   - `DefaultProcessorConfig()` never sets `EnableTokenization`
+     (`Gatekeeper/pkg/pipeline/processor.go:135`) → Go zero value → **false**.
+     (It *does* populate `TokenizeTypes`, which reads as configured tokenization
+     and is why this looked live.)
+   - The call is guarded on both: `if p.config.EnableTokenization &&
+     p.tokenizer != nil && …` (`default_processor.go:184`).
+   - `ProcessResult.RedactedContent` is therefore never populated — and the
+     router never reads it regardless.
+
+   **The bigger finding this surfaced is §11.1.**
 3. **OpenAI automatic caching** — exact threshold and behavior unverified (§6).
    Needed only to report `n/a` honestly, not for v1 function.
 4. **Does `auto` override a client's `cache_control`, or merge?** Recommend

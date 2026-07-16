@@ -179,8 +179,7 @@ round-trip** for shadow reduction — the L1 embed can share it.
 
 ### 4.1 Gatekeeper ordering — scan first, then look up
 
-Both orderings are defensible; only one is safe. **Scan before lookup, and key on
-the post-scan (redacted) prompt:**
+Both orderings are defensible; only one is safe. **Scan before lookup:**
 
 - A lookup *before* scanning means a **cache hit bypasses Gatekeeper entirely** —
   a policy change would not apply to cached traffic, and content that *should* be
@@ -188,8 +187,53 @@ the post-scan (redacted) prompt:**
   bypass door.
 - **Never store unscanned bodies.** A cache is a persistence layer; unscanned PII
   in Redis is PII at rest.
-- Redaction is a **hit-rate win**, not just a tax: it normalizes away the PII that
-  would otherwise make every prompt unique.
+
+> ### 🚨 4.1.1 The redaction this section assumed does not exist
+>
+> An earlier revision said to "key on the post-scan (redacted) prompt, so we never
+> key on or store raw PII", and called redaction a hit-rate win that "normalizes
+> away the PII that would otherwise make every prompt unique". **Both claims are
+> inoperative today.** Verified end-to-end (full chain in
+> [`AIQG-PROMPT-CACHE-CONTROL.md`](AIQG-PROMPT-CACHE-CONTROL.md) §11.1):
+>
+> **`tas-llm-router` never redacts. It scans, then blocks or reports.** The
+> inbound handler extracts message text into a *separate* string to scan, checks
+> `ShouldBlock`, sets `X-TAS-Scan-Status`, stamps finding counts — and **never
+> rewrites `req.Messages`** (`server.go:641-679`). The pipeline's only
+> content-mutating path is a Databunker tokenizer that is nil and disabled
+> (`gatekeeper.go:149`, `default_processor.go:184`). Content reaches the vendor
+> byte-for-byte as sent.
+>
+> **So `post-scan == pre-scan`, and a cache built on this section as written would
+> store raw PII bodies at rest in Redis** — TTL'd but unredacted — while claiming
+> it does not. That is precisely the failure §11 exists to prevent, and it would
+> have shipped as a *documented guarantee*.
+>
+> **This doesn't sink the design; it promotes an assumed property to an explicit
+> prerequisite.** Wiring redaction in the router is a **precondition of C1 and
+> C4**, not a detail inside them. It's cheap — the machinery exists
+> (`ScanWithRedaction` at `default_scanner.go:406`, a deterministic
+> `RedactionEngine`), it is simply not connected.
+>
+> **→ Designed in [`AIQG-GATEKEEPER-INTEGRATION.md`](AIQG-GATEKEEPER-INTEGRATION.md)**
+> (stage **G1** — no new infrastructure; it is the only hard caching dependency).
+> That doc also carries the finding that redaction is **lossy**, so it can't just
+> be switched on: redacting `customer@acme.com` → `[EMAIL]` makes *"what company
+> is this customer from?"* unanswerable. Hence per-route, default off — and hence
+> `pkg/tokenize`'s round-trip (G4), which is gated on Databunker being deployed
+> (it isn't).
+>
+> Two consequences for this doc specifically:
+> - **§11's privacy story depends on it.** "The redacted form is canonical" and
+>   "already redacted at key time" are aspirational until redaction is wired.
+> - **The hit-rate argument is weaker than claimed.** Without redaction, PII
+>   variance *does* make each prompt unique — which lowers the reuse rate that
+>   §18 Q5 asks S1 to measure. Redaction-first would raise it. Measure with the
+>   prerequisite in place, or the number understates the ceiling.
+>
+> (Vendor **prompt** caching is unaffected — it sends the same bytes either way
+> and stores nothing on our side. This lands only on the *response*-caching
+> designs, which persist bodies.)
 
 ---
 
@@ -751,7 +795,7 @@ C4 in `AIQG-CACHING.md` §10 expands to:
 
 | | Stage | Contents | Gate to advance |
 |---|---|---|---|
-| **S0** | **Infra prerequisite** | **Redis 8 upgrade** for `redis-shared` (or pgvector fallback) + **licensing sign-off** (§18 Q1) + TEI deployment w/ `langcache-embed-v3-small`. Fix `ollama.yaml`'s kustomization/model-pull gap regardless (§6). | `FT.CREATE` works; TEI serves 384-dim |
+| **S0** | **Prerequisites** | **Wire Gatekeeper redaction in the router** (§4.1.1 — today it scans but never redacts, so this design's privacy guarantee is unmet and its hit-rate argument is inoperative). Plus: **Redis 8 upgrade** for `redis-shared` (or pgvector fallback) + **licensing sign-off** (§18 Q1) + TEI deployment w/ `langcache-embed-v3-small`. Fix `ollama.yaml`'s kustomization/model-pull gap regardless (§6). | Redaction wired; `FT.CREATE` works; TEI serves 384-dim |
 | **S1** | **Shadow mode** | Full cascade wired, **serving nothing**. Embed, search, run L2, log what *would* have hit + similarity. Zero risk, real distributions. Mirrors the shadow-reduction precedent already at `server.go:666`. | ≥2 weeks of similarity distributions + a labeled pair set |
 | **S2** | **Calibration + enable** | Offline sweep (§9.2) → per-route thresholds. Enable on **one** qualifying route (FAQ). `EmbeddingsCache`. Full metrics + alerts. | hit rate > 0 **and** sampled FPR within budget |
 | **S3** | **Accounting, UI, streaming** | `semantic_hit` split in Cache panel / Cost report / Traffic Explorer. Streaming replay — ⚠️ **vllm-sr [#913](https://github.com/vllm-project/semantic-router/issues/913): a cache hit breaks SSE (`!!!!...`)**; a real Go implementation hit this. LiteLLM re-chunks at 5 chars; Portkey just refuses. | — |

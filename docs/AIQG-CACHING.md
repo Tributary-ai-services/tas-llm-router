@@ -54,6 +54,25 @@ prompt, so we never key on or store raw PII) and **stores the post-outbound-scan
 response** (so a hit is already safe to return). It's checked **after** the
 experiment resolver so experiment-claimed requests can bypass it.
 
+> 🚨 **Prerequisite, verified 2026-07-16: the redaction this depends on is not
+> wired.** `tas-llm-router` scans and then **blocks or reports — it never
+> modifies prompt content**. The inbound handler never rewrites `req.Messages`
+> (`server.go:641-679`); the pipeline's only content-mutating path is a
+> Databunker tokenizer that is nil and disabled (`gatekeeper.go:149`,
+> `default_processor.go:184`). **So `post-scan == pre-scan`, and C1 as written
+> would store raw PII bodies at rest in Redis while claiming it does not** — the
+> §5/§11 privacy posture is unmet, not merely imperfect.
+>
+> Wiring redaction (`ScanWithRedaction` + the deterministic `RedactionEngine`
+> already exist in `pkg/scan`) is a **C1 precondition**, not a C1 detail.
+> **→ Designed in [`AIQG-GATEKEEPER-INTEGRATION.md`](AIQG-GATEKEEPER-INTEGRATION.md)**,
+> stage **G1** — no new infrastructure required. Note redaction is **lossy** and
+> so is per-route/default-off, not a global switch; the utility-preserving
+> tokenize round-trip (G4) is gated on Databunker, which is **not deployed**.
+> Full chain: [`AIQG-PROMPT-CACHE-CONTROL.md`](AIQG-PROMPT-CACHE-CONTROL.md)
+> §11.1; semantic-tier consequences:
+> [`AIQG-SEMANTIC-CACHING.md`](AIQG-SEMANTIC-CACHING.md) §4.1.1.
+
 ---
 
 ## 3. Cache key (exact-match, v1)
