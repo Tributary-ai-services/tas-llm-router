@@ -160,13 +160,27 @@ results. Rules (see `AIQG-EXPERIMENTS-RUNNER.md`):
 
 ## 9. Semantic cache (v2)
 
-Embedding-based near-match (serve a cached answer for a *similar* prompt):
-- Needs an embedding model + vector store + a similarity threshold.
-- Higher value (catches paraphrases) but higher risk (serving a "close" answer
-  to a materially different question) — gate behind a conservative threshold,
-  per-workflow opt-in, and a quality check (the §6 quality ladder / judge can
-  validate semantic-hit acceptability offline).
-- Defer until exact-match v1 is proven and the embedding infra is in place.
+**→ Fully specified in [`AIQG-SEMANTIC-CACHING.md`](AIQG-SEMANTIC-CACHING.md)**
+(supersedes this section; closes issue #97). Summary of what that design concluded:
+
+- Embedding-based near-match (serve a cached answer for a *similar* prompt).
+  Needs an embedding model + vector store + a similarity threshold — **and a
+  verification gate, which is the part this section originally missed.**
+- **A conservative threshold is not sufficient.** Measured false-hit rates floor at
+  3–13% for threshold-only designs, and pairs like *"Chase Sapphire"* vs *"Chase
+  Sapphire **Reserve**"* sit at **cosine 0.99** — above any shippable threshold.
+  The design is therefore a **cascade** (exact → candidate generation →
+  verification → async judge), not a lookup. The threshold is candidate
+  generation, not the decision.
+- **Blocked on infra**: the deployed `redis:7-alpine` (7.4.7) has **no modules and
+  no vector index** (`FT.CREATE` doesn't exist), and pgvector is **unavailable** in
+  the stock `postgres:15-alpine`. Semantic caching needs a **Redis 8 upgrade** (or
+  pgvector) before any code — and Redis 8's AGPLv3 arm needs legal sign-off.
+- **The economics are a latency story, not a cost story**: at a safe threshold
+  (~0.97 ⇒ 5–10% hit rate) the net saving is ~$6–12/month per $200 of spend. The
+  hit rate that makes the cost case is where 7–15% of hits are wrong.
+- **Still defer until exact-match v1 (C1) is proven.** C1 is also the L0 tier of
+  the cascade, so it is a hard dependency, not just sequencing.
 
 ---
 
