@@ -673,22 +673,20 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			if rs := red.Steps.Relevance; rs != nil {
 				rel = gatekeeper.RelevanceOverride{Threshold: rs.Threshold, TopK: rs.TopK, Ratio: rs.TopKRatio}
 			}
-			// Active applies to the sampled fraction (the ramp knob); the
-			// global break-glass kill-switch downgrades active → shadow. The
-			// ramp remainder routes normally (projected fields still emitted),
-			// while shadow mode measures on its sampled fraction. (Plan #7
-			// Phase 4 slice A.)
-			sampled := sampleHit(red.SampleRate)
-			switch {
-			case red.Applies() && !s.extractionApplyDisabled && sampled:
-				// APPLY (active): reduce the largest context message in place
-				// BEFORE routing, so the vendor sees the smaller payload.
-				// Synchronous — the added latency is real and measured.
-				s.applyReductionInline(r.Context(), &req, query, rel, "active")
-			case red.RunsExtractor() && sampled:
-				// SHADOW (measure-only): shadow mode, or a kill-switched active
-				// bundle downgraded to measurement. Runs concurrently with the
-				// vendor call so it adds no client latency.
+			// Phase 0 — cache-safety (AIQG_CACHE_SAFE_REDUCTION.md §6): the LLM
+			// gateway is now READ-ONLY. It MEASURES reduction but never mutates
+			// the payload. In-place per-turn reduction (applyReductionInline)
+			// busted prompt caching by editing already-cached content every turn
+			// with a query-dependent rule — so cheap 0.10× cache-reads flipped
+			// back to full/creation rate and cost could rise while the metric
+			// reported a saving. It's retired. Active *application* of reduction
+			// moves to the MCP proxy, at the source, once (§2/§9.A). Both active-
+			// and shadow-configured bundles now measure only (Mode="shadow"),
+			// which is cache-safe (nothing is mutated) — the projected fields on
+			// the event still carry the bundle's configured intent.
+			if sampled := sampleHit(red.SampleRate); sampled {
+				// Measure-only, concurrent with the vendor call → no client
+				// latency and no cache impact.
 				msgs := req.Messages
 				parentCtx := context.WithoutCancel(r.Context())
 				middleware.ExpectReductionMeasurement(parentCtx)
@@ -1249,59 +1247,13 @@ func parseOverrideReduction(override json.RawMessage) *policy.ReductionPolicy {
 	return rp
 }
 
-// largestReducibleMessageIndex returns the index of the biggest context
-// message to reduce — the longest by text length, EXCLUDING the latest user
-// message (the relevance anchor / question, which must stay intact). Returns
-// -1 when there's nothing safe to reduce (e.g. a lone question).
-func largestReducibleMessageIndex(messages []types.Message) int {
-	lastUser := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			lastUser = i
-			break
-		}
-	}
-	best, bestLen := -1, 0
-	for i, m := range messages {
-		if i == lastUser {
-			continue
-		}
-		if n := len(messageContentString(m.Content)); n > bestLen {
-			best, bestLen = i, n
-		}
-	}
-	return best
-}
-
-// applyReductionInline reduces the largest context message in place before
-// routing, so the vendor sees the smaller payload (Plan #7 Phase 3 apply).
-// Synchronous by design — the added latency is part of what an extraction
-// experiment measures. No-op (payload unchanged, no stamp) when there's
-// nothing to reduce or the extractor didn't shrink it.
-func (s *Server) applyReductionInline(ctx context.Context, req *types.ChatRequest, query string, rel gatekeeper.RelevanceOverride, mode string) {
-	idx := largestReducibleMessageIndex(req.Messages)
-	if idx < 0 {
-		return
-	}
-	original := messageContentString(req.Messages[idx].Content)
-	if original == "" {
-		return
-	}
-	mctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	reduced, m, err := s.gatekeeper.ReduceText(mctx, []byte(original), query, rel)
-	if err != nil || m == nil || len(reduced) == 0 || len(reduced) >= len(original) {
-		return // failed or didn't help → leave the payload unchanged
-	}
-	req.Messages[idx].Content = string(reduced)
-	middleware.StampReductionMeasurement(ctx, &events.ReductionMeasurement{
-		Mode:                    mode,
-		Sampled:                 true,
-		OriginalBytes:           m.OriginalBytes,
-		ExtractedBytes:          m.ExtractedBytes,
-		SizeAfterRelevanceBytes: m.SizeAfterRelevanceBytes,
-	})
-}
+// Retired (Phase 0, AIQG_CACHE_SAFE_REDUCTION.md §6): largestReducibleMessageIndex
+// + applyReductionInline performed single-pass, in-place, per-turn reduction of
+// the largest historical message. Editing already-cached content every turn with
+// a query-dependent rule busted prompt caching (cheap 0.10× reads flipped back to
+// full/creation rate). The gateway is now read-only (measures, never mutates);
+// active application of reduction moves to the MCP proxy, at the source, once
+// (§2/§9.A). gatekeeper.ReduceText remains for that at-source path.
 
 // extractResponseContent extracts text content from a ChatResponse.
 func extractResponseContent(resp *types.ChatResponse) string {
