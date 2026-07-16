@@ -778,7 +778,7 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 	// TokenAccounting + the clear.Cost / clear.Efficacy dimension
 	// scores. No-ops outside AIQG mode.
 	if resp.Usage != nil {
-		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CacheCreationTokens, resp.Usage.CacheReadTokens)
 	}
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
@@ -850,7 +850,7 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 		// delta typically on the second-to-last chunk. Both stampers
 		// are first-write-wins so safe to call on every chunk.
 		if chunk.Usage != nil {
-			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
 		}
 		for _, c := range chunk.Choices {
 			if c.FinishReason != "" {
@@ -939,7 +939,7 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	// (same as the non-retry path) so the response event carries
 	// TokenAccounting + Cost + Efficacy scores.
 	if resp.Usage != nil {
-		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CacheCreationTokens, resp.Usage.CacheReadTokens)
 	}
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
@@ -1369,7 +1369,7 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 		// delta typically on the second-to-last chunk. Both stampers
 		// are first-write-wins so safe to call on every chunk.
 		if chunk.Usage != nil {
-			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
 		}
 		for _, c := range chunk.Choices {
 			if c.FinishReason != "" {

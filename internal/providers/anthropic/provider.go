@@ -190,11 +190,14 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 				},
 			},
 		}
-		if message.Usage.InputTokens > 0 || message.Usage.OutputTokens > 0 {
+		if message.Usage.InputTokens > 0 || message.Usage.OutputTokens > 0 ||
+			message.Usage.CacheCreationInputTokens > 0 || message.Usage.CacheReadInputTokens > 0 {
 			finalChunk.Usage = &types.Usage{
-				PromptTokens:     int(message.Usage.InputTokens),
-				CompletionTokens: int(message.Usage.OutputTokens),
-				TotalTokens:      int(message.Usage.InputTokens + message.Usage.OutputTokens),
+				PromptTokens:        int(message.Usage.InputTokens),
+				CompletionTokens:    int(message.Usage.OutputTokens),
+				TotalTokens:         int(message.Usage.InputTokens + message.Usage.OutputTokens),
+				CacheCreationTokens: int(message.Usage.CacheCreationInputTokens),
+				CacheReadTokens:     int(message.Usage.CacheReadInputTokens),
 			}
 		}
 		select {
@@ -673,11 +676,14 @@ func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message
 
 	// Build usage information
 	var usage *types.Usage
-	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 ||
+		resp.Usage.CacheCreationInputTokens > 0 || resp.Usage.CacheReadInputTokens > 0 {
 		usage = &types.Usage{
-			PromptTokens:     int(resp.Usage.InputTokens),
-			CompletionTokens: int(resp.Usage.OutputTokens),
-			TotalTokens:      int(resp.Usage.InputTokens + resp.Usage.OutputTokens),
+			PromptTokens:        int(resp.Usage.InputTokens),
+			CompletionTokens:    int(resp.Usage.OutputTokens),
+			TotalTokens:         int(resp.Usage.InputTokens + resp.Usage.OutputTokens),
+			CacheCreationTokens: int(resp.Usage.CacheCreationInputTokens),
+			CacheReadTokens:     int(resp.Usage.CacheReadInputTokens),
 		}
 	}
 

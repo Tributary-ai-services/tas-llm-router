@@ -259,6 +259,21 @@ type TokenAccounting struct {
 	TotalCostUSD        float64 `json:"total_cost_usd"`
 	ModelPricingVersion string  `json:"model_pricing_version,omitempty"`
 
+	// --- Cache-aware accounting (Anthropic prompt caching) ---
+	// Additive + omitempty; populated only when the vendor reported cache
+	// tokens. PromptTokens above is uncached input only (matches the vendor's
+	// input_tokens); cache tokens are billed separately — creation at
+	// CacheWriteMultiplier (1.25×) and read at CacheReadMultiplier (0.10×) of
+	// the input rate. CacheAwareTotalCostUSD is the true billed cost
+	// (uncached·1.0 + creation·1.25 + read·0.10 + output); TotalCostUSD stays
+	// the legacy uncached-input+output figure for backward compatibility.
+	// See pkg/clear/cost.go CacheAwareCost + AIQG_CACHING_PRIMER.md §3.
+	CacheCreationTokens    int     `json:"cache_creation_tokens,omitempty"`
+	CacheReadTokens        int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationCostUSD   float64 `json:"cache_creation_cost_usd,omitempty"`
+	CacheReadCostUSD       float64 `json:"cache_read_cost_usd,omitempty"`
+	CacheAwareTotalCostUSD float64 `json:"cache_aware_total_cost_usd,omitempty"`
+
 	// --- Cost decomposition (CLEAR v0.2, Contract v1 — projected) ---
 	// All additive + omitempty; populated only for priced traffic when
 	// the decomposer runs. See pkg/clear/cost_decomposer.go and

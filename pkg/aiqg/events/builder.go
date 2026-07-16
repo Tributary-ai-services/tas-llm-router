@@ -62,6 +62,13 @@ type RoutingView struct {
 	CompletionTokens int
 	UsageSet         bool
 
+	// Cache-token breakdown from the vendor response, for cache-aware cost
+	// accounting. Anthropic reports these separately from PromptTokens
+	// (which is uncached input only). Zero when the response carried no
+	// cache tokens (no caching, or a non-Anthropic provider).
+	CacheCreationTokens int
+	CacheReadTokens     int
+
 	// Gatekeeper scan results. Inbound/Outbound are per-severity
 	// counts ("low"/"medium"/"high"/"critical" → int). ScanRan
 	// distinguishes "scan ran, no findings" from "scan never ran"
@@ -475,6 +482,21 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			ta.OutputCostUSD = (float64(completion) / 1000.0) * outputRate
 			ta.TotalCostUSD = ta.InputCostUSD + ta.OutputCostUSD
 			ta.ModelPricingVersion = clear.PricingVersion
+
+			// Cache-aware accounting: when the vendor reported cache tokens,
+			// price them at their real multiples of the input rate (creation
+			// 1.25×, read 0.10×) and record the true billed total. `prompt` is
+			// the uncached input (vendor input_tokens); cache tokens are
+			// separate. TotalCostUSD stays the legacy uncached+output figure.
+			if routing.CacheCreationTokens > 0 || routing.CacheReadTokens > 0 {
+				ca := clear.CacheAwareCost(routing.Vendor, routing.Model, prompt,
+					routing.CacheCreationTokens, routing.CacheReadTokens, completion, routing.UsageSet)
+				ta.CacheCreationTokens = routing.CacheCreationTokens
+				ta.CacheReadTokens = routing.CacheReadTokens
+				ta.CacheCreationCostUSD = ca.CacheCreationUSD
+				ta.CacheReadCostUSD = ca.CacheReadUSD
+				ta.CacheAwareTotalCostUSD = ca.TotalUSD
+			}
 
 			// Cost decomposition (CLEAR v0.2, Contract v1 — projected).
 			// Only on priced traffic; never fabricate waste otherwise.

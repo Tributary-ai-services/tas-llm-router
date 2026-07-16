@@ -99,7 +99,7 @@ func TestRouting_StampTokenUsage(t *testing.T) {
 		t.Errorf("UsageSet=true before stamping")
 	}
 
-	StampTokenUsage(ctx, 1000, 500)
+	StampTokenUsage(ctx, 1000, 500, 200, 800)
 	s := r.Snapshot()
 	if !s.UsageSet {
 		t.Errorf("UsageSet=false after stamping")
@@ -107,11 +107,15 @@ func TestRouting_StampTokenUsage(t *testing.T) {
 	if s.PromptTokens != 1000 || s.CompletionTokens != 500 {
 		t.Errorf("counts: prompt=%d completion=%d", s.PromptTokens, s.CompletionTokens)
 	}
+	if s.CacheCreationTokens != 200 || s.CacheReadTokens != 800 {
+		t.Errorf("cache counts: creation=%d read=%d", s.CacheCreationTokens, s.CacheReadTokens)
+	}
 
-	// First-write-wins: a later fallback path must not overwrite.
-	StampTokenUsage(ctx, 9999, 9999)
+	// First-write-wins: a later fallback path must not overwrite (cache too).
+	StampTokenUsage(ctx, 9999, 9999, 9999, 9999)
 	s2 := r.Snapshot()
-	if s2.PromptTokens != 1000 || s2.CompletionTokens != 500 {
+	if s2.PromptTokens != 1000 || s2.CompletionTokens != 500 ||
+		s2.CacheCreationTokens != 200 || s2.CacheReadTokens != 800 {
 		t.Errorf("StampTokenUsage not idempotent: %#v", s2)
 	}
 }
@@ -121,7 +125,7 @@ func TestRouting_StampTokenUsage(t *testing.T) {
 func TestRouting_StampTokenUsageZeroIsValid(t *testing.T) {
 	r := NewRouting()
 	ctx := WithRouting(context.Background(), r)
-	StampTokenUsage(ctx, 0, 0)
+	StampTokenUsage(ctx, 0, 0, 0, 0)
 	s := r.Snapshot()
 	if !s.UsageSet {
 		t.Errorf("UsageSet should be true after explicit (0,0) stamp")
