@@ -637,9 +637,19 @@ raw-passthrough route registered, so there's no escape hatch.
 > reduction *shrinks*. **Our own gateway currently forecloses the first one** —
 > the lever that pays without depending on repetition and without a wrong-answer
 > mode, i.e. the *safest and broadest* of the three. Fixing that is plausibly
-> worth more than this entire document, and it is a bounded change: add
-> `cache_control` to the content-part/system types and thread it to the provider.
-> It is **independent of semantic caching** and should not wait on it.
+> worth more than this entire document, and it is a bounded change. It is
+> **independent of semantic caching** and should not wait on it.
+
+**→ Designed separately in [`AIQG-PROMPT-CACHE-CONTROL.md`](AIQG-PROMPT-CACHE-CONTROL.md).**
+That doc adds a `TAS-Prompt-Cache: auto | passthrough | off` header and
+gateway-side breakpoint placement — because passthrough alone assumes every
+origin gets `cache_control` right, and they don't (the failure is silent: you
+just pay full price forever). It also lands two findings that matter here:
+**model routing silently voids the vendor cache** (caches are model-scoped, and
+we route), and the existing `linkage` prefix index is **already a live
+measurement of prompt-cache opportunity** — so that feature's "is it worth it"
+question is answerable from data we already collect, with no new code. **Sequence
+it ahead of C4.**
 
 Corollary for §8: stable JSON ordering is required for *our* key anyway — and
 `encoding/json` already gives it to us for free.
