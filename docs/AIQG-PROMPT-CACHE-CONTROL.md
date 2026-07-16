@@ -373,7 +373,7 @@ Incidental, but worth fixing — file separately, do not fold into this feature:
 
 | | Stage | Contents | Gate |
 |---|---|---|---|
-| **P0** | **Measure (no request changes)** | Hash `(model, tools, system)` with the §9 normalizer; log prefix-reuse rate + reuse-within-5m per route/tenant from existing traffic. Zero risk, zero vendor change. | Reuse ≥ 2 on some route |
+| **P0** ✅ | **Measure (no request changes)** — *implemented, pending deploy* | `pkg/aiqg/promptcache` (probe, 5m sliding window, tenant-scoped, `aiqg:pcp:` namespace) + `cachePrefixHash` (`internal/server/server.go`) + `StampCachePrefixHash` + `probePromptCache` in the AIQG middleware's deferred path. Emits `msg="aiqg prompt-cache probe"` with `prefix_seen`, `model`, `prompt_tokens`. Zero risk, zero vendor change. | Reuse ≥ 2 on some route |
 | **P1** | **Passthrough + `off`** | `cache_control` on `ContentPart`/system/tool types; thread to the Anthropic provider; `TAS-Prompt-Cache` header; `prompt_cache_mode` on events. Unblocks origins that already do it right. | — |
 | **P2** | **`auto`** | §4 placement, per-route enable on the routes P0 identified. Savings metric + zero-hit alert. | Measured savings > write premium |
 | **P3** | **Router-aware** | Model-stickiness within a conversation (§5.1); cache-state in the routing cost model; failover-cold-write visibility. | — |
@@ -381,6 +381,44 @@ Incidental, but worth fixing — file separately, do not fold into this feature:
 
 **P0 is the whole trick.** It converts "should the default be auto?" from an
 argument into a query against data we already have.
+
+### 10.1 Reading the P0 result
+
+Once deployed, the reuse rate is a Loki query — no new pipeline:
+
+```logql
+# reuse rate (the number that picks the default)
+sum(count_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" | json | prefix_seen="true" [7d]))
+  / sum(count_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" [7d]))
+
+# by model — a switch is a cold rebuild (§5.1), so this splits the tension out
+sum by (model) (count_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" | json | prefix_seen="true" [7d]))
+
+# the prize, in tokens that would have billed at 0.1x instead of 1.0x
+sum_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" | json | prefix_seen="true" | unwrap prompt_tokens [7d])
+```
+
+**Read it against the write premium, not against zero.** A route pays off when
+its prefix recurs ≥2× per window (§5); a 30% hit rate on 70k-token prefixes and
+a 30% hit rate on 500-token ones are very different calls, which is why
+`prompt_tokens` rides on every line.
+
+Three ways this reads ~0% that are **not** "caching wouldn't help" — check them
+before concluding anything:
+
+1. **No probe lines at all** → Redis unconfigured (`AIQG_LINKAGE_REDIS_URL`), so
+   the probe is nil. Absence of the metric, not absence of reuse.
+2. **All lines `prefix_seen=false` with high volume** → prefixes genuinely don't
+   recur (plausible for the `latexp-*` synthetic flows, §9.1), *or* an origin is
+   varying its system prompt per request — which is itself a finding worth
+   surfacing (§11's unstable-tool-list risk, same shape).
+3. **Few lines relative to `chat/completions`** → most traffic has no cacheable
+   span (no system prompt, no tools), so the hash is empty by design. That's a
+   real answer: there is nothing for §4.1 to cache.
+
+⚠️ Per §9.2, `llm-router` and `llm-router-aiqg` are **indistinguishable in
+Loki**, so these queries aggregate both deployments. Fix the labeling before
+attributing a rate to one of them.
 
 ---
 

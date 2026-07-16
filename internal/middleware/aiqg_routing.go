@@ -90,6 +90,13 @@ type Routing struct {
 	// the events builder to mint the AgentSurrogateID.
 	fingerprint string
 
+	// prompt-cache probe (docs/AIQG-PROMPT-CACHE-CONTROL.md §9, P0): canonical
+	// hash of the tools+system span a vendor cache breakpoint would cover.
+	// Measurement only — the middleware probes it against a TTL'd index to
+	// report whether this prefix recurred inside one cache lifetime. Empty when
+	// the request has nothing cacheable (no system text, no tools).
+	cachePrefixHash string
+
 	// experiments (Phase D): the experiment + variant that claimed this
 	// request. Stamped at request time (so the routing override + the event
 	// stamp use one decision). Empty when no experiment claimed it.
@@ -173,6 +180,10 @@ type RoutingSnapshot struct {
 	// when nothing fingerprintable.
 	Fingerprint string
 
+	// prompt-cache probe (P0): hash of the tools+system span a vendor cache
+	// breakpoint would cover. Empty when nothing is cacheable.
+	CachePrefixHash string
+
 	// experiments (Phase D): claiming experiment + variant. Empty when none.
 	ExperimentID      string
 	ExperimentVariant string
@@ -209,6 +220,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		PrefixHash:          r.prefixHash,
 		StateHash:           r.stateHash,
 		Fingerprint:         r.fingerprint,
+		CachePrefixHash:     r.cachePrefixHash,
 		ExperimentID:        r.experimentID,
 		ExperimentVariant:   r.experimentVariant,
 	}
@@ -260,6 +272,25 @@ func StampPrefixHash(ctx context.Context, hash string) {
 	defer r.mu.Unlock()
 	if r.prefixHash == "" {
 		r.prefixHash = hash
+	}
+}
+
+// StampCachePrefixHash records the canonical hash of the tools+system span a
+// vendor prompt-cache breakpoint would cover (docs/AIQG-PROMPT-CACHE-CONTROL.md
+// §9, P0). Measurement only — nothing derived from it reaches the vendor.
+// First-write-wins; empty is a no-op (nothing cacheable in this request).
+func StampCachePrefixHash(ctx context.Context, hash string) {
+	if hash == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cachePrefixHash == "" {
+		r.cachePrefixHash = hash
 	}
 }
 
