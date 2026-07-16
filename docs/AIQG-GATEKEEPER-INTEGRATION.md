@@ -70,17 +70,55 @@ Three reasons, in descending order of force:
 
 ---
 
-## 2. Scope
+## 2. Where scanning belongs — the rule
 
-**In:** wiring redaction in the router (Part A); Gatekeeper scanning in `tas-mcp`
-(Part B); attestation so the two don't double-scan (Part C); the cache
-interaction (§6).
+> **Scanning happens at the proxies and at ingest. Nowhere else.**
 
-**Also in:** audimodal (Part D) — **not** a greenfield integration; it is a
-*migration* off a live 4,736-line DLP of its own (§5).
+Those are the trust boundaries — where content crosses from untrusted to
+trusted, or from trusted out to a third party. Everything behind them is
+**interior** and must not re-scan; it **honors an attestation** instead (§5).
 
-**Out:** aether-be (no scanning, no DLP, no caching dependency — a separate
-question). Rewriting `Gatekeeper/CLAUDE.md` — a docs fix (§10.4, G5).
+| # | Boundary | Service | Direction | Today |
+|---|---|---|---|---|
+| 1 | **LLM proxy** | `tas-llm-router` | prompt in, vendor egress out | **Scans + blocks. Never redacts** (§1.1) → **G1** |
+| 2 | **MCP proxy** | `tas-mcp` | **ingress ← federated tools** (`TierExternal`) | **Nothing.** `pkg/extract` only — a reducer, not a gatekeeper → **G2** |
+| 3 | **Ingest** | `audimodal` | **ingress ← customer documents** | Own DLP: 5 matchers, **no secrets detection** → **G6/G7** |
+
+Everything else — `aether-be`, `tas-agent-builder`, `tas-workflow-builder`,
+`tas-mcp-servers` — is **interior by design**. Content reaching them has already
+crossed a boundary. Scanning there is duplicate work on the hot path and a second
+place for a matcher to disagree with itself.
+
+**This makes the three tracks one architecture rather than three chores.** Each is
+a boundary that is currently either unguarded, or guarded weaker than the library
+we already own:
+
+- **The MCP proxy is the only *completely* unguarded boundary** — and it is the one
+  taking `TierExternal` input from a dozen federated servers directly into LLM
+  prompts.
+- **Ingest is guarded but blind to secrets** — 5 matchers, zero credential
+  detection (§4a.1).
+- **The LLM proxy detects but cannot remediate** — it blocks or reports, never
+  redacts, which is exactly what C1/C4 assume it does.
+
+It also settles the aether-be question earlier revisions left open: **aether-be
+should not integrate Gatekeeper.** It is not a boundary; the correct posture is to
+trust the attestation minted upstream.
+
+> **Which is why attestation (§5) is load-bearing, not an optimization.** Without
+> it, "scan only at the boundary" has no enforcement mechanism — interior services
+> must either re-scan (defeating the rule) or trust nothing (defeating the point).
+> **G3 is what turns this rule from a convention into an invariant.** That raises
+> its priority above where §7 currently places it (§10 Q1).
+
+### 2.1 Scope
+
+**In:** G1 (LLM proxy redaction) · G2 (MCP proxy scanning) · G6/G7 (ingest
+migration + secrets) · G3 (attestation — the mechanism) · G4 (tokenize
+round-trip).
+
+**Out:** aether-be and every other interior service — **by design, not by
+deferral**. Rewriting `Gatekeeper/CLAUDE.md` is a docs fix (G5, §10.4).
 
 ---
 
@@ -307,15 +345,27 @@ for deploying Databunker once rather than working around it twice.
 | **G6** | **audimodal: shadow** | Gatekeeper behind audimodal's `dlp.Interfaces` seam; run **both** engines on real ingestion; diff findings; port `pkg/dlp`'s test suite as the parity gate; benchmark **`nohs`-built** vs `pkg/dlp`. | FP delta understood; parity on the 5 shared matchers |
 | **G7** | **audimodal: cut over** | Enable the 16 new matchers **log-only** first (secrets especially), then enforce; retire `pkg/dlp`. | No routine-upload regression |
 
-**G1 alone unblocks C1/C4** — it's the only hard caching dependency, and it needs
-nothing deployed. G2 is the security win on the LLM path. **G6/G7 close the
-secrets gap on the document path** (§4a.1) and are independent of everything
-else — they touch no caching, no Databunker, no attestation. G3/G4 are the "do we
-run Databunker" decision, and should be taken as one.
+**One track per boundary (§2), plus the mechanism:**
 
-**These are four independent tracks**, deliberately: G1 (caching precondition),
-G2 (MCP tool-result scanning), G6/G7 (audimodal consolidation + secrets), G3/G4
-(Databunker). Only G3→G4 has a hard ordering.
+| Boundary | Track | Needs deployed | Closes |
+|---|---|---|---|
+| **LLM proxy** | **G1** | nothing | Detects but can't remediate; **unblocks C1/C4** (its only hard dependency) |
+| **MCP proxy** | **G2** | nothing | The **only completely unguarded boundary** |
+| **Ingest** | **G6/G7** | nothing | **No secrets detection** on customer documents |
+| *(mechanism)* | **G3** | **Databunker** | Makes "scan at the boundary, honor inside" **enforceable** rather than advisory (§2) |
+| *(utility)* | **G4** | **Databunker** | Redaction without losing the answer (§3) |
+
+**The three boundary tracks are independent and need nothing deployed** — start
+any of them today, in any order. **G3 is the one that makes them an
+architecture** instead of three good deeds, and it is also what makes G2
+affordable (Gatekeeper targets >80% skip via attestation; until G3, G2 pays a
+full scan on every tool result). Only G3→G4 is hard-ordered.
+
+> **Priority note.** §7's ordering predates §2's rule. Now that attestation is
+> the enforcement mechanism and not a perf tweak, **G3 has a stronger claim than
+> its position here suggests** — but it is gated on the Databunker decision
+> (§10 Q1), which is why the boundary tracks are deliberately built to not wait
+> for it.
 
 ---
 
@@ -356,10 +406,20 @@ G2 (MCP tool-result scanning), G6/G7 (audimodal consolidation + secrets), G3/G4
 
 ## 10. Open questions
 
-1. **Do we run Databunker?** It gates A2 *and* attestation (§5) — two features,
-   one dependency. Deploying it once is likely cheaper than working around it
-   twice, but it is a new stateful, key-custody-bearing service in the request
-   path. **This is the decision; G1 deliberately doesn't wait on it.**
+1. **Do we run Databunker?** — **the decision, and §2 raises the stakes.** It gates
+   A2 *and* attestation. Attestation is no longer a performance optimization: it
+   is the **enforcement mechanism for "scan at the boundary, honor inside"**
+   (§2). Without it, the architecture is a convention that interior services can
+   only follow by re-scanning or by trusting blindly.
+
+   So the real question is narrower than "do we want tokenization": **does the
+   boundary rule get a mechanism?** If yes, Databunker (or another signing-key
+   source — attestation needs `GetSecret`, not the vault's tokenization) becomes
+   a platform dependency. If no, the rule stays advisory and §2's table is a
+   description of intent rather than an invariant.
+
+   **G1, G2, and G6/G7 all stand on their own without it** — each closes a real
+   gap at its own boundary. G3 is what makes them a *system*.
 2. **Databunker token determinism** — stable per value, or fresh per call? Per-call
    breaks the vendor prompt cache, our response cache, and the linkage prefix
    index. **Verify before G4.** (The in-band `pkg/scan` path is confirmed safe.)
@@ -367,9 +427,12 @@ G2 (MCP tool-result scanning), G6/G7 (audimodal consolidation + secrets), G3/G4
    model can still infer the domain), `replace` is strongest but most lossy,
    `hash` is stable and comparable but unreadable. Probably per-PII-type, not
    per-route.
-4. **Does `Gatekeeper/CLAUDE.md` describe an aspiration or a plan?** If audimodal
-   and aether-be integration is genuinely wanted, that's a roadmap item. If not,
-   the doc should stop claiming it. Either way it shouldn't read as done (§1).
+4. ~~**Does `Gatekeeper/CLAUDE.md` describe an aspiration or a plan?**~~ ✅
+   **Answered by §2: proxies and ingest, nowhere else.** So audimodal is **in**
+   (it *is* the ingest boundary — G6/G7), and **aether-be is out by design**, not
+   deferred. The doc should say that: not "shared across TAS services" (which
+   reads as everywhere, and is wrong in both directions), but *"enforced at the
+   three trust boundaries; interior services honor attestations."* G5.
 5. **Should redaction be enforced, or observed first?** Recommend log-only for
    one window per route (draft→enforce, matching policy staging) — the same
    discipline that made the P0 measurement worth trusting.
