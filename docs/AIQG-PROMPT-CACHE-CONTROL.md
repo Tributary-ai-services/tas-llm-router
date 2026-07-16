@@ -300,19 +300,25 @@ normalizer to hash `(model, tools, system)` is small and self-contained.
 
 ### 9.1 Production evidence (Loki, 30 days, measured 2026-07-16)
 
-Queried `{namespace="tas-llm-router", container="llm-router"}` over 30d:
+Queried `{namespace="tas-llm-router", service="llm-router-aiqg"}` over 30d.
+(Split by `service`, not `container` — both deployments share the container name
+`llm-router`, so `container=` aggregates them; see §9.2.)
 
-| | |
-|---|---|
-| `chat/completions` requests | **341** |
-| AIQG response events parsed | **168** |
-| Models | `claude-haiku-4-5` (156 events, 540,908 input tok) · `claude-opus-4-6` (12 events, 372 input tok) — **100% Anthropic** |
-| Total prompt tokens | **541,280** |
-| Total completion tokens | **13,356** |
-| **Input : output ratio** | **41 : 1** |
-| Total cost | **$0.8832** |
-| **Events with any `cache_*` token** | **0** |
-| **Nonzero cache tokens, ever** | **0** |
+| | `llm-router-aiqg` | `llm-router` |
+|---|---|---|
+| `chat/completions` requests | **339** | 2 (idle) |
+| AIQG response events parsed | **168** | 0 |
+| Models | `claude-haiku-4-5` (156, 540,908 input tok) · `claude-opus-4-6` (12, 372) — **100% Anthropic** | — |
+| Total prompt tokens | **541,280** | — |
+| Total completion tokens | **13,356** | — |
+| **Input : output ratio** | **40 : 1** | — |
+| Total cost | **$0.8832** | — |
+| **Events with any `cache_*` token** | **0** | 0 |
+| **Nonzero cache tokens, ever** | **0** | 0 |
+
+All AIQG traffic is `llm-router-aiqg`; the base `llm-router` deployment is
+effectively idle. Consistent with Plan #7's shadow reduction being live on
+`llm-router-aiqg` only.
 
 **Not one cached token in 30 days**, across 168 real Anthropic requests. Absence is
 conclusive rather than ambiguous: `builder.go:491` populates the fields only
@@ -347,25 +353,32 @@ Haiku 4.5 (minimum cacheable prefix 4096 — clears it 17× over).
    difference between "the lever is unavailable" (proven here) and "the lever
    would pay" (not yet shown).
 
-### 9.2 Observability gaps found while measuring
+### 9.2 Three suspected observability gaps — all three investigated, none real
 
-Incidental, but worth fixing — file separately, do not fold into this feature:
+An earlier revision of this doc reported three Loki gaps. **All three were
+artifacts of shallow checks and are withdrawn.** Recorded so nobody re-files
+them:
 
-- **`llm-router` and `llm-router-aiqg` are indistinguishable in Loki.** Both
-  deployments run in `tas-llm-router` with the **same container name**
-  (`llm-router`), and the log stream carries **no `pod` or `app` label** — only
-  `container` and `job`. Every query in §9.1 necessarily aggregates both. Since
-  Plan #7's shadow reduction is live on **`llm-router-aiqg` only**, per-deployment
-  attribution is not currently possible from logs.
-- **The `aiqg` namespace does not appear in Loki's `namespace` label values**,
-  despite being present in Alloy's on-disk regex
-  (`alloy-configmap.yaml:37`) and active in-cluster for 41d. Either the deployed
-  ConfigMap drifted from the repo, or nothing there logs. Relevant because
-  `aiqg-dashboard-be` lives there.
-- **The Loki ingress fails TLS verification** (`https://loki.tas.scharber.com` →
-  `curl exit 60`); the internal `tas-ca-issuer` CA isn't trusted by default
-  clients, so the CLAUDE.md port-forward fallback is currently the *only* working
-  path, not a fallback.
+| Suspected | Verdict |
+|---|---|
+| `llm-router` / `llm-router-aiqg` indistinguishable in Loki | ❌ **False.** They are cleanly separable. There is no `pod` label, but there are **`service`** and **`service_name`** (`llm-router` vs `llm-router-aiqg`) and **`instance`** (the pod name). The original claim came from a series parser that only looked for `container` and `pod`. |
+| `aiqg` namespace missing from Loki | ❌ **False.** `aiqg` **is** collected — 5,292 lines over 30d. The `/label/namespace/values` endpoint defaults to a ~6h window, and `aiqg-dashboard-be`/`aiqg-ui` only log on request, so a quiet window read as an absent namespace. Alloy's regex is correct and deployed. |
+| Loki ingress fails TLS verification | ❌ **Not a bug — by design.** The cert is issued by the internal `tas-ca-issuer` (`O=TAS, CN=TAS Root CA`), so a default trust store correctly rejects it. `curl --cacert <TAS Root CA> https://loki.tas.scharber.com/ready` → **200**. The ingress is fine. |
+
+**The one real (small) finding:** CLAUDE.md's Loki example
+(`curl -G 'https://loki.tas.scharber.com/...'`) fails as written on a machine
+without the TAS Root CA installed, with an opaque `curl exit 60`. Worth a
+one-line note pointing at `--cacert` or the port-forward — a docs nit, not an
+infra gap.
+
+> **Method note, since it changed the numbers.** Two of these three would have
+> become filed issues on the strength of a single shallow query. The default
+> label-values window and an incomplete label parse each produced a confident,
+> wrong conclusion. Re-checking with an explicit window and a full label dump
+> killed all three — and, in doing so, upgraded §9.1 from an aggregate across two
+> deployments to a clean per-service attribution. Prefer `service="llm-router-aiqg"`
+> over `container="llm-router"` in every query here: the container name is shared
+> by both deployments and is *not* the discriminator.
 
 ---
 
@@ -386,16 +399,19 @@ argument into a query against data we already have.
 
 Once deployed, the reuse rate is a Loki query — no new pipeline:
 
+Filter by `service`, not `container` — both deployments share the container name
+(§9.2), and today essentially all AIQG traffic is `llm-router-aiqg`:
+
 ```logql
 # reuse rate (the number that picks the default)
-sum(count_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" | json | prefix_seen="true" [7d]))
-  / sum(count_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" [7d]))
+sum(count_over_time({namespace="tas-llm-router",service="llm-router-aiqg"} |= "prompt-cache probe" | json | prefix_seen="true" [7d]))
+  / sum(count_over_time({namespace="tas-llm-router",service="llm-router-aiqg"} |= "prompt-cache probe" [7d]))
 
 # by model — a switch is a cold rebuild (§5.1), so this splits the tension out
-sum by (model) (count_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" | json | prefix_seen="true" [7d]))
+sum by (model) (count_over_time({namespace="tas-llm-router",service="llm-router-aiqg"} |= "prompt-cache probe" | json | prefix_seen="true" [7d]))
 
 # the prize, in tokens that would have billed at 0.1x instead of 1.0x
-sum_over_time({namespace="tas-llm-router"} |= "prompt-cache probe" | json | prefix_seen="true" | unwrap prompt_tokens [7d])
+sum_over_time({namespace="tas-llm-router",service="llm-router-aiqg"} |= "prompt-cache probe" | json | prefix_seen="true" | unwrap prompt_tokens [7d])
 ```
 
 **Read it against the write premium, not against zero.** A route pays off when
@@ -415,10 +431,6 @@ before concluding anything:
 3. **Few lines relative to `chat/completions`** → most traffic has no cacheable
    span (no system prompt, no tools), so the hash is empty by design. That's a
    real answer: there is nothing for §4.1 to cache.
-
-⚠️ Per §9.2, `llm-router` and `llm-router-aiqg` are **indistinguishable in
-Loki**, so these queries aggregate both deployments. Fix the labeling before
-attributing a rate to one of them.
 
 ---
 
