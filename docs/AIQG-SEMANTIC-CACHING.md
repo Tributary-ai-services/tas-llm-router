@@ -570,16 +570,79 @@ on **misses**; semantic caching removes the call on **hits**. Drawing the line
 > change the answer. Semantic caching reuses an *answer* for a merely-similar
 > question and always can.**
 
-> 🚨 **Go-specific hazard, straight from Anthropic's docs:** *"Some languages (Go,
-> Swift) randomize JSON key order; normalize before comparison."* **A Go gateway
-> that unmarshals and re-marshals a request can silently destroy the client's
-> provider-side prefix-cache hits** — turning 0.1× reads back into full-price
-> input, invisibly. This is a live risk in `tas-llm-router` **today**, independent
-> of this feature. **Rule: canonical JSON serialization, or pass bytes through
-> untouched.** Worth its own issue.
+### 12.1 The Go JSON key-order hazard — **investigated, and it is not our bug**
 
-Corollary for key normalization (§8): stable JSON ordering is required for *our*
-key anyway — same discipline, two payoffs.
+An earlier draft of this doc carried a warning that Go randomizes JSON key order
+and that our re-marshaling silently destroys clients' prefix-cache hits. **That
+was verified and is wrong.** Recording the result so nobody re-derives it:
+
+**The Anthropic doc sentence is real, but narrower than the paraphrase.** Verbatim,
+from the prompt-caching troubleshooting section: *"Verify that the keys in your
+`tool_use` content blocks have stable ordering as some languages (for example,
+Swift, Go) randomize key order during JSON conversion, breaking caches."* It is
+scoped to **`tool_use` content blocks** — not tool *definitions*, not the request
+envelope.
+
+**Go's `encoding/json` does not randomize.** Measured, 1000 marshals each:
+
+| Shape | Distinct encodings / 1000 | Order |
+|---|---|---|
+| Struct | **1** | field declaration order |
+| `map[string]any` | **1** | **sorted** — `encoding/json` sorts map keys before emitting |
+| Raw `for k := range m` | random per iteration | this is the real Go behavior people mean |
+
+So the ordering is **deterministic**; only *map iteration* is randomized, which is
+almost certainly the origin of the warning. A hand-rolled encoder that iterates a
+map would randomize; `encoding/json` does not. Round-tripping through
+`map[string]any` **does** reorder keys to sorted (`{"zebra","alpha"}` →
+`{"alpha","zebra"}`), so re-marshaled bytes differ from the client's — but they
+differ *identically every time*, so the prefix stays stable and the cache still
+hits.
+
+**And our tool path can't hit it anyway:** the router is OpenAI-shaped, where
+`Function.Arguments` is a **JSON string** (`internal/types/requests.go:64`) and is
+passed through verbatim — never parsed and re-emitted. `toAnthropicInputSchema`
+(`internal/providers/anthropic/provider.go:501`) builds `Properties` as a
+`map[string]interface{}`, which marshals sorted and deterministic.
+
+`server.go:1002` already carries the comment *"json.Marshal sorts map keys"* — the
+codebase knew this before I did.
+
+### 12.2 🚨 The real finding: `cache_control` cannot pass through the router at all
+
+Looking for the key-order bug surfaced a bigger one. **`tas-llm-router` cannot
+enable Anthropic prompt caching**, because there is nowhere to put a breakpoint:
+
+- **`ChatRequest`** (`internal/types/requests.go:8`) is a strongly-typed
+  OpenAI-shaped struct with **no passthrough for unknown fields**. Go's
+  `encoding/json` **silently discards** unknown fields on unmarshal — so a client
+  that sends `cache_control` has it **dropped without error**, and the re-marshal
+  from the struct can't re-emit what was never captured.
+- **`ContentPart`** (`requests.go:51`) carries only `Type`, `Text`, `ImageURL`.
+  There is no `cache_control`, on any block type.
+- **The Anthropic provider never sets it.** `anthropicReq.System =
+  []anthropic.TextBlockParam{...}` (`provider.go:445`) leaves `CacheControl` unset,
+  and no `CacheControl` appears anywhere in the request path. Repo-wide, the only
+  `cache_*` symbols are **read-side accounting** —
+  `Usage.CacheCreationInputTokens` / `CacheReadInputTokens` (`provider.go:193-200`)
+  → `CacheCreationTokens` / `CacheReadTokens` (`responses.go:38`).
+
+So the router **reads** cache-token usage it can never **request**. Any non-zero
+`cache_read_tokens` we observe today comes from Anthropic's *automatic* prompt
+caching, not from anything a caller asked for. There is also no `/v1/anthropic/*`
+raw-passthrough route registered, so there's no escape hatch.
+
+> **Why this matters more than the thing I went looking for.** The AIQG thesis is
+> three levers (§1): prompt caching *cheapens*, semantic caching *eliminates*,
+> reduction *shrinks*. **Our own gateway currently forecloses the first one** —
+> the lever that pays without depending on repetition and without a wrong-answer
+> mode, i.e. the *safest and broadest* of the three. Fixing that is plausibly
+> worth more than this entire document, and it is a bounded change: add
+> `cache_control` to the content-part/system types and thread it to the provider.
+> It is **independent of semantic caching** and should not wait on it.
+
+Corollary for §8: stable JSON ordering is required for *our* key anyway — and
+`encoding/json` already gives it to us for free.
 
 ---
 
@@ -713,9 +776,12 @@ already have the pattern in-tree.
    being the self-declared vocabulary source of truth (locked 2026-07-13) and
    despite #97 citing glossary terminology as its motivation. Add it with §12's
    one-liner. Cross-link primer §5.
-8. **Issues to file** — (a) Go JSON key-order destroying vendor prefix-cache hits
-   (§12) — **independent of this feature, live today**; (b) `ollama.yaml` not in
-   kustomization + probe passes with no model.
+8. **Issues to file** — (a) 🚨 **`cache_control` is dropped by `ChatRequest`, so
+   the router cannot enable vendor prompt caching** (§12.2) — **independent of
+   this feature, live today, and higher-value than this feature**; (b)
+   `ollama.yaml` not in kustomization + readiness probe passes with no model
+   loaded. *(A third candidate — Go JSON key-order breaking prefix caching — was
+   investigated and **withdrawn**; see §12.1. Do not re-file it.)*
 
 ---
 
