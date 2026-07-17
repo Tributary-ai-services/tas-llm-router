@@ -259,6 +259,22 @@ The read side already exists — this makes it *attributable*:
 
 - Stamp `prompt_cache_mode ∈ {auto, passthrough, off, n/a}` and
   `prompt_cache_breakpoints` (count) on the AIQG event.
+
+  > ⚠️ **P1 crosses onto the tagged wire — the struct tag has to be right, and a
+  > wrong one fails silently.** This field lands on the emitted **event struct**,
+  > which is serialized to JSON and read cross-service (Loki/LogQL,
+  > `aiqg-dashboard-be`). Unlike P0's probe — which logs via `logrus.Fields`
+  > with explicit lowercase keys, so no Go field name ever reaches the wire — an
+  > event-struct field takes its JSON name from its **`json:"..."` tag**, and Go's
+  > default is the **PascalCase field name** if the tag is missing. So the field
+  > MUST be tagged `json:"prompt_cache_mode,omitempty"` (snake_case, `omitempty`),
+  > matching the sibling accounting fields (`json:"cache_read_tokens,omitempty"`,
+  > `event.go:271`). Get it wrong — `PromptCacheMode` on the wire, or a typo — and
+  > there is **no error**: the emitter still writes valid JSON, and every
+  > dashboard query and LogQL `| json | prompt_cache_mode=...` silently matches
+  > nothing. This is the exact silent-miss failure §14 warns about, one layer up.
+  > **Grep the emitted JSON for the literal `prompt_cache_mode` before trusting
+  > any panel built on it.**
 - We already carry `CacheCreationTokens` / `CacheReadTokens` (`responses.go:38`) and
   cost (`pkg/clear/cost.go:159`) — so **savings become directly measurable**:
   `cache_read_tokens × (1 − 0.1) × input_rate`, minus write premium.
@@ -387,7 +403,7 @@ infra gap.
 | | Stage | Contents | Gate |
 |---|---|---|---|
 | **P0** ✅ | **Measure (no request changes)** — *implemented, pending deploy* | `pkg/aiqg/promptcache` (probe, 5m sliding window, tenant-scoped, `aiqg:pcp:` namespace) + `cachePrefixHash` (`internal/server/server.go`) + `StampCachePrefixHash` + `probePromptCache` in the AIQG middleware's deferred path. Emits `msg="aiqg prompt-cache probe"` with `prefix_seen`, `model`, `prompt_tokens`. Zero risk, zero vendor change. | Reuse ≥ 2 on some route |
-| **P1** | **Passthrough + `off`** | `cache_control` on `ContentPart`/system/tool types; thread to the Anthropic provider; `TAS-Prompt-Cache` header; `prompt_cache_mode` on events. Unblocks origins that already do it right. | — |
+| **P1** | **Passthrough + `off`** | `cache_control` on `ContentPart`/system/tool types; thread to the Anthropic provider; `TAS-Prompt-Cache` header; `prompt_cache_mode` on events (**tag it `json:"prompt_cache_mode,omitempty"` — the first tagged-wire field this feature adds; a wrong/missing tag fails silently, §8**). Unblocks origins that already do it right. | — |
 | **P2** | **`auto`** | §4 placement, per-route enable on the routes P0 identified. Savings metric + zero-hit alert. | Measured savings > write premium |
 | **P3** | **Router-aware** | Model-stickiness within a conversation (§5.1); cache-state in the routing cost model; failover-cold-write visibility. | — |
 | **P4** | **SDK upgrade** | v1.7.0 → v1.58.x for 1h TTL. Its own project. | — |
