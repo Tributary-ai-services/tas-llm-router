@@ -875,9 +875,11 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 	if entry, ok, err := s.respCache.Get(r.Context(), tenantID, hash); err != nil {
 		s.logger.WithError(err).WithField("request_id", req.ID).Warn("response cache lookup failed; treating as miss")
 	} else if ok {
+		// Stamp before writing: writeCachedResponse calls WriteHeader, which
+		// flushes headers, so X-TAS-Cache must be set inside it (before the flush)
+		// — not here after it.
 		if s.writeCachedResponse(w, entry) {
 			middleware.StampCacheState(r.Context(), "hit")
-			w.Header().Set("X-TAS-Cache", "hit")
 			return nil
 		}
 		// A corrupt/undecodable entry falls through to a live call.
@@ -898,6 +900,7 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *responsecache
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-TAS-Cache", "hit") // must precede WriteHeader (it flushes headers)
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(&resp)
 	return true
