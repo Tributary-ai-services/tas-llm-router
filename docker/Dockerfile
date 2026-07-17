@@ -1,5 +1,17 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+#
+# Gatekeeper's pkg/scan default match engine is Intel Hyperscan
+# (github.com/flier/gohs, //go:build !nohs). This image builds that engine —
+# CGO on, libhyperscan-dev in the builder, debian runtime — matching Gatekeeper's
+# own service. Hyperscan is x86_64-only, so the target is pinned to linux/amd64.
+FROM golang:1.24-bookworm AS builder
+
+# libhyperscan-dev + pkg-config compile the Hyperscan bindings; git for the
+# version stamp.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates tzdata \
+        libhyperscan-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -26,20 +38,27 @@ COPY tas-llm-router/ .
 # produce a meaningful value.
 ARG GATEWAY_VERSION=dev
 
-# Build with nohs tag (regexp engine, no CGO/Hyperscan needed).
-# -ldflags overrides pkg/aiqg/events.GatewayVersion at link time.
-RUN CGO_ENABLED=0 GOOS=linux go build -tags nohs -a -installsuffix cgo \
-    -ldflags "-X github.com/tributary-ai/llm-router-waf/pkg/aiqg/events.GatewayVersion=${GATEWAY_VERSION}" \
+# Build with the default (Hyperscan) engine. CGO must be on for the gohs
+# bindings; no `nohs` tag. -ldflags overrides pkg/aiqg/events.GatewayVersion at
+# link time. The binary links libhs.so.5 + glibc dynamically, so the runtime is
+# debian with libhyperscan5, not alpine.
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+    -ldflags "-w -s -X github.com/tributary-ai/llm-router-waf/pkg/aiqg/events.GatewayVersion=${GATEWAY_VERSION}" \
     -o llm-router ./cmd/llm-router/main.go
 
 # Runtime stage
-FROM alpine:latest
+FROM debian:bookworm-slim
 
-RUN apk --no-cache add ca-certificates tzdata wget
+# libhyperscan5 is REQUIRED, not optional: the CGO binary links libhs.so.5
+# dynamically, so without it the server fails at startup with
+# "libhs.so.5: cannot open shared object file".
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates tzdata libhyperscan5 wget \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN addgroup -g 1000 appuser && \
-    adduser -D -u 1000 -G appuser appuser
+RUN groupadd -g 1000 appuser && \
+    useradd -u 1000 -g appuser -s /bin/sh -M appuser
 
 WORKDIR /app
 
