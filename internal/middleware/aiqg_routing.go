@@ -90,6 +90,12 @@ type Routing struct {
 	// the events builder to mint the AgentSurrogateID.
 	fingerprint string
 
+	// redaction (G1): number of PII findings redacted from the inbound messages
+	// before the vendor call. 0 when redaction is off or found nothing. Surfaced
+	// on the event as redaction_applied/redacted_count so a quality regression on
+	// a redacting route is attributable.
+	redactionCount int
+
 	// experiments (Phase D): the experiment + variant that claimed this
 	// request. Stamped at request time (so the routing override + the event
 	// stamp use one decision). Empty when no experiment claimed it.
@@ -173,6 +179,9 @@ type RoutingSnapshot struct {
 	// when nothing fingerprintable.
 	Fingerprint string
 
+	// redaction (G1): count of PII findings redacted inbound. 0 = none.
+	RedactionCount int
+
 	// experiments (Phase D): claiming experiment + variant. Empty when none.
 	ExperimentID      string
 	ExperimentVariant string
@@ -209,6 +218,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		PrefixHash:          r.prefixHash,
 		StateHash:           r.stateHash,
 		Fingerprint:         r.fingerprint,
+		RedactionCount:      r.redactionCount,
 		ExperimentID:        r.experimentID,
 		ExperimentVariant:   r.experimentVariant,
 	}
@@ -313,6 +323,23 @@ func StampFingerprint(ctx context.Context, fp string) {
 	defer r.mu.Unlock()
 	if r.fingerprint == "" {
 		r.fingerprint = fp
+	}
+}
+
+// StampRedaction records the number of PII findings redacted from the inbound
+// messages (G1). First-write-wins; count<=0 is a no-op.
+func StampRedaction(ctx context.Context, count int) {
+	if count <= 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.redactionCount == 0 {
+		r.redactionCount = count
 	}
 }
 

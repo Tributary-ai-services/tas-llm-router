@@ -655,6 +655,33 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Gatekeeper inbound REDACTION (G1, docs/AIQG-GATEKEEPER-INTEGRATION.md).
+	// Runs after the block decision (a blocked request never reaches here) and
+	// before reduction/routing, so req.Messages is redacted for everything
+	// downstream — reduction measurement, routing, and the vendor call all see
+	// the redacted content, and a later response cache would key on it.
+	//
+	// Default off (redaction is lossy). Fail-open: on a scan error we log and
+	// send the original content — the same PII exposure as pre-G1, never a
+	// dropped request. Deterministic strategy → the redacted prompt is byte-stable
+	// (cache-safe).
+	if !scanBypassed && s.gatekeeper != nil && s.gatekeeperConfig != nil && s.gatekeeperConfig.Redaction.Enabled {
+		meta := gatekeeper.ScanMeta{
+			TenantID:  s.extractTenantID(r),
+			RequestID: req.ID,
+			UserID:    s.extractUserID(r),
+			Source:    "llm_input",
+		}
+		redacted, n, err := s.gatekeeper.RedactMessages(r.Context(), req.Messages, meta, s.gatekeeperConfig.Redaction.Strategy)
+		if err != nil {
+			s.logger.WithError(err).WithField("request_id", req.ID).Warn("Inbound redaction failed; sending original content")
+		} else if n > 0 {
+			req.Messages = redacted
+			middleware.StampRedaction(r.Context(), n)
+			w.Header().Set("X-TAS-Redaction", "applied")
+		}
+	}
+
 	// AIQG payload-reduction (Plan #7 Phase 2/3). The effective reduction is
 	// an applying experiment variant's reduction (Phase 3, takes precedence
 	// and MUTATES the payload) or the bundle's resolved reduction (Phase 2,

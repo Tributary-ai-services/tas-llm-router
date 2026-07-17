@@ -724,6 +724,7 @@ func routingView(r *Routing) events.RoutingView {
 		InboundFindings:     s.InboundFindings,
 		OutboundFindings:    s.OutboundFindings,
 		ScanRan:             s.ScanRan,
+		RedactionCount:      s.RedactionCount,
 		FinishReason:        s.FinishReason,
 		AttemptCount:        s.AttemptCount,
 		FallbackUsed:        s.FallbackUsed,

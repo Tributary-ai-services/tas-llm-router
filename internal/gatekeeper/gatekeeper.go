@@ -33,6 +33,14 @@ type Config struct {
 	Inbound  ScanDirectionConfig `yaml:"inbound"`
 	Outbound ScanDirectionConfig `yaml:"outbound"`
 
+	// Redaction configures inbound message redaction (G1,
+	// docs/AIQG-GATEKEEPER-INTEGRATION.md). Default OFF: redaction is LOSSY —
+	// masking customer@acme.com to [EMAIL] degrades what the model can answer —
+	// so it is opt-in. (Per-route targeting via the resolved policy bundle is a
+	// follow-up; this global flag is the first slice.) It is also the precondition
+	// for response caching: a cache built before this stores raw PII at rest.
+	Redaction RedactionConfig `yaml:"redaction"`
+
 	// Extraction configures the shadow payload-reduction measurement
 	// (Plan #7 Phase 2). When disabled (default), MeasureReduction is a
 	// no-op and the gateway never calls the extractor — preserving the
@@ -93,6 +101,15 @@ type ScanDirectionConfig struct {
 	ScanPolicy      ScanPolicy `yaml:"scan_policy"`
 }
 
+// RedactionConfig configures inbound message redaction (G1). Strategy is a
+// deterministic, infra-free redaction — "mask" (j***@***.com, default),
+// "replace" ([EMAIL]), or "hash" ([HASH:…]). Tokenize is NOT offered: it needs
+// Databunker (not deployed) and would mint per-call tokens that break caching.
+type RedactionConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Strategy string `yaml:"strategy"`
+}
+
 // DefaultConfig returns the default Gatekeeper configuration.
 func DefaultConfig() Config {
 	return Config{
@@ -121,8 +138,15 @@ func DefaultConfig() Config {
 type Client struct {
 	processor pipeline.Processor
 	extractor extract.Extractor // nil unless Extraction.Enabled — shadow measurement only
-	config    Config
-	logger    *logrus.Logger
+	// scanner + redactor back the inbound redaction path (G1,
+	// docs/AIQG-GATEKEEPER-INTEGRATION.md). The pipeline's only content-mutating
+	// path is the Databunker tokenizer (not deployed), so mask/replace/hash
+	// redaction goes through the scanner's ScanString + the RedactionEngine
+	// directly — deterministic and infra-free.
+	scanner  scan.Scanner
+	redactor scan.RedactionEngine
+	config   Config
+	logger   *logrus.Logger
 }
 
 // New creates a new Gatekeeper client.
@@ -192,6 +216,8 @@ func New(cfg Config, logger *logrus.Logger) (*Client, error) {
 	return &Client{
 		processor: processor,
 		extractor: extractor,
+		scanner:   scanner,
+		redactor:  scan.NewRedactionEngine(),
 		config:    cfg,
 		logger:    logger,
 	}, nil
@@ -362,6 +388,90 @@ func shouldScanMessage(msg types.Message, policy ScanPolicy) bool {
 
 	// Default: scan the message
 	return true
+}
+
+// RedactMessages returns a NEW message slice with PII redacted in each scannable
+// message, plus the number of findings redacted (G1). The original slice is not
+// mutated; the caller assigns the result to req.Messages when redaction is
+// enabled for the route.
+//
+// It re-scans per message rather than reusing the block-path scan: ScanMessages
+// concatenates message text to decide blocking, and those offsets don't map back
+// to individual messages. Per-message scan is the correct granularity for
+// write-back, at the cost of a second scan (acceptable for G1; attestation
+// removes the double-scan later).
+//
+// Redaction is deterministic and content-derived (mask/replace/hash), so the
+// redacted form is byte-stable — identical input yields identical output, which
+// keeps prompt caching intact and lets a later cache key on the redacted prompt.
+// Only string content is redacted; multimodal ([]interface{}) content is left
+// unchanged in v1. Never call this on a request that was blocked.
+//
+// On a scan error it returns the ORIGINAL messages, 0, and the error — the caller
+// fails open (send the original, same as pre-G1 behavior) rather than dropping
+// the request.
+func (c *Client) RedactMessages(ctx context.Context, messages []types.Message, meta ScanMeta, strategy string) ([]types.Message, int, error) {
+	if c == nil || c.scanner == nil || c.redactor == nil {
+		return messages, 0, nil
+	}
+
+	policy := c.config.Inbound.ScanPolicy
+	if len(policy.AlwaysScanRoles) == 0 && len(policy.NeverScanRoles) == 0 {
+		policy = DefaultScanPolicy()
+	}
+	strat := parseRedactionStrategy(strategy)
+	profile := parseScanProfile(c.config.Inbound.ScanProfile)
+	tier := parseTrustTier(c.config.Inbound.TrustTier)
+
+	out := make([]types.Message, len(messages))
+	copy(out, messages)
+
+	total := 0
+	for i := range out {
+		if !shouldScanMessage(out[i], policy) {
+			continue
+		}
+		s, ok := out[i].Content.(string)
+		if !ok || s == "" {
+			continue // multimodal / empty — not redacted in v1
+		}
+
+		cfg := scan.DefaultScanConfig()
+		cfg.Profile = profile
+		cfg.TrustTier = tier
+		cfg.RedactionMode = strat // force our strategy; never the tokenize default
+
+		res, err := c.scanner.ScanString(ctx, s, cfg)
+		if err != nil {
+			return messages, 0, err
+		}
+		if res == nil || len(res.Findings) == 0 {
+			continue
+		}
+		redacted, rerr := c.redactor.Redact(s, res.Findings, strat)
+		if rerr != nil {
+			// Detection succeeded, redaction of this message failed: leave the
+			// message unredacted rather than dropping content, and don't count it.
+			continue
+		}
+		out[i].Content = redacted
+		total += len(res.Findings)
+	}
+	return out, total, nil
+}
+
+// parseRedactionStrategy maps a config string to a deterministic, infra-free
+// strategy. Tokenize (Databunker) and remove (silent data loss) are excluded;
+// anything unrecognized → mask.
+func parseRedactionStrategy(s string) scan.RedactionStrategy {
+	switch s {
+	case "replace":
+		return scan.RedactionReplace
+	case "hash":
+		return scan.RedactionHash
+	default:
+		return scan.RedactionMask
+	}
 }
 
 // ScanResponse scans LLM output content for violations.

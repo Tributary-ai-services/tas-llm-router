@@ -77,6 +77,10 @@ type RoutingView struct {
 	OutboundFindings map[string]int
 	ScanRan          bool
 
+	// RedactionCount is the number of PII findings redacted from the
+	// inbound messages before the vendor call (G1). 0 = none/off.
+	RedactionCount int
+
 	// Vendor finish_reason captured from the response. Used both
 	// to populate ResponseEvent.FinishReason (taking precedence
 	// over the BuildOptions value) and to drive clear.Efficacy.
@@ -588,6 +592,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		EventTimestamps:      snap,
 		TokenAccounting:      tokenAcct,
 		Assurance:            assuranceSummary,
+		RedactionApplied:     routing.RedactionCount > 0,
+		RedactedCount:        routing.RedactionCount,
 		CLEAR:                clear.Compute(clearInput),
 		ScoringVersion:       ScoringVersion,
 		GatewayVersion:       GatewayVersion,
