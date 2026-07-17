@@ -1,10 +1,26 @@
 # AIQG — Response Caching (Design)
 
-Status: **Design / for review** — NOT implemented. Gateway feature
+Status: **C1 (exact-match v1) IMPLEMENTED** — `pkg/aiqg/responsecache` + the
+lookup/store wiring in `internal/server` (`maybeServeFromCache` /
+`maybeStoreInCache`). Default off; enable per deployment with
+`AIQG_RESPONSE_CACHE_ENABLED=true`. C2 (accounting/UI), C3 (experiment keying),
+and C4 (semantic, `AIQG-SEMANTIC-CACHING.md`) remain design-only. Gateway feature
 (`tas-llm-router`). Related: `AIQG-EXTENSION.md` (already reserves a
 `cache_state` event dimension), `AIQG-EXPERIMENTS-RUNNER.md` (cache must be
 experiment-aware), `AIQG-AGENT-FLOW-ATTRIBUTION.md`, `account.md`
 (payload_retention_mode), `token-accounting.md` (vendor prompt-cache tokens).
+
+> **What C1 ships (2026-07-17):** tenant-namespaced exact-match cache keyed on
+> `hash(tenant + vendor + model + post-redaction messages + output-affecting
+> params + scoring_version)` (§3); default-safe eligibility — deterministic-only,
+> never streaming / tools / experiment-claimed (§1, §4, §7); `TAS-Cache: off|bypass`
+> header (§4); Redis store (reuses the AIQG client) with an in-memory fallback,
+> per-entry TTL, `max_body_bytes`, LRU + `PurgeTenant` for right-to-be-forgotten
+> (§5, §8); `cache_state` + `cache_key_hash` on every event (§6). A hit skips the
+> vendor call and does **not** stamp token usage, so cost/latency accounting reads
+> ~0. **Deferred to C2+:** the savings metric and hit/miss dashboard split, route-
+> level cache profiles (v1 is one global profile), and experiment-keyed entries
+> (v1 bypasses experiment-claimed requests rather than partitioning them).
 
 ---
 

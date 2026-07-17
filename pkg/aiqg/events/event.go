@@ -214,6 +214,14 @@ type ResponseEvent struct {
 	RedactionApplied bool `json:"redaction_applied,omitempty"`
 	RedactedCount    int  `json:"redacted_count,omitempty"`
 
+	// Response cache (C1, docs/AIQG-CACHING.md §6): how the request interacted
+	// with the exact-match cache — "hit" (vendor not called), "miss", "bypass",
+	// or omitted when the cache didn't participate. cache_key_hash correlates a
+	// hit with the miss that populated it. On a hit, vendor cost/latency ≈ 0;
+	// dashboards split hit/miss so "as-served" and "true vendor" cost both show.
+	CacheState   string `json:"cache_state,omitempty"`
+	CacheKeyHash string `json:"cache_key_hash,omitempty"`
+
 	// CLEAR scores — populated by pkg/clear.Compute(). A nil *Scores
 	// (rather than a *Scores with all-nil dimension fields) means the
 	// scorer wasn't run at all, which today only happens on the noop

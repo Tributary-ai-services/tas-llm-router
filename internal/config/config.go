@@ -91,6 +91,25 @@ type AIQGConfig struct {
 	// head-to-head. Costs ~2× per shadow sample, so default 0 (off; opt-in).
 	// Env: AIQG_SHADOW_EVAL_PCT.
 	ShadowEvalPct int `yaml:"shadow_eval_pct"`
+
+	// ResponseCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
+	// Default off. Reuses the linkage Redis client; falls back to a per-pod
+	// in-memory cache when Redis isn't configured.
+	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
+}
+
+// AIQGResponseCacheConfig configures the C1 response cache. Env:
+// AIQG_RESPONSE_CACHE_ENABLED, AIQG_RESPONSE_CACHE_TTL (Go duration),
+// AIQG_RESPONSE_CACHE_MAX_BODY_BYTES, AIQG_RESPONSE_CACHE_ALLOW_NONDETERMINISTIC.
+type AIQGResponseCacheConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// TTL is the entry lifetime. Empty/zero defaults to 5m at wire-up.
+	TTL time.Duration `yaml:"ttl"`
+	// MaxBodyBytes skips storing responses larger than this (0 = no limit).
+	MaxBodyBytes int `yaml:"max_body_bytes"`
+	// AllowNondeterministic caches temperature>0 requests too. Default false
+	// (require_deterministic=true) — the safe posture.
+	AllowNondeterministic bool `yaml:"allow_nondeterministic"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Defined here (not in
@@ -568,6 +587,22 @@ func (c *Config) loadFromEnv() {
 			c.AIQG.ShadowEvalPct = n
 		}
 	}
+	if v := os.Getenv("AIQG_RESPONSE_CACHE_ENABLED"); v != "" {
+		c.AIQG.ResponseCache.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("AIQG_RESPONSE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.AIQG.ResponseCache.TTL = d
+		}
+	}
+	if v := os.Getenv("AIQG_RESPONSE_CACHE_MAX_BODY_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.AIQG.ResponseCache.MaxBodyBytes = n
+		}
+	}
+	if v := os.Getenv("AIQG_RESPONSE_CACHE_ALLOW_NONDETERMINISTIC"); v != "" {
+		c.AIQG.ResponseCache.AllowNondeterministic = v == "true" || v == "1"
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -759,6 +794,12 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		Kafka: server.AIQGKafkaConfig{
 			Brokers: c.AIQG.Kafka.Brokers,
 			Topic:   c.AIQG.Kafka.Topic,
+		},
+		ResponseCache: server.AIQGResponseCacheConfig{
+			Enabled:               c.AIQG.ResponseCache.Enabled,
+			TTL:                   c.AIQG.ResponseCache.TTL,
+			MaxBodyBytes:          c.AIQG.ResponseCache.MaxBodyBytes,
+			AllowNondeterministic: c.AIQG.ResponseCache.AllowNondeterministic,
 		},
 	}
 	if len(c.AIQG.Tokens) > 0 {
