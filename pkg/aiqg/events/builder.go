@@ -81,6 +81,12 @@ type RoutingView struct {
 	// inbound messages before the vendor call (G1). 0 = none/off.
 	RedactionCount int
 
+	// CacheState / CacheKeyHash carry the C1 response-cache interaction
+	// (docs/AIQG-CACHING.md §6): "hit" / "miss" / "bypass" / "" and the
+	// exact-match key. A hit means the vendor was not called.
+	CacheState   string
+	CacheKeyHash string
+
 	// Vendor finish_reason captured from the response. Used both
 	// to populate ResponseEvent.FinishReason (taking precedence
 	// over the BuildOptions value) and to drive clear.Efficacy.
@@ -594,6 +600,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Assurance:            assuranceSummary,
 		RedactionApplied:     routing.RedactionCount > 0,
 		RedactedCount:        routing.RedactionCount,
+		CacheState:           routing.CacheState,
+		CacheKeyHash:         routing.CacheKeyHash,
 		CLEAR:                clear.Compute(clearInput),
 		ScoringVersion:       ScoringVersion,
 		GatewayVersion:       GatewayVersion,

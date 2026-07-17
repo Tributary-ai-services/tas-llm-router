@@ -29,6 +29,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/promptcache"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/responsecache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 
@@ -61,6 +62,11 @@ type Server struct {
 	// judge runs the LLM-as-judge quality layer off the hot path. Nil when
 	// judging is disabled.
 	judge *judgeRunner
+
+	// respCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
+	// Nil when disabled — every cache branch is a no-op in that case.
+	respCache    responsecache.Cache
+	respCacheCfg responsecache.Config
 }
 
 // ServerConfig holds server configuration
@@ -189,6 +195,18 @@ type AIQGServerConfig struct {
 	// Kafka block — read when EmitterType is "kafka" or "both".
 	// Brokers takes a list ("host:9092,host:9092") via env override.
 	Kafka AIQGKafkaConfig `yaml:"kafka"`
+
+	// ResponseCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
+	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
+}
+
+// AIQGResponseCacheConfig configures the C1 response cache. Mirrors
+// config.AIQGResponseCacheConfig (straight field copy in ToServerConfig).
+type AIQGResponseCacheConfig struct {
+	Enabled               bool          `yaml:"enabled"`
+	TTL                   time.Duration `yaml:"ttl"`
+	MaxBodyBytes          int           `yaml:"max_body_bytes"`
+	AllowNondeterministic bool          `yaml:"allow_nondeterministic"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Brokers + topic are
@@ -302,17 +320,50 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		// a per-pod MemoryProbe would under-count across replicas rather than
 		// fail honestly.
 		var cacheProbe promptcache.Probe
+		// sharedRedis is reused by every AIQG Redis consumer (linkage, the P0
+		// probe, and the C1 response cache) — one client, one lifecycle.
+		var sharedRedis redis.UniversalClient
 		if config.AIQG.LinkageRedisURL != "" {
 			if opt, err := redis.ParseURL(config.AIQG.LinkageRedisURL); err != nil {
 				logger.WithError(err).Warn("AIQG linkage: invalid AIQG_LINKAGE_REDIS_URL; linkage disabled")
 			} else {
 				rc := redis.NewClient(opt)
+				sharedRedis = rc
 				linkageStore = linkage.NewRedisStore(rc, 0)
 				cacheProbe = promptcache.NewRedisProbe(rc, 0)
 				logger.WithField("redis_addr", opt.Addr).Info("AIQG linkage: tool_call_id echo index enabled (linked tier)")
 				logger.WithFields(logrus.Fields{"redis_addr": opt.Addr, "ttl": promptcache.DefaultTTL}).
 					Info("AIQG prompt-cache probe enabled (P0 measure-only: reports prefix reuse, changes no requests)")
 			}
+		}
+
+		// C1 exact-match response cache (docs/AIQG-CACHING.md). Prefers the
+		// shared Redis (correct across replicas); falls back to a per-pod
+		// in-memory cache when Redis isn't configured, so a single-replica dev
+		// deploy still exercises the feature. Off unless explicitly enabled.
+		if config.AIQG.ResponseCache.Enabled {
+			ttl := config.AIQG.ResponseCache.TTL
+			if ttl <= 0 {
+				ttl = 5 * time.Minute
+			}
+			server.respCacheCfg = responsecache.Config{
+				Enabled:              true,
+				TTL:                  ttl,
+				RequireDeterministic: !config.AIQG.ResponseCache.AllowNondeterministic,
+				MaxBodyBytes:         config.AIQG.ResponseCache.MaxBodyBytes,
+			}
+			backend := "memory"
+			if sharedRedis != nil {
+				server.respCache = responsecache.NewRedisCache(sharedRedis)
+				backend = "redis"
+			} else {
+				server.respCache = responsecache.NewMemoryCache(0)
+			}
+			logger.WithFields(logrus.Fields{
+				"backend":               backend,
+				"ttl":                   ttl,
+				"require_deterministic": server.respCacheCfg.RequireDeterministic,
+			}).Info("AIQG response cache enabled (C1 exact-match)")
 		}
 
 		// Experiments runner resolver (Phase D). Reuses the dashboard URL +
@@ -774,7 +825,17 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// AIQG: stamp the chosen provider's name onto the routing sidecar.
 	// Done here (not in router.Route) so AIQG plumbing stays in the
 	// server/middleware layer and doesn't leak into the routing package.
-	middleware.StampVendor(r.Context(), provider.GetProviderName())
+	vendor := provider.GetProviderName()
+	middleware.StampVendor(r.Context(), vendor)
+
+	// AIQG C1 exact-match response cache (docs/AIQG-CACHING.md §2). Checked after
+	// routing so the key carries the resolved vendor, but before the vendor call —
+	// a hit skips that 1–5s call entirely (the whole latency win). Routing itself
+	// is in-memory selection, not a network call. On a miss we stash the store
+	// intent so the completion handler persists the post-outbound-scan response.
+	if r = s.maybeServeFromCache(w, r, &req, vendor); r == nil {
+		return // hit: cached response already written
+	}
 
 	// Handle streaming vs non-streaming with retry/fallback support
 	if req.Stream {
@@ -782,6 +843,64 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.handleNonStreamingCompletionWithRetry(w, r, &req, provider, metadata)
 	}
+}
+
+// maybeServeFromCache runs the C1 cache lookup. It returns nil when it served a
+// hit (the caller must stop); otherwise it returns the request to continue with,
+// possibly carrying a store-intent context on a cacheable miss. All branches are
+// no-ops when the cache is disabled, so non-AIQG traffic is unaffected.
+func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, vendor string) *http.Request {
+	if s.respCache == nil || !s.respCacheCfg.Enabled {
+		return r
+	}
+	d := responsecache.Decide(req, s.respCacheCfg, r.Header.Get("TAS-Cache"))
+	if d.Bypass {
+		middleware.StampCacheState(r.Context(), "bypass")
+		return r
+	}
+	if !d.Cacheable {
+		return r
+	}
+	// Experiment-claimed requests bypass the cache so each variant's measurement
+	// reflects real variant calls (docs/AIQG-CACHING.md §7).
+	if rt := middleware.RoutingFromContext(r.Context()); rt != nil && rt.Snapshot().ExperimentID != "" {
+		middleware.StampCacheState(r.Context(), "bypass")
+		return r
+	}
+
+	tenantID := s.extractTenantID(r)
+	hash := responsecache.KeyHash(tenantID, vendor, req, events.ScoringVersion)
+	middleware.StampCacheKeyHash(r.Context(), hash)
+
+	if entry, ok, err := s.respCache.Get(r.Context(), tenantID, hash); err != nil {
+		s.logger.WithError(err).WithField("request_id", req.ID).Warn("response cache lookup failed; treating as miss")
+	} else if ok {
+		if s.writeCachedResponse(w, entry) {
+			middleware.StampCacheState(r.Context(), "hit")
+			w.Header().Set("X-TAS-Cache", "hit")
+			return nil
+		}
+		// A corrupt/undecodable entry falls through to a live call.
+	}
+
+	middleware.StampCacheState(r.Context(), "miss")
+	return r.WithContext(responsecache.WithPending(r.Context(), tenantID, hash))
+}
+
+// writeCachedResponse writes a stored response to the client. Returns false
+// (without writing) if the entry can't be decoded, so the caller falls through
+// to a live vendor call. A hit deliberately does NOT stamp vendor token usage:
+// the vendor wasn't called, so cost/latency accounting stays ~0 (§6), and the
+// cache_state=hit split lets dashboards surface the saving explicitly.
+func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *responsecache.Entry) bool {
+	var resp types.ChatResponse
+	if err := json.Unmarshal(entry.Response, &resp); err != nil {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(&resp)
+	return true
 }
 
 // extractTenantID extracts tenant ID from request context or headers.
@@ -1011,12 +1130,56 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	// hot path. No-op when judging is disabled / unsampled / not AIQG.
 	s.judge.maybeJudge(r.Context(), w, req, resp)
 
+	// AIQG C1: store the post-outbound-scan response for the next equivalent
+	// request. Runs before RouterMetadata is attached so the cached body carries
+	// no request-specific routing info. No-op unless the lookup marked this a
+	// cacheable miss (PendingFromContext) and the produced response is itself
+	// cacheable (no tool calls).
+	s.maybeStoreInCache(r, resp)
+
 	// Add routing metadata to response
 	resp.RouterMetadata = metadata
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// maybeStoreInCache persists a produced response under the key stamped at lookup
+// time. Best-effort and off the client's latency path: a store failure is logged
+// and swallowed. Skips responses over MaxBodyBytes and any response carrying tool
+// calls (ResponseCacheable).
+func (s *Server) maybeStoreInCache(r *http.Request, resp *types.ChatResponse) {
+	if s.respCache == nil || !s.respCacheCfg.Enabled {
+		return
+	}
+	p, ok := responsecache.PendingFromContext(r.Context())
+	if !ok || !responsecache.ResponseCacheable(resp) {
+		return
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	if s.respCacheCfg.MaxBodyBytes > 0 && len(body) > s.respCacheCfg.MaxBodyBytes {
+		return
+	}
+	entry := &responsecache.Entry{
+		Response:       body,
+		Model:          resp.Model,
+		ScoringVersion: events.ScoringVersion,
+		StoredAtUnix:   time.Now().Unix(),
+	}
+	if rt := middleware.RoutingFromContext(r.Context()); rt != nil {
+		entry.Vendor = rt.Snapshot().Vendor // debug aid; vendor is already folded into the key
+	}
+	if resp.Usage != nil {
+		entry.PromptTokens = resp.Usage.PromptTokens
+		entry.CompletionTokens = resp.Usage.CompletionTokens
+	}
+	if err := s.respCache.Set(r.Context(), p.TenantID, p.Hash, entry, s.respCacheCfg.TTL); err != nil {
+		s.logger.WithError(err).WithField("request_id", resp.ID).Warn("response cache store failed")
+	}
 }
 
 // echoedToolCallIDs returns the tool_call_ids this request echoes back in

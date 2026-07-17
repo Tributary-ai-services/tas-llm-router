@@ -103,6 +103,14 @@ type Routing struct {
 	// the request has nothing cacheable (no system text, no tools).
 	cachePrefixHash string
 
+	// response cache (C1, docs/AIQG-CACHING.md §6): how this request interacted
+	// with the exact-match response cache — "hit" (served from cache, vendor not
+	// called), "miss" (looked up, stored on the way out), "bypass" (TAS-Cache
+	// header or experiment-claimed), or "" (not eligible / cache off). cacheKeyHash
+	// is the exact-match key so a hit and its populating miss can be correlated.
+	cacheState    string
+	cacheKeyHash  string
+
 	// experiments (Phase D): the experiment + variant that claimed this
 	// request. Stamped at request time (so the routing override + the event
 	// stamp use one decision). Empty when no experiment claimed it.
@@ -193,6 +201,10 @@ type RoutingSnapshot struct {
 	// breakpoint would cover. Empty when nothing is cacheable.
 	CachePrefixHash string
 
+	// response cache (C1): hit / miss / bypass / "" and the exact-match key.
+	CacheState   string
+	CacheKeyHash string
+
 	// experiments (Phase D): claiming experiment + variant. Empty when none.
 	ExperimentID      string
 	ExperimentVariant string
@@ -231,6 +243,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		Fingerprint:         r.fingerprint,
 		RedactionCount:      r.redactionCount,
 		CachePrefixHash:     r.cachePrefixHash,
+		CacheState:          r.cacheState,
+		CacheKeyHash:        r.cacheKeyHash,
 		ExperimentID:        r.experimentID,
 		ExperimentVariant:   r.experimentVariant,
 	}
@@ -301,6 +315,42 @@ func StampCachePrefixHash(ctx context.Context, hash string) {
 	defer r.mu.Unlock()
 	if r.cachePrefixHash == "" {
 		r.cachePrefixHash = hash
+	}
+}
+
+// StampCacheState records how the request interacted with the C1 response cache
+// ("hit" / "miss" / "bypass"). First-write-wins so a hit isn't later overwritten
+// by a store path; empty is a no-op.
+func StampCacheState(ctx context.Context, state string) {
+	if state == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cacheState == "" {
+		r.cacheState = state
+	}
+}
+
+// StampCacheKeyHash records the exact-match response-cache key for this request
+// so a hit and the miss that populated it can be correlated in the event stream.
+// First-write-wins; empty is a no-op.
+func StampCacheKeyHash(ctx context.Context, hash string) {
+	if hash == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cacheKeyHash == "" {
+		r.cacheKeyHash = hash
 	}
 }
 
