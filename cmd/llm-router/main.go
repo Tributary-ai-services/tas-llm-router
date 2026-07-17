@@ -99,6 +99,10 @@ func NewApplication(configPath string) (*Application, error) {
 				SLMAPIKey:      cfg.Gatekeeper.Extraction.SLMAPIKey,
 				SLMMaxTokens:   cfg.Gatekeeper.Extraction.SLMMaxTokens,
 			},
+			Redaction: gatekeeper.RedactionConfig{
+				Enabled:  cfg.Gatekeeper.Redaction.Enabled,
+				Strategy: cfg.Gatekeeper.Redaction.Strategy,
+			},
 		}
 
 		gkClient, err := gatekeeper.New(gkCfg, logger)

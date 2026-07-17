@@ -207,6 +207,13 @@ type ResponseEvent struct {
 	// through traffic or Gatekeeper-disabled deployments).
 	Assurance *AssuranceSummary `json:"assurance,omitempty"`
 
+	// Redaction (G1): whether inbound PII redaction rewrote the prompt before
+	// the vendor call, and how many findings were redacted. Omitted when
+	// redaction is off or found nothing. Lets a quality regression on a
+	// redacting route be attributed to redaction rather than the model.
+	RedactionApplied bool `json:"redaction_applied,omitempty"`
+	RedactedCount    int  `json:"redacted_count,omitempty"`
+
 	// CLEAR scores — populated by pkg/clear.Compute(). A nil *Scores
 	// (rather than a *Scores with all-nil dimension fields) means the
 	// scorer wasn't run at all, which today only happens on the noop

@@ -90,6 +90,12 @@ type Routing struct {
 	// the events builder to mint the AgentSurrogateID.
 	fingerprint string
 
+	// redaction (G1): number of PII findings redacted from the inbound messages
+	// before the vendor call. 0 when redaction is off or found nothing. Surfaced
+	// on the event as redaction_applied/redacted_count so a quality regression on
+	// a redacting route is attributable.
+	redactionCount int
+
 	// prompt-cache probe (docs/AIQG-PROMPT-CACHE-CONTROL.md §9, P0): canonical
 	// hash of the tools+system span a vendor cache breakpoint would cover.
 	// Measurement only — the middleware probes it against a TTL'd index to
@@ -180,6 +186,9 @@ type RoutingSnapshot struct {
 	// when nothing fingerprintable.
 	Fingerprint string
 
+	// redaction (G1): count of PII findings redacted inbound. 0 = none.
+	RedactionCount int
+
 	// prompt-cache probe (P0): hash of the tools+system span a vendor cache
 	// breakpoint would cover. Empty when nothing is cacheable.
 	CachePrefixHash string
@@ -220,6 +229,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		PrefixHash:          r.prefixHash,
 		StateHash:           r.stateHash,
 		Fingerprint:         r.fingerprint,
+		RedactionCount:      r.redactionCount,
 		CachePrefixHash:     r.cachePrefixHash,
 		ExperimentID:        r.experimentID,
 		ExperimentVariant:   r.experimentVariant,
@@ -344,6 +354,23 @@ func StampFingerprint(ctx context.Context, fp string) {
 	defer r.mu.Unlock()
 	if r.fingerprint == "" {
 		r.fingerprint = fp
+	}
+}
+
+// StampRedaction records the number of PII findings redacted from the inbound
+// messages (G1). First-write-wins; count<=0 is a no-op.
+func StampRedaction(ctx context.Context, count int) {
+	if count <= 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.redactionCount == 0 {
+		r.redactionCount = count
 	}
 }
 

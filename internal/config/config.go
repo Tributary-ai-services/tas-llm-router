@@ -123,6 +123,15 @@ type GatekeeperConfig struct {
 	Inbound           ScanDirectionConfig `yaml:"inbound"`
 	Outbound          ScanDirectionConfig `yaml:"outbound"`
 	Extraction        ExtractionConfig    `yaml:"extraction"`
+	Redaction         RedactionConfig     `yaml:"redaction"`
+}
+
+// RedactionConfig wires inbound PII redaction (G1). Default OFF (redaction is
+// lossy). Enable via GATEKEEPER_REDACT_ENABLED=true; strategy via
+// GATEKEEPER_REDACT_STRATEGY (mask|replace|hash, default mask).
+type RedactionConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Strategy string `yaml:"strategy"`
 }
 
 // ExtractionConfig wires the Ollama-backed extractor used for AIQG shadow
@@ -464,6 +473,15 @@ func (c *Config) loadFromEnv() {
 		if d, err := time.ParseDuration(st); err == nil {
 			c.Gatekeeper.ScanTimeout = d
 		}
+	}
+
+	// Inbound PII redaction (G1). Off unless GATEKEEPER_REDACT_ENABLED=true —
+	// redaction is lossy, so it's opt-in.
+	if os.Getenv("GATEKEEPER_REDACT_ENABLED") == "true" {
+		c.Gatekeeper.Redaction.Enabled = true
+	}
+	if s := os.Getenv("GATEKEEPER_REDACT_STRATEGY"); s != "" {
+		c.Gatekeeper.Redaction.Strategy = s
 	}
 
 	// AIQG shadow payload-reduction extractor (Plan #7 Phase 2). Off unless
