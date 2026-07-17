@@ -28,6 +28,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/promptcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 
@@ -293,12 +294,24 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		// Redis-backed when AIQG_LINKAGE_REDIS_URL is set; nil otherwise
 		// (linkage disabled — events emit without step/parent topology).
 		var linkageStore linkage.Store
+		// Prompt-cache opportunity probe (P0, docs/AIQG-PROMPT-CACHE-CONTROL.md
+		// §9). Shares the linkage Redis client — same lifecycle, same tenant
+		// scoping, its own key namespace (aiqg:pcp:) and its own 5m TTL (one
+		// vendor cache lifetime, not linkage's 1h). Nil when Redis isn't
+		// configured: the probe needs a fleet-wide index to be meaningful, and
+		// a per-pod MemoryProbe would under-count across replicas rather than
+		// fail honestly.
+		var cacheProbe promptcache.Probe
 		if config.AIQG.LinkageRedisURL != "" {
 			if opt, err := redis.ParseURL(config.AIQG.LinkageRedisURL); err != nil {
 				logger.WithError(err).Warn("AIQG linkage: invalid AIQG_LINKAGE_REDIS_URL; linkage disabled")
 			} else {
-				linkageStore = linkage.NewRedisStore(redis.NewClient(opt), 0)
+				rc := redis.NewClient(opt)
+				linkageStore = linkage.NewRedisStore(rc, 0)
+				cacheProbe = promptcache.NewRedisProbe(rc, 0)
 				logger.WithField("redis_addr", opt.Addr).Info("AIQG linkage: tool_call_id echo index enabled (linked tier)")
+				logger.WithFields(logrus.Fields{"redis_addr": opt.Addr, "ttl": promptcache.DefaultTTL}).
+					Info("AIQG prompt-cache probe enabled (P0 measure-only: reports prefix reuse, changes no requests)")
 			}
 		}
 
@@ -323,6 +336,7 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			Resolver:       resolver,
 			PolicyResolver: policyResolver,
 			Linkage:        linkageStore,
+			PromptCache:    cacheProbe,
 			Experiments:    experimentResolver,
 		})
 		logger.WithFields(logrus.Fields{
@@ -587,6 +601,19 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// AIQG (fingerprinted tier): structural signature (toolset + config) so
 	// untagged programmatic traffic resolves to an inferred agent surrogate.
 	middleware.StampFingerprint(r.Context(), agentFingerprint(&req))
+	// AIQG (prompt-cache probe, P0 — docs/AIQG-PROMPT-CACHE-CONTROL.md §9):
+	// hash of the tools+system span a vendor cache breakpoint would cover, so
+	// the middleware can report whether it recurred inside a cache lifetime.
+	// Measurement only — nothing derived from this reaches the vendor.
+	//
+	// Hashed pre-scan, alongside the other stamps. Redaction is deterministic
+	// and content-derived (Gatekeeper/pkg/scan/redaction.go), so redact() is a
+	// pure function: identical pre-scan prefixes stay identical post-scan, and
+	// the reuse rate is preserved. The bias is one-directional and safe — a
+	// placeholder strategy can map two *different* prefixes onto the same
+	// redacted bytes (a real vendor hit this would score as a miss), so this
+	// can only UNDER-count reuse, never inflate it.
+	middleware.StampCachePrefixHash(r.Context(), cachePrefixHash(&req))
 
 	// Gatekeeper: check bypass token
 	scanBypassed := false
@@ -1086,6 +1113,82 @@ func conversationStateHash(req *types.ChatRequest, resp *types.ChatResponse) str
 	msgs = append(msgs, req.Messages...)
 	msgs = append(msgs, types.Message{Role: "assistant", Content: content})
 	return hashMessages(msgs)
+}
+
+// cachePrefixHash hashes the span a vendor prompt-cache breakpoint would cover:
+// the tools+system tier (docs/AIQG-PROMPT-CACHE-CONTROL.md §4.1). Anthropic
+// renders tools → system → messages, so a breakpoint on the last system block
+// caches tools and system together — this hashes exactly that span, and nothing
+// after it. Empty when there is nothing cacheable to measure (no system text
+// and no tools): a bare chat has no stable prefix, and hashing one anyway would
+// collapse every ad-hoc call onto a single hash and report a phantom reuse rate.
+//
+// Measurement only (P0) — nothing here reaches the vendor.
+//
+// Included and why:
+//   - model: vendor caches are model-scoped, so a switch is a full rebuild, not
+//     a hit. Our own routing can switch models mid-conversation (§5.1), which is
+//     precisely the effect this must not hide.
+//   - tools: sorted by name, since array order is not semantic to the caller but
+//     IS to the byte-level prefix match. Reordering alone would read as a miss.
+//   - system: the concatenated role=system text, in order — order IS semantic
+//     here (it is the rendered prefix).
+//
+// Excluded and why: sampling params, max_tokens, seed, stop, response_format.
+// None of them render into the tools+system span, and per the vendor's
+// invalidation hierarchy a tool_choice/thinking change preserves the tools and
+// system tiers. Including them would split one cacheable prefix into many and
+// under-report reuse — the opposite of agentFingerprint's goal, which is why
+// this is a separate hash rather than a reuse of that one.
+func cachePrefixHash(req *types.ChatRequest) string {
+	if req == nil {
+		return ""
+	}
+
+	var system strings.Builder
+	for _, m := range req.Messages {
+		if m.Role != "system" {
+			continue
+		}
+		// Only text system content renders into the cacheable span; a
+		// non-string body (multimodal) isn't a system prompt Anthropic accepts
+		// (provider.go rejects it), so it cannot be part of this measurement.
+		if s, ok := m.Content.(string); ok {
+			system.WriteString(s)
+			system.WriteString("\x00") // separator: keeps ["ab","c"] ≠ ["a","bc"]
+		}
+	}
+
+	type toolSig struct {
+		Name   string      `json:"n"`
+		Desc   string      `json:"d,omitempty"`
+		Params interface{} `json:"p,omitempty"`
+	}
+	var tools []toolSig
+	for _, t := range req.Tools {
+		tools = append(tools, toolSig{Name: t.Function.Name, Desc: t.Function.Description, Params: t.Function.Parameters})
+	}
+	for _, f := range req.Functions {
+		tools = append(tools, toolSig{Name: f.Name, Desc: f.Description, Params: f.Parameters})
+	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+
+	if system.Len() == 0 && len(tools) == 0 {
+		return ""
+	}
+
+	sig := struct {
+		Model  string    `json:"m,omitempty"`
+		System string    `json:"s,omitempty"`
+		Tools  []toolSig `json:"t,omitempty"`
+	}{Model: req.Model, System: system.String(), Tools: tools}
+
+	b, err := json.Marshal(sig)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // agentFingerprint computes the request's structural signature for the

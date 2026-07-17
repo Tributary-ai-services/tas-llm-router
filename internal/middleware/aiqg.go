@@ -46,6 +46,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/promptcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
 
@@ -96,6 +97,13 @@ type AIQGConfig struct {
 	// index, docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A). Nil disables linkage —
 	// events emit without step/parent topology, same as pre-C2a behavior.
 	Linkage linkage.Store
+
+	// PromptCache measures vendor prompt-cache opportunity
+	// (docs/AIQG-PROMPT-CACHE-CONTROL.md §9, P0): it reports whether a
+	// request's cacheable tools+system prefix recurred inside one cache
+	// lifetime. Measure-only — it never touches the outbound request. Nil
+	// disables the probe.
+	PromptCache promptcache.Probe
 
 	// Experiments resolves the experiment + variant that claims a request
 	// (Phase D, docs/AIQG-EXPERIMENTS-RUNNER.md). Nil disables experiments —
@@ -288,6 +296,12 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		// the request context may already be cancelled in this deferred path.
 		lk := resolveLinkage(cfg, parsed, routing, resolvedToken, respEventID)
 
+		// P0 prompt-cache probe: would this request's cacheable prefix have
+		// been a vendor cache read? Measure-only, and deliberately here in the
+		// deferred path — it runs after the response is served, so it cannot
+		// add latency to, or fail, the request it measures.
+		probePromptCache(cfg, routing, resolvedToken)
+
 		// Experiment attribution (Phase D): read the variant the completion
 		// handler resolved + stamped at routing time. dry_run stamps only;
 		// running additionally applied the override before Router.Route.
@@ -318,6 +332,62 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	defer instrumentation.StampComplete(ctx)
 
 	next.ServeHTTP(sw, r.WithContext(ctx))
+}
+
+// probePromptCache measures vendor prompt-cache opportunity for one request
+// (docs/AIQG-PROMPT-CACHE-CONTROL.md §9, P0) and logs the observation.
+//
+// Why this exists: the router cannot currently set cache_control at all (§1),
+// so vendor prompt caching is unreachable and 30 days of production traffic
+// show zero cached tokens (§9.1). Before adding a control surface that costs a
+// 1.25× write premium on prefixes that never recur, we measure whether they
+// recur at all — from live traffic, changing nothing. A `prefix_seen=true` here
+// is a cache read we are currently forgoing.
+//
+// Emits one structured line per cacheable request, so the reuse rate is a Loki
+// query rather than a new pipeline:
+//
+//	sum(count_over_time({...} |= "prompt-cache probe" | json | prefix_seen="true" [7d]))
+//	  / sum(count_over_time({...} |= "prompt-cache probe" [7d]))
+//
+// Best-effort throughout: this runs from a deferred path on an already-served
+// response, so every failure degrades to "no measurement", never to an error
+// the client can see.
+func probePromptCache(cfg AIQGConfig, routing *Routing, tok *tokens.Token) {
+	if cfg.PromptCache == nil || routing == nil || tok == nil {
+		return
+	}
+	rs := routing.Snapshot()
+	if rs.CachePrefixHash == "" {
+		return // nothing cacheable in this request — not a miss, not a datapoint
+	}
+
+	// Fresh context: the request context may already be cancelled here.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	seen, err := cfg.PromptCache.Observe(ctx, tok.TenantID, rs.CachePrefixHash)
+	if err != nil {
+		cfg.Logger.WithError(err).Warn("aiqg prompt-cache probe failed")
+		return
+	}
+
+	// prompt_tokens sizes the prize: on a hit, roughly this many tokens would
+	// have billed at the 0.1× read rate instead of 1.0×. Logged per-request so
+	// the rollout decision can be made on tokens, not just hit count — a 2%
+	// hit rate on 70k-token prefixes is a different call than 2% on 500-token
+	// ones.
+	f := logrus.Fields{
+		"cache_prefix_hash": rs.CachePrefixHash,
+		"prefix_seen":       seen,
+		"tenant_id":         tok.TenantID,
+		"model":             rs.Model,
+		"vendor":            rs.Vendor,
+	}
+	if rs.UsageSet {
+		f["prompt_tokens"] = rs.PromptTokens
+	}
+	cfg.Logger.WithFields(f).Info("aiqg prompt-cache probe")
 }
 
 // resolveLinkage runs the deterministic `linked`-tier resolution + indexing
