@@ -106,6 +106,16 @@ func (c *Config) JudgeSampleRate(global float64) float64 {
 	return global
 }
 
+// JudgeDailyUSD returns the tenant's per-tenant judge daily spend cap, or global
+// when unset. Pass global=0 to mean "no per-tenant cap unless the tenant set one"
+// — the judge loop's global ceiling still applies on top.
+func (c *Config) JudgeDailyUSD(global float64) float64 {
+	if c != nil && c.Judge != nil && c.Judge.DailyUSD != nil {
+		return *c.Judge.DailyUSD
+	}
+	return global
+}
+
 // Loader fetches a tenant's cache config. Implementations wrap the dashboard's
 // internal endpoint; the interface keeps the resolver testable.
 type Loader interface {
