@@ -21,9 +21,11 @@ the cached answer is correct for the new query, and each verdict (a) records a
 mined from our own traffic**, (b) tallies the sampled false-hit rate (§14's only
 ground truth) and L2's precision, and (c) trains a vCache-style `SimCalibrator`
 (online-BCE logistic P(correct|sim)) that recommends an L1 threshold for a chosen
-FPR budget. Enqueue never blocks (drops when full — fail-open). **Still
-SHADOW-only** — the judge is opt-in recurring LLM opex (§14.1) and is not yet
-wired to run in the gateway; enabling serving needs the labeled set it produces,
+FPR budget. Enqueue never blocks (drops when full — fail-open), and a
+`DailyBudget` hard-caps judge spend per UTC day (`AIQG_SEMCACHE_JUDGE_DAILY_USD`,
+default **$0.50**; the loop stops grading — `BudgetSkipped` — once the cap is hit
+and resets at midnight UTC). **Still SHADOW-only** — the judge is opt-in recurring
+LLM opex (§14.1) and is not yet wired to run in the gateway; enabling serving needs the labeled set it produces,
 not the seed set. Remaining: wire the judge into the shadow path + a Redis
 `PairSink` (needs the opex sign-off), S2-enable (on that real data), S3
 (accounting/UI/streaming).
@@ -577,6 +579,8 @@ semantic_cache:
     enabled: true
     sample_band: [0.88, 0.97]         # the danger zone (§9.2)
     sample_rate: 0.05
+    daily_usd: 0.50                   # hard per-UTC-day judge spend cap (§14.1);
+                                      # env AIQG_SEMCACHE_JUDGE_DAILY_USD, 0 = unlimited
   exploration_rate: 0.01              # probabilistic bypass — free ground truth
                                       # (GPTCache `temperature`; vCache τ̂)
 ```

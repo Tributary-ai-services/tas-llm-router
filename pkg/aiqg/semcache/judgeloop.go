@@ -34,14 +34,16 @@ func (f PairSinkFunc) Record(ctx context.Context, p JudgedPair) error { return f
 
 // JudgeStats is a snapshot of the loop's counters (feeds §14 metrics).
 type JudgeStats struct {
-	Enqueued  int // samples accepted onto the queue
-	Dropped   int // samples rejected because the queue was full (off-path, never blocks)
-	Graded    int // samples the judge returned a verdict for
-	Errors    int // judge or sink errors
-	WouldServe int // graded samples where L2 passed (the FPR denominator)
-	FalseHits int // of WouldServe, judged incorrect (the FPR numerator, §14 ground truth)
-	L2Rejected int // graded samples where L2 rejected the candidate
-	L2Correct  int // of L2Rejected, judge agreed it would have been wrong (L2 earned its keep)
+	Enqueued      int     // samples accepted onto the queue
+	Dropped       int     // samples rejected because the queue was full (off-path, never blocks)
+	BudgetSkipped int     // samples not graded because the daily $ cap was reached (§14.1)
+	Graded        int     // samples the judge returned a verdict for
+	Errors        int     // judge or sink errors
+	WouldServe    int     // graded samples where L2 passed (the FPR denominator)
+	FalseHits     int     // of WouldServe, judged incorrect (the FPR numerator, §14 ground truth)
+	L2Rejected    int     // graded samples where L2 rejected the candidate
+	L2Correct     int     // of L2Rejected, judge agreed it would have been wrong (L2 earned its keep)
+	SpentUSD      float64 // total judge spend accrued this process (lifetime, not per-day)
 }
 
 // SampledFPR is the sampled false-hit rate over would-serve samples — §14's "our
@@ -73,6 +75,7 @@ type Loop struct {
 	grader Grader
 	sink   PairSink
 	cal    *SimCalibrator
+	budget *DailyBudget
 	queue  chan Sample
 
 	mu    sync.Mutex
@@ -80,9 +83,11 @@ type Loop struct {
 }
 
 // NewLoop builds the judge loop. queueSize bounds the backlog (excess samples are
-// dropped and counted). A nil sink or grader yields a loop whose Enqueue is a
+// dropped and counted). budget is the daily USD spend cap (nil or a 0-cap budget
+// = unlimited); when today's cap is reached, samples are skipped ungraded and
+// counted as BudgetSkipped. A nil sink or grader yields a loop whose Enqueue is a
 // no-op drop — so a partially-configured deployment fails safe, not panicky.
-func NewLoop(grader Grader, sink PairSink, cal *SimCalibrator, queueSize int) *Loop {
+func NewLoop(grader Grader, sink PairSink, cal *SimCalibrator, budget *DailyBudget, queueSize int) *Loop {
 	if queueSize <= 0 {
 		queueSize = 256
 	}
@@ -90,6 +95,7 @@ func NewLoop(grader Grader, sink PairSink, cal *SimCalibrator, queueSize int) *L
 		grader: grader,
 		sink:   sink,
 		cal:    cal,
+		budget: budget,
 		queue:  make(chan Sample, queueSize),
 	}
 }
@@ -130,17 +136,26 @@ func (l *Loop) Run(ctx context.Context) {
 }
 
 func (l *Loop) process(ctx context.Context, s Sample) {
+	// Daily cost governor (§14.1): once today's cap is reached, stop grading until
+	// UTC midnight rolls the budget over. The sample is skipped, not queued — the
+	// judge is a metered luxury, never a backlog that spends tomorrow's budget.
+	if !l.budget.Allow() {
+		l.bump(func(st *JudgeStats) { st.BudgetSkipped++ })
+		return
+	}
 	v, err := l.grader.Grade(ctx, s)
 	if err != nil {
 		l.bump(func(st *JudgeStats) { st.Errors++ })
 		return
 	}
+	l.budget.Add(v.CostUSD)
 	// Tally: a would-serve sample judged incorrect is a false hit (the ground
 	// truth); an L2-rejected sample judged incorrect confirms L2 was right to
 	// reject. Only would-serve verdicts train the threshold — an L2 rejection is
 	// not a decision the L1 threshold governs.
 	l.bump(func(st *JudgeStats) {
 		st.Graded++
+		st.SpentUSD += v.CostUSD
 		switch {
 		case s.wouldServe():
 			st.WouldServe++
@@ -180,6 +195,15 @@ func (l *Loop) Stats() JudgeStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.stats
+}
+
+// Budget exposes today's cap / spend / remaining (for a metric or a status line).
+// Returns zeros when the loop has no budget configured.
+func (l *Loop) Budget() (capUSD, spent, remaining float64, day string) {
+	if l == nil {
+		return 0, 0, 0, ""
+	}
+	return l.budget.Snapshot()
 }
 
 // RecommendThreshold surfaces the calibrator's suggested L1 threshold for a
