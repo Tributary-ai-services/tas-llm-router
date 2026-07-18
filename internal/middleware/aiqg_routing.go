@@ -108,8 +108,16 @@ type Routing struct {
 	// called), "miss" (looked up, stored on the way out), "bypass" (TAS-Cache
 	// header or experiment-claimed), or "" (not eligible / cache off). cacheKeyHash
 	// is the exact-match key so a hit and its populating miss can be correlated.
-	cacheState    string
-	cacheKeyHash  string
+	cacheState   string
+	cacheKeyHash string
+
+	// cache savings (C2, docs/AIQG-CACHING.md §6): on a hit, the tokens and
+	// dollar cost the vendor call WOULD have incurred — priced from the cached
+	// entry's token counts. Zero on miss/bypass. This is the avoided-cost metric
+	// the Cost report aggregates; distinct from actual (~0) hit cost.
+	cacheSavedPromptTokens     int
+	cacheSavedCompletionTokens int
+	cacheSavedCostUSD          float64
 
 	// experiments (Phase D): the experiment + variant that claimed this
 	// request. Stamped at request time (so the routing override + the event
@@ -205,6 +213,11 @@ type RoutingSnapshot struct {
 	CacheState   string
 	CacheKeyHash string
 
+	// cache savings (C2): tokens + dollars a hit avoided. Zero on miss/bypass.
+	CacheSavedPromptTokens     int
+	CacheSavedCompletionTokens int
+	CacheSavedCostUSD          float64
+
 	// experiments (Phase D): claiming experiment + variant. Empty when none.
 	ExperimentID      string
 	ExperimentVariant string
@@ -217,36 +230,39 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return RoutingSnapshot{
-		Vendor:              r.vendor,
-		Model:               r.model,
-		Streaming:           r.streaming,
-		StreamingSet:        r.streamSet,
-		PromptTokens:        r.promptTokens,
-		CompletionTokens:    r.completionTokens,
-		CacheCreationTokens: r.cacheCreationTokens,
-		CacheReadTokens:     r.cacheReadTokens,
-		UsageSet:            r.usageSet,
-		InboundFindings:     copyCounts(r.inboundFindings),
-		OutboundFindings:    copyCounts(r.outboundFindings),
-		ScanRan:             r.scanRan,
-		FinishReason:        r.finishReason,
-		AttemptCount:        r.attemptCount,
-		FallbackUsed:        r.fallbackUsed,
-		RetrySet:            r.retrySet,
-		Workflow:            r.workflow,
-		NISTFindings:        copyCounts(r.nistFindings),
-		TagFindings:         copyCounts(r.tagFindings),
-		EchoedToolCallIDs:   append([]string(nil), r.echoedToolCallIDs...),
-		ServedToolCallIDs:   append([]string(nil), r.servedToolCallIDs...),
-		PrefixHash:          r.prefixHash,
-		StateHash:           r.stateHash,
-		Fingerprint:         r.fingerprint,
-		RedactionCount:      r.redactionCount,
-		CachePrefixHash:     r.cachePrefixHash,
-		CacheState:          r.cacheState,
-		CacheKeyHash:        r.cacheKeyHash,
-		ExperimentID:        r.experimentID,
-		ExperimentVariant:   r.experimentVariant,
+		Vendor:                     r.vendor,
+		Model:                      r.model,
+		Streaming:                  r.streaming,
+		StreamingSet:               r.streamSet,
+		PromptTokens:               r.promptTokens,
+		CompletionTokens:           r.completionTokens,
+		CacheCreationTokens:        r.cacheCreationTokens,
+		CacheReadTokens:            r.cacheReadTokens,
+		UsageSet:                   r.usageSet,
+		InboundFindings:            copyCounts(r.inboundFindings),
+		OutboundFindings:           copyCounts(r.outboundFindings),
+		ScanRan:                    r.scanRan,
+		FinishReason:               r.finishReason,
+		AttemptCount:               r.attemptCount,
+		FallbackUsed:               r.fallbackUsed,
+		RetrySet:                   r.retrySet,
+		Workflow:                   r.workflow,
+		NISTFindings:               copyCounts(r.nistFindings),
+		TagFindings:                copyCounts(r.tagFindings),
+		EchoedToolCallIDs:          append([]string(nil), r.echoedToolCallIDs...),
+		ServedToolCallIDs:          append([]string(nil), r.servedToolCallIDs...),
+		PrefixHash:                 r.prefixHash,
+		StateHash:                  r.stateHash,
+		Fingerprint:                r.fingerprint,
+		RedactionCount:             r.redactionCount,
+		CachePrefixHash:            r.cachePrefixHash,
+		CacheState:                 r.cacheState,
+		CacheKeyHash:               r.cacheKeyHash,
+		CacheSavedPromptTokens:     r.cacheSavedPromptTokens,
+		CacheSavedCompletionTokens: r.cacheSavedCompletionTokens,
+		CacheSavedCostUSD:          r.cacheSavedCostUSD,
+		ExperimentID:               r.experimentID,
+		ExperimentVariant:          r.experimentVariant,
 	}
 }
 
@@ -351,6 +367,22 @@ func StampCacheKeyHash(ctx context.Context, hash string) {
 	defer r.mu.Unlock()
 	if r.cacheKeyHash == "" {
 		r.cacheKeyHash = hash
+	}
+}
+
+// StampCacheSavings records the tokens and dollar cost a cache hit avoided (C2,
+// docs/AIQG-CACHING.md §6), priced from the cached entry. First-write-wins.
+func StampCacheSavings(ctx context.Context, promptTokens, completionTokens int, costUSD float64) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cacheSavedPromptTokens == 0 && r.cacheSavedCompletionTokens == 0 && r.cacheSavedCostUSD == 0 {
+		r.cacheSavedPromptTokens = promptTokens
+		r.cacheSavedCompletionTokens = completionTokens
+		r.cacheSavedCostUSD = costUSD
 	}
 }
 

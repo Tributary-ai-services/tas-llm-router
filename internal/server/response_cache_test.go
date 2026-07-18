@@ -76,8 +76,18 @@ func TestResponseCache_MissStoreHit(t *testing.T) {
 	if got2 != nil {
 		t.Fatal("second identical request should be a hit (nil return)")
 	}
-	if snap := middleware.RoutingFromContext(r2.Context()).Snapshot(); snap.CacheState != "hit" {
+	snap := middleware.RoutingFromContext(r2.Context()).Snapshot()
+	if snap.CacheState != "hit" {
 		t.Fatalf("expected cache_state=hit, got %q", snap.CacheState)
+	}
+	// C2: the hit records the avoided tokens (from the stored entry). Cost may be
+	// 0 if this vendor:model isn't priced, but the token counts must carry.
+	if snap.CacheSavedPromptTokens != 10 || snap.CacheSavedCompletionTokens != 1 {
+		t.Errorf("expected saved tokens 10/1 from the cached entry, got %d/%d",
+			snap.CacheSavedPromptTokens, snap.CacheSavedCompletionTokens)
+	}
+	if snap.CacheSavedCostUSD < 0 {
+		t.Errorf("saved cost must be non-negative, got %v", snap.CacheSavedCostUSD)
 	}
 	if w2.Header().Get("X-TAS-Cache") != "hit" {
 		t.Errorf("hit should set X-TAS-Cache: hit, got %q", w2.Header().Get("X-TAS-Cache"))

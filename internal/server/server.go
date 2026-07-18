@@ -880,6 +880,13 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 		// — not here after it.
 		if s.writeCachedResponse(w, entry) {
 			middleware.StampCacheState(r.Context(), "hit")
+			// C2: record the avoided cost — what the vendor call would have billed,
+			// priced from the cached entry's token counts (docs/AIQG-CACHING.md §6).
+			if cost, priced := clear.DollarCost(vendor, entry.Model, entry.PromptTokens, entry.CompletionTokens); priced {
+				middleware.StampCacheSavings(r.Context(), entry.PromptTokens, entry.CompletionTokens, cost)
+			} else {
+				middleware.StampCacheSavings(r.Context(), entry.PromptTokens, entry.CompletionTokens, 0)
+			}
 			return nil
 		}
 		// A corrupt/undecodable entry falls through to a live call.
