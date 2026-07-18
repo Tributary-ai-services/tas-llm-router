@@ -113,3 +113,40 @@ func TestLoop_StopsGradingAtDailyCap(t *testing.T) {
 		t.Errorf("SpentUSD=%.3f, want ~0.50", st.SpentUSD)
 	}
 }
+
+// TestLoop_PerTenantBudget: a per-tenant cap binds one tenant independently while
+// the global ceiling is generous — a capped tenant stops after ~1 grade, an
+// uncapped tenant keeps grading.
+func TestLoop_PerTenantBudget(t *testing.T) {
+	grader := GraderFunc(func(_ context.Context, _ Sample) (Verdict, error) {
+		return Verdict{Correct: true, CostUSD: 0.50}, nil // each grade spends $0.50
+	})
+	loop := NewLoop(grader,
+		PairSinkFunc(func(context.Context, JudgedPair) error { return nil }),
+		NewSimCalibrator(0, 0),
+		NewDailyBudget(100), // generous GLOBAL ceiling
+		64)
+	go loop.Run(t.Context())
+
+	// Tenant A: $0.50 cap → one grade consumes it. Tenant B: no cap.
+	for range 6 {
+		loop.Enqueue(Sample{Scope: scopeOf("A", "m1"), Query: "qa", CachedAnswer: "x", Similarity: 0.98, Observed: StateShadowHit, DailyUSD: 0.50})
+		loop.Enqueue(Sample{Scope: scopeOf("B", "m1"), Query: "qb", CachedAnswer: "x", Similarity: 0.98, Observed: StateShadowHit, DailyUSD: 0})
+	}
+	waitFor(t, func() bool { return loop.Stats().Graded+loop.Stats().BudgetSkipped >= 12 })
+
+	// Per-tenant accounting isn't in JudgeStats, but the global tallies prove the
+	// cap bound SOMETHING: tenant A's 6 → 1 graded + 5 skipped; tenant B's 6 all
+	// graded. So Graded == 7, BudgetSkipped == 5.
+	st := loop.Stats()
+	if st.Graded != 7 {
+		t.Errorf("Graded=%d, want 7 (1 for capped A + 6 for uncapped B)", st.Graded)
+	}
+	if st.BudgetSkipped != 5 {
+		t.Errorf("BudgetSkipped=%d, want 5 (A's over-cap samples)", st.BudgetSkipped)
+	}
+	// The global budget spent only $3.50 (7 grades) — nowhere near its $100 ceiling.
+	if _, spent, _, _ := loop.Budget(); spent < 3.4 || spent > 3.6 {
+		t.Errorf("global spent=%.2f, want ~3.50", spent)
+	}
+}

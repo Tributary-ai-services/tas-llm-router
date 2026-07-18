@@ -153,4 +153,11 @@ func TestJudgeHelpers_Override(t *testing.T) {
 	if c2.JudgeSampleRate(0.25) != 0.25 {
 		t.Error("unset sample rate should fall back to global")
 	}
+	// Per-tenant daily cap: override wins; unset falls back to the passed default.
+	if c := (&Config{Judge: &JudgeConfig{DailyUSD: fptr(0.25)}}); c.JudgeDailyUSD(0) != 0.25 {
+		t.Errorf("judge.daily_usd override should win: got %v", c.JudgeDailyUSD(0))
+	}
+	if nilC.JudgeDailyUSD(0) != 0 {
+		t.Error("unset daily cap with global 0 should be 0 (no per-tenant cap)")
+	}
 }

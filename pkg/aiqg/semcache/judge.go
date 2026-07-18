@@ -41,6 +41,10 @@ type Sample struct {
 	Observed string
 	// RejectReason is the L2 guard that fired when Observed == StateMiss.
 	RejectReason string
+	// DailyUSD is this sample's tenant's per-tenant judge spend cap for today. 0 =
+	// no per-tenant cap (only the loop's global ceiling applies). Layered ON TOP of
+	// the global budget — a grade must clear both.
+	DailyUSD float64
 }
 
 // wouldServe reports whether this sample is one the cache would (or did) serve —

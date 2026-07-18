@@ -14,8 +14,8 @@ type JudgedPair struct {
 	Scope      Scope   `json:"scope"`
 	Similarity float64 `json:"similarity"`
 	Confidence float64 `json:"confidence"`
-	Observed   string  `json:"observed"`      // cascade state that produced the sample
-	Reason     string  `json:"reason"`        // judge's rationale
+	Observed   string  `json:"observed"` // cascade state that produced the sample
+	Reason     string  `json:"reason"`   // judge's rationale
 	AtUnix     int64   `json:"at_unix"`
 }
 
@@ -78,8 +78,19 @@ type Loop struct {
 	budget *DailyBudget
 	queue  chan Sample
 
+	// Per-tenant daily budgets, layered ON TOP of the global `budget`. A tenant
+	// with no cap (Sample.DailyUSD<=0) has no entry — only the global ceiling
+	// bounds it. Keyed by tenant; recreated if the tenant's cap changes.
+	tbMu          sync.Mutex
+	tenantBudgets map[string]*tenantBudgetEntry
+
 	mu    sync.Mutex
 	stats JudgeStats
+}
+
+type tenantBudgetEntry struct {
+	budget *DailyBudget
+	cap    float64
 }
 
 // NewLoop builds the judge loop. queueSize bounds the backlog (excess samples are
@@ -92,12 +103,31 @@ func NewLoop(grader Grader, sink PairSink, cal *SimCalibrator, budget *DailyBudg
 		queueSize = 256
 	}
 	return &Loop{
-		grader: grader,
-		sink:   sink,
-		cal:    cal,
-		budget: budget,
-		queue:  make(chan Sample, queueSize),
+		grader:        grader,
+		sink:          sink,
+		cal:           cal,
+		budget:        budget,
+		queue:         make(chan Sample, queueSize),
+		tenantBudgets: map[string]*tenantBudgetEntry{},
 	}
+}
+
+// tenantBudget returns the per-tenant daily budget for capUSD, get-or-created. A
+// capUSD<=0 means "no per-tenant cap" → nil (nil DailyBudget is unlimited and
+// nil-safe), so only the global ceiling applies. A changed cap recreates the
+// budget (rare; bounded by the resolver TTL).
+func (l *Loop) tenantBudget(tenantID string, capUSD float64) *DailyBudget {
+	if capUSD <= 0 {
+		return nil
+	}
+	l.tbMu.Lock()
+	defer l.tbMu.Unlock()
+	e, ok := l.tenantBudgets[tenantID]
+	if !ok || e.cap != capUSD {
+		e = &tenantBudgetEntry{budget: NewDailyBudget(capUSD), cap: capUSD}
+		l.tenantBudgets[tenantID] = e
+	}
+	return e.budget
 }
 
 func (l *Loop) ready() bool { return l != nil && l.grader != nil && l.sink != nil }
@@ -138,8 +168,10 @@ func (l *Loop) Run(ctx context.Context) {
 func (l *Loop) process(ctx context.Context, s Sample) {
 	// Daily cost governor (§14.1): once today's cap is reached, stop grading until
 	// UTC midnight rolls the budget over. The sample is skipped, not queued — the
-	// judge is a metered luxury, never a backlog that spends tomorrow's budget.
-	if !l.budget.Allow() {
+	// judge is a metered luxury, never a backlog that spends tomorrow's budget. Both
+	// the GLOBAL ceiling and this tenant's per-tenant cap must permit the spend.
+	tb := l.tenantBudget(s.Scope.TenantID, s.DailyUSD)
+	if !l.budget.Allow() || !tb.Allow() {
 		l.bump(func(st *JudgeStats) { st.BudgetSkipped++ })
 		return
 	}
@@ -149,6 +181,7 @@ func (l *Loop) process(ctx context.Context, s Sample) {
 		return
 	}
 	l.budget.Add(v.CostUSD)
+	tb.Add(v.CostUSD)
 	// Tally: a would-serve sample judged incorrect is a false hit (the ground
 	// truth); an L2-rejected sample judged incorrect confirms L2 was right to
 	// reject. Only would-serve verdicts train the threshold — an L2 rejection is

@@ -108,6 +108,8 @@ func (s *Server) enqueueForJudge(scope semcache.Scope, prompt string, out semcac
 		Similarity:   out.Similarity,
 		Observed:     out.State,
 		RejectReason: out.RejectReason,
+		// Per-tenant daily cap (0 = none; the global ceiling still applies).
+		DailyUSD: cc.JudgeDailyUSD(0),
 	})
 }
 
