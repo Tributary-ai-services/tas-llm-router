@@ -119,6 +119,17 @@ type AIQGSemCacheConfig struct {
 	// tokens are recurring opex). Default 0.50; 0 (or negative) means unlimited.
 	// When the day's cap is reached the judge stops grading until UTC midnight.
 	JudgeDailyUSD float64 `yaml:"judge_daily_usd"`
+	// JudgeEnabled turns on the L3 async judge (grades sampled near-misses/would-
+	// hits off the hot path → labeled pairs + sampled FPR). Default OFF: it is
+	// recurring LLM opex, opt-in per §14.1. Env AIQG_SEMCACHE_JUDGE_ENABLED.
+	JudgeEnabled bool `yaml:"judge_enabled"`
+	// JudgeModel is the grader model. Empty falls back to the AIQG JudgeModel.
+	// Env AIQG_SEMCACHE_JUDGE_MODEL.
+	JudgeModel string `yaml:"judge_model"`
+	// JudgeSampleRate is the fraction of eligible lookups graded (0..1). Default
+	// 1.0 — at current traffic every data point is wanted. Env
+	// AIQG_SEMCACHE_JUDGE_SAMPLE_RATE.
+	JudgeSampleRate float64 `yaml:"judge_sample_rate"`
 }
 
 // AIQGResponseCacheConfig configures the C1 response cache. Env:
@@ -675,6 +686,21 @@ func (c *Config) loadFromEnv() {
 			c.AIQG.SemCache.JudgeDailyUSD = f
 		}
 	}
+	if v := os.Getenv("AIQG_SEMCACHE_JUDGE_ENABLED"); v != "" {
+		c.AIQG.SemCache.JudgeEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_JUDGE_MODEL"); v != "" {
+		c.AIQG.SemCache.JudgeModel = v
+	}
+	// Sample rate defaults to 1.0 (grade everything) unless set; env overrides.
+	if c.AIQG.SemCache.JudgeSampleRate == 0 {
+		c.AIQG.SemCache.JudgeSampleRate = 1.0
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_JUDGE_SAMPLE_RATE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.AIQG.SemCache.JudgeSampleRate = f
+		}
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -881,9 +907,12 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			TTL:           c.AIQG.SemCache.TTL,
 			RedisURL:      c.AIQG.SemCache.RedisURL,
 			OllamaURL:     c.AIQG.SemCache.OllamaURL,
-			EmbedModel:    c.AIQG.SemCache.EmbedModel,
-			Dim:           c.AIQG.SemCache.Dim,
-			JudgeDailyUSD: c.AIQG.SemCache.JudgeDailyUSD,
+			EmbedModel:      c.AIQG.SemCache.EmbedModel,
+			Dim:             c.AIQG.SemCache.Dim,
+			JudgeDailyUSD:   c.AIQG.SemCache.JudgeDailyUSD,
+			JudgeEnabled:    c.AIQG.SemCache.JudgeEnabled,
+			JudgeModel:      c.AIQG.SemCache.JudgeModel,
+			JudgeSampleRate: c.AIQG.SemCache.JudgeSampleRate,
 		},
 	}
 	if len(c.AIQG.Tokens) > 0 {

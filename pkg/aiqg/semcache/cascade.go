@@ -15,6 +15,10 @@ type Outcome struct {
 	State string
 	// Entry is the winning entry — set only for semantic_hit and shadow_hit.
 	Entry *Entry
+	// TopCandidate is the closest L1 candidate regardless of the L2 verdict (set
+	// whenever any candidate was generated). On a miss it carries the near-miss
+	// that L2 rejected, so the L3 judge can grade whether the rejection was right.
+	TopCandidate *Entry
 	// Similarity is the L1 cosine similarity of the top candidate considered.
 	Similarity float64
 	// Threshold is the L1 floor in force (for the event / danger-band chart).
@@ -83,7 +87,8 @@ func (c *Cache) Lookup(ctx context.Context, scope Scope, prompt string) Outcome 
 	// the strongest rejected candidate failed (for shadow analysis).
 	now := timeNow()
 	out.Similarity = cands[0].Similarity
-	out.RejectReason = "" // set below if the top candidate fails
+	out.TopCandidate = cands[0].Entry // the closest match, hit or miss (for L3)
+	out.RejectReason = ""             // set below if the top candidate fails
 	for i, cand := range cands {
 		res := Verify(prompt, cand.Entry, scope, now, c.cfg.TTL)
 		if res.Pass {
