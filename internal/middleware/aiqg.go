@@ -225,6 +225,15 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	// by the completion handler's goroutine and read by the deferred emit.
 	reductionMeasurement := &reductionMeasurementHolder{}
 	ctx = withReductionMeasurement(ctx, reductionMeasurement)
+
+	// Stash the resolved tenant so downstream handlers (the response caches,
+	// which tenant-namespace their keys) get the AIQG-resolved tenant — it lives
+	// in the Path-A token, not security.GetAuthInfo, so extractTenantID can't
+	// find it otherwise. Empty tenant would collapse every tenant's cache into
+	// one namespace (a cross-tenant leak).
+	if resolvedToken != nil && resolvedToken.TenantID != "" {
+		ctx = withResolvedTenant(ctx, resolvedToken.TenantID)
+	}
 	if cfg.PolicyResolver != nil && resolvedToken != nil {
 		res, err := cfg.PolicyResolver.Resolve(ctx, policy.ResolveRequest{
 			TenantID:           resolvedToken.TenantID,
@@ -620,6 +629,21 @@ type reductionMeasurementCtxKey struct{}
 
 func withReductionMeasurement(ctx context.Context, h *reductionMeasurementHolder) context.Context {
 	return context.WithValue(ctx, reductionMeasurementCtxKey{}, h)
+}
+
+type resolvedTenantCtxKey struct{}
+
+func withResolvedTenant(ctx context.Context, tenantID string) context.Context {
+	return context.WithValue(ctx, resolvedTenantCtxKey{}, tenantID)
+}
+
+// ResolvedTenantFromContext returns the AIQG Path-A resolved tenant id, or ""
+// when not in AIQG mode / unresolved. Handlers that tenant-namespace state (the
+// response caches) read this because the tenant lives in the AIQG token, not
+// security.GetAuthInfo.
+func ResolvedTenantFromContext(ctx context.Context) string {
+	t, _ := ctx.Value(resolvedTenantCtxKey{}).(string)
+	return t
 }
 
 // ExpectReductionMeasurement signals that a shadow measurement goroutine has
