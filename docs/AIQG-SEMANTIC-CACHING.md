@@ -1,6 +1,6 @@
 # AIQG — Semantic Response Caching (Design)
 
-Status: **C4 through S1 SHADOW is LIVE; S2 calibration tooling built.**
+Status: **C4 through S1 SHADOW is LIVE; S2 + S4 tooling built (serving still OFF).**
 `pkg/aiqg/semcache` has the full cascade (L1 candidate gen + the L2 verification
 gate + FLAT `MemoryStore` + `RedisStore` on RediSearch FT.* + `OllamaEmbedder`),
 wired into the gateway on the C1 exact-miss in **shadow mode** (logs would-hits,
@@ -12,11 +12,21 @@ near-duplicates at cosine 0.91–0.96 that a threshold-only cache would false-hi
 §9.2) embeds a labeled pair set once, sweeps the threshold with/without L2, and
 recommends the max-hit-rate threshold within an FPR budget. On the seed set it
 quantifies L2's value: cascade hits 0% FPR / 100% hit at threshold 0.80, while
-threshold-only cannot meet a 1% FPR budget at any useful threshold. **Still
-SHADOW-only** — enabling serving needs a real labeled set mined from shadow
-traffic + the L3 judge (§9.2 step 1: calibrate on our own traffic), not the seed
-set. Remaining: S2-enable (on real data), S3 (accounting/UI/streaming), S4 (L3
-async judge — the learning loop).
+threshold-only cannot meet a 1% FPR budget at any useful threshold. **S4**: the
+L3 async-judge / learning loop is built in `pkg/aiqg/semcache` (`judge.go` +
+`learn.go` + `judgeloop.go`) — a bounded, off-critical-path `Loop` samples
+near-misses + would-hits in the danger band, a blind LLM `Grader` grades whether
+the cached answer is correct for the new query, and each verdict (a) records a
+`JudgedPair` to a `PairSink` — **this is the real labeled set §9.2 step 1 needs,
+mined from our own traffic**, (b) tallies the sampled false-hit rate (§14's only
+ground truth) and L2's precision, and (c) trains a vCache-style `SimCalibrator`
+(online-BCE logistic P(correct|sim)) that recommends an L1 threshold for a chosen
+FPR budget. Enqueue never blocks (drops when full — fail-open). **Still
+SHADOW-only** — the judge is opt-in recurring LLM opex (§14.1) and is not yet
+wired to run in the gateway; enabling serving needs the labeled set it produces,
+not the seed set. Remaining: wire the judge into the shadow path + a Redis
+`PairSink` (needs the opex sign-off), S2-enable (on that real data), S3
+(accounting/UI/streaming).
 Gateway feature (`tas-llm-router`). Expands §9 of [`AIQG-CACHING.md`](AIQG-CACHING.md)
 (phase C4) and closes out issue
 [tas-llm-router#97](https://github.com/Tributary-ai-services/tas-llm-router/issues/97).
