@@ -1061,8 +1061,14 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *responsecache
 	return true
 }
 
-// extractTenantID extracts tenant ID from request context or headers.
+// extractTenantID extracts tenant ID from request context or headers. In AIQG
+// mode the tenant is resolved from the Path-A token (not security.GetAuthInfo),
+// so that resolution wins — otherwise the response caches would namespace every
+// AIQG tenant's entries under one empty-tenant key (a cross-tenant leak).
 func (s *Server) extractTenantID(r *http.Request) string {
+	if tid := middleware.ResolvedTenantFromContext(r.Context()); tid != "" {
+		return tid
+	}
 	if authInfo, ok := security.GetAuthInfo(r.Context()); ok && authInfo.Metadata != nil {
 		if tid, exists := authInfo.Metadata["tenant_id"]; exists {
 			return tid
