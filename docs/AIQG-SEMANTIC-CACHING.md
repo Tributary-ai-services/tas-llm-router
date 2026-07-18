@@ -1,13 +1,22 @@
 # AIQG — Semantic Response Caching (Design)
 
-Status: **C4 STARTED** — the store-agnostic cascade core is implemented in
-`pkg/aiqg/semcache` (L1 candidate gen + the L2 verification gate + L2 lexical
-guards + a FLAT `MemoryStore` + the `VectorStore`/`Embedder` ports), with the
-adversarial cases from §1.1/§5 as tests (Chase Sapphire vs Sapphire **Reserve**,
-negation, number/date/version, tenant/model isolation, freshness). Redaction —
-the other S0 prerequisite (§4.1.1) — is DONE and deployed (G1). **Still gated on
-S0 infra**: a shared vector store (Redis 8 `FT.*` or pgvector — §7) plus the
-production `Embedder` (TEI/Ollama), before S1 shadow mode can run in-cluster.
+Status: **C4 through S1 SHADOW is LIVE; S2 calibration tooling built.**
+`pkg/aiqg/semcache` has the full cascade (L1 candidate gen + the L2 verification
+gate + FLAT `MemoryStore` + `RedisStore` on RediSearch FT.* + `OllamaEmbedder`),
+wired into the gateway on the C1 exact-miss in **shadow mode** (logs would-hits,
+serves nothing). S0 infra done: dedicated `redis-semcache` (redis-stack-server,
+FT.* FLAT COSINE DIM-384) + `all-minilm` embeddings + G1 redaction. Verified under
+load (~580 req/10min): would-hit similarity median 0.9875, L2 correctly rejects
+near-duplicates at cosine 0.91–0.96 that a threshold-only cache would false-hit.
+**S2**: the offline threshold-sweep tool (`cmd/semcache-calibrate` + `calibrate.go`,
+§9.2) embeds a labeled pair set once, sweeps the threshold with/without L2, and
+recommends the max-hit-rate threshold within an FPR budget. On the seed set it
+quantifies L2's value: cascade hits 0% FPR / 100% hit at threshold 0.80, while
+threshold-only cannot meet a 1% FPR budget at any useful threshold. **Still
+SHADOW-only** — enabling serving needs a real labeled set mined from shadow
+traffic + the L3 judge (§9.2 step 1: calibrate on our own traffic), not the seed
+set. Remaining: S2-enable (on real data), S3 (accounting/UI/streaming), S4 (L3
+async judge — the learning loop).
 Gateway feature (`tas-llm-router`). Expands §9 of [`AIQG-CACHING.md`](AIQG-CACHING.md)
 (phase C4) and closes out issue
 [tas-llm-router#97](https://github.com/Tributary-ai-services/tas-llm-router/issues/97).
