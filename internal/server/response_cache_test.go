@@ -106,7 +106,7 @@ func TestResponseCache_TenantIsolation(t *testing.T) {
 	s := cacheTestServer()
 	_, r1, req := newCacheReq(t)
 	s.maybeStoreInCache(r1.WithContext(responsecache.WithPending(r1.Context(), "tenant-a",
-		responsecache.KeyHash("tenant-a", "anthropic", req, ""))),
+		responsecache.KeyHash("tenant-a", "anthropic", req, "", ""))),
 		&types.ChatResponse{ID: "x", Model: "m", Choices: []types.Choice{{Message: types.Message{Content: "secret"}}}})
 
 	// tenant-b, same prompt → miss.
@@ -133,6 +133,65 @@ func TestResponseCache_HeaderBypass(t *testing.T) {
 	}
 	if snap := middleware.RoutingFromContext(r.Context()).Snapshot(); snap.CacheState != "bypass" {
 		t.Fatalf("expected cache_state=bypass, got %q", snap.CacheState)
+	}
+}
+
+// Default (InExperiments=false): an experiment-claimed request bypasses the
+// cache so each variant's measurement reflects real variant calls (§7).
+func TestResponseCache_ExperimentBypassByDefault(t *testing.T) {
+	s := cacheTestServer()
+	w, r, req := newCacheReq(t)
+	middleware.StampExperiment(r.Context(), "exp-1", "A")
+	got := s.maybeServeFromCache(w, r, req, "anthropic")
+	if got == nil {
+		t.Fatal("experiment request should not be served a hit")
+	}
+	if snap := middleware.RoutingFromContext(r.Context()).Snapshot(); snap.CacheState != "bypass" {
+		t.Fatalf("expected cache_state=bypass, got %q", snap.CacheState)
+	}
+	if _, ok := responsecache.PendingFromContext(got.Context()); ok {
+		t.Error("bypassed experiment request must not stash a store intent")
+	}
+}
+
+// InExperiments=true: cache within the experiment, but variant A and B never
+// share an entry (the key is variant-scoped).
+func TestResponseCache_CacheWithinExperiment(t *testing.T) {
+	s := cacheTestServer()
+	s.respCacheCfg.InExperiments = true
+
+	// Variant A miss → store.
+	_, rA, reqA := newCacheReq(t)
+	middleware.StampExperiment(rA.Context(), "exp-1", "A")
+	gotA := s.maybeServeFromCache(nil, rA, reqA, "anthropic")
+	if gotA == nil {
+		t.Fatal("variant A should be a cacheable miss, not a bypass")
+	}
+	if snap := middleware.RoutingFromContext(rA.Context()).Snapshot(); snap.CacheState != "miss" {
+		t.Fatalf("expected miss for variant A, got %q", snap.CacheState)
+	}
+	s.maybeStoreInCache(gotA, &types.ChatResponse{ID: "a", Model: "claude-opus-4-8",
+		Choices: []types.Choice{{Message: types.Message{Content: "answer-A"}}}})
+
+	// Variant B, same prompt → MISS (separate entry), not A's hit.
+	wB, rB, reqB := newCacheReq(t)
+	middleware.StampExperiment(rB.Context(), "exp-1", "B")
+	gotB := s.maybeServeFromCache(wB, rB, reqB, "anthropic")
+	if gotB == nil {
+		t.Fatal("variant B must not read variant A's entry")
+	}
+	if snap := middleware.RoutingFromContext(rB.Context()).Snapshot(); snap.CacheState != "miss" {
+		t.Fatalf("expected miss for variant B, got %q", snap.CacheState)
+	}
+
+	// Variant A again, same prompt → HIT (its own entry).
+	wA2, rA2, reqA2 := newCacheReq(t)
+	middleware.StampExperiment(rA2.Context(), "exp-1", "A")
+	if s.maybeServeFromCache(wA2, rA2, reqA2, "anthropic") != nil {
+		t.Fatal("variant A repeat should hit its own entry")
+	}
+	if snap := middleware.RoutingFromContext(rA2.Context()).Snapshot(); snap.CacheState != "hit" {
+		t.Fatalf("expected hit for variant A repeat, got %q", snap.CacheState)
 	}
 }
 

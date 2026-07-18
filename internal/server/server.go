@@ -207,6 +207,7 @@ type AIQGResponseCacheConfig struct {
 	TTL                   time.Duration `yaml:"ttl"`
 	MaxBodyBytes          int           `yaml:"max_body_bytes"`
 	AllowNondeterministic bool          `yaml:"allow_nondeterministic"`
+	InExperiments         bool          `yaml:"in_experiments"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Brokers + topic are
@@ -351,6 +352,7 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				TTL:                  ttl,
 				RequireDeterministic: !config.AIQG.ResponseCache.AllowNondeterministic,
 				MaxBodyBytes:         config.AIQG.ResponseCache.MaxBodyBytes,
+				InExperiments:        config.AIQG.ResponseCache.InExperiments,
 			}
 			backend := "memory"
 			if sharedRedis != nil {
@@ -861,15 +863,24 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 	if !d.Cacheable {
 		return r
 	}
-	// Experiment-claimed requests bypass the cache so each variant's measurement
-	// reflects real variant calls (docs/AIQG-CACHING.md §7).
-	if rt := middleware.RoutingFromContext(r.Context()); rt != nil && rt.Snapshot().ExperimentID != "" {
-		middleware.StampCacheState(r.Context(), "bypass")
-		return r
+	// Experiment interaction (docs/AIQG-CACHING.md §7, C3). By default an
+	// experiment-claimed request bypasses the cache so each variant's measurement
+	// reflects real variant calls. When InExperiments is opted in, cache instead
+	// but fold the variant into the key so variant A and B never share an entry;
+	// the dashboard's per-variant queries then exclude cache hits from the verdict.
+	variant := ""
+	if rt := middleware.RoutingFromContext(r.Context()); rt != nil {
+		if snap := rt.Snapshot(); snap.ExperimentID != "" {
+			if !s.respCacheCfg.InExperiments {
+				middleware.StampCacheState(r.Context(), "bypass")
+				return r
+			}
+			variant = snap.ExperimentID + ":" + snap.ExperimentVariant
+		}
 	}
 
 	tenantID := s.extractTenantID(r)
-	hash := responsecache.KeyHash(tenantID, vendor, req, events.ScoringVersion)
+	hash := responsecache.KeyHash(tenantID, vendor, req, events.ScoringVersion, variant)
 	middleware.StampCacheKeyHash(r.Context(), hash)
 
 	if entry, ok, err := s.respCache.Get(r.Context(), tenantID, hash); err != nil {

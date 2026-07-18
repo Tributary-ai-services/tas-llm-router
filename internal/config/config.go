@@ -110,6 +110,9 @@ type AIQGResponseCacheConfig struct {
 	// AllowNondeterministic caches temperature>0 requests too. Default false
 	// (require_deterministic=true) — the safe posture.
 	AllowNondeterministic bool `yaml:"allow_nondeterministic"`
+	// InExperiments caches WITHIN experiments (C3, variant folded into the key)
+	// instead of bypassing experiment-claimed requests. Default false.
+	InExperiments bool `yaml:"in_experiments"`
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Defined here (not in
@@ -603,6 +606,9 @@ func (c *Config) loadFromEnv() {
 	if v := os.Getenv("AIQG_RESPONSE_CACHE_ALLOW_NONDETERMINISTIC"); v != "" {
 		c.AIQG.ResponseCache.AllowNondeterministic = v == "true" || v == "1"
 	}
+	if v := os.Getenv("AIQG_RESPONSE_CACHE_IN_EXPERIMENTS"); v != "" {
+		c.AIQG.ResponseCache.InExperiments = v == "true" || v == "1"
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -800,6 +806,7 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			TTL:                   c.AIQG.ResponseCache.TTL,
 			MaxBodyBytes:          c.AIQG.ResponseCache.MaxBodyBytes,
 			AllowNondeterministic: c.AIQG.ResponseCache.AllowNondeterministic,
+			InExperiments:         c.AIQG.ResponseCache.InExperiments,
 		},
 	}
 	if len(c.AIQG.Tokens) > 0 {

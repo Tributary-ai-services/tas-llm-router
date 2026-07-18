@@ -1,10 +1,13 @@
 # AIQG — Response Caching (Design)
 
-Status: **C1 (exact-match v1) IMPLEMENTED** — `pkg/aiqg/responsecache` + the
-lookup/store wiring in `internal/server` (`maybeServeFromCache` /
-`maybeStoreInCache`). Default off; enable per deployment with
-`AIQG_RESPONSE_CACHE_ENABLED=true`. C2 (accounting/UI), C3 (experiment keying),
-and C4 (semantic, `AIQG-SEMANTIC-CACHING.md`) remain design-only. Gateway feature
+Status: **C1–C3 IMPLEMENTED** — `pkg/aiqg/responsecache` + the lookup/store wiring
+in `internal/server` (`maybeServeFromCache` / `maybeStoreInCache`). Default off;
+enable per deployment with `AIQG_RESPONSE_CACHE_ENABLED=true`. **C2** (accounting/UI)
+ships the savings metric + hit/miss split across `aiqg-dashboard-be` + `aiqg-ui`.
+**C3** (experiment integration): bypass-by-default is on; caching *within* an
+experiment is opt-in via `AIQG_RESPONSE_CACHE_IN_EXPERIMENTS=true` (variant folded
+into the key), and the experiment results query excludes cache hits. Only **C4**
+(semantic, `AIQG-SEMANTIC-CACHING.md`) remains design-only. Gateway feature
 (`tas-llm-router`). Related: `AIQG-EXTENSION.md` (already reserves a
 `cache_state` event dimension), `AIQG-EXPERIMENTS-RUNNER.md` (cache must be
 experiment-aware), `AIQG-AGENT-FLOW-ATTRIBUTION.md`, `account.md`
