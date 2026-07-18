@@ -228,8 +228,9 @@ type AIQGSemCacheConfig struct {
 	TTL           time.Duration `yaml:"ttl"`
 	RedisURL      string        `yaml:"redis_url"`   // redis-semcache (redis-stack)
 	OllamaURL     string        `yaml:"ollama_url"`  // embeddings server
-	EmbedModel    string        `yaml:"embed_model"` // all-minilm
-	Dim           int           `yaml:"dim"`         // 384
+	EmbedModel    string        `yaml:"embed_model"`     // all-minilm
+	Dim           int           `yaml:"dim"`             // 384
+	JudgeDailyUSD float64       `yaml:"judge_daily_usd"` // L3 judge daily $ cap (§14.1); 0 = unlimited
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Brokers + topic are

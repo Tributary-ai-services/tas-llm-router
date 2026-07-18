@@ -39,9 +39,9 @@ func TestParseVerdict(t *testing.T) {
 
 func TestPromptGrader_BuildsBlindPrompt(t *testing.T) {
 	var gotSystem, gotUser string
-	g := NewPromptGrader(func(_ context.Context, system, user string) (string, error) {
+	g := NewPromptGrader(func(_ context.Context, system, user string) (string, float64, error) {
 		gotSystem, gotUser = system, user
-		return `{"correct": false, "confidence": 0.6, "reason": "different card tier"}`, nil
+		return `{"correct": false, "confidence": 0.6, "reason": "different card tier"}`, 0.0007, nil
 	})
 	v, err := g.Grade(context.Background(), Sample{
 		Query:        "What are the fees on the Chase Sapphire Reserve card",
@@ -52,6 +52,9 @@ func TestPromptGrader_BuildsBlindPrompt(t *testing.T) {
 	}
 	if v.Correct {
 		t.Error("expected incorrect verdict for a tier mismatch")
+	}
+	if v.CostUSD != 0.0007 {
+		t.Errorf("CostUSD = %v, want 0.0007 (propagated from the transport)", v.CostUSD)
 	}
 	// Blind: the grading prompt must carry the question + candidate answer, and
 	// must NOT reveal that the answer came from a *different* cached question.
@@ -147,9 +150,9 @@ func TestLoop_EndToEnd(t *testing.T) {
 		// Incorrect when the cached answer is about the wrong thing: the base card
 		// (a tier mismatch) or a different seat count (an entity mismatch).
 		wrong := contains(s.CachedAnswer, "base") || contains(s.CachedAnswer, "5 seats")
-		return Verdict{Correct: !wrong, Confidence: 0.9}, nil
+		return Verdict{Correct: !wrong, Confidence: 0.9, CostUSD: 0.001}, nil
 	})
-	loop := NewLoop(grader, sink, NewSimCalibrator(0.5, 1), 8)
+	loop := NewLoop(grader, sink, NewSimCalibrator(0.5, 1), NewDailyBudget(1.0), 8)
 
 	go loop.Run(t.Context())
 
@@ -175,6 +178,13 @@ func TestLoop_EndToEnd(t *testing.T) {
 	if p := st.L2Precision(); p != 1.0 {
 		t.Errorf("L2Precision=%.3f, want 1.0", p)
 	}
+	// 4 grades × $0.001 metered against the budget.
+	if st.SpentUSD < 0.0039 || st.SpentUSD > 0.0041 {
+		t.Errorf("SpentUSD=%.4f, want ~0.004", st.SpentUSD)
+	}
+	if _, spent, _, _ := loop.Budget(); spent < 0.0039 || spent > 0.0041 {
+		t.Errorf("budget spent=%.4f, want ~0.004", spent)
+	}
 
 	mu.Lock()
 	np := len(pairs)
@@ -191,7 +201,7 @@ func TestLoop_EnqueueDropsWhenFull(t *testing.T) {
 		<-release
 		return Verdict{Correct: true}, nil
 	})
-	loop := NewLoop(grader, PairSinkFunc(func(context.Context, JudgedPair) error { return nil }), NewSimCalibrator(0, 0), 2)
+	loop := NewLoop(grader, PairSinkFunc(func(context.Context, JudgedPair) error { return nil }), NewSimCalibrator(0, 0), nil, 2)
 	go loop.Run(t.Context())
 
 	// Enqueue far more than capacity while the worker is blocked; Enqueue must
@@ -221,7 +231,7 @@ func TestLoop_NilSafe(t *testing.T) {
 	}
 	l.Run(context.Background()) // must not panic
 	// A loop missing a grader/sink is not ready.
-	partial := NewLoop(nil, nil, nil, 4)
+	partial := NewLoop(nil, nil, nil, nil, 4)
 	if partial.Enqueue(Sample{}) {
 		t.Error("loop without grader/sink should drop")
 	}

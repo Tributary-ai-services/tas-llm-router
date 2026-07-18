@@ -105,7 +105,7 @@ type AIQGConfig struct {
 // AIQGSemCacheConfig configures the C4 semantic cache. Env:
 // AIQG_SEMCACHE_ENABLED, AIQG_SEMCACHE_SHADOW (default true), AIQG_SEMCACHE_MIN_SIMILARITY,
 // AIQG_SEMCACHE_TTL (Go duration), AIQG_SEMCACHE_REDIS_URL, AIQG_SEMCACHE_OLLAMA_URL,
-// AIQG_SEMCACHE_EMBED_MODEL, AIQG_SEMCACHE_DIM.
+// AIQG_SEMCACHE_EMBED_MODEL, AIQG_SEMCACHE_DIM, AIQG_SEMCACHE_JUDGE_DAILY_USD.
 type AIQGSemCacheConfig struct {
 	Enabled       bool          `yaml:"enabled"`
 	Shadow        bool          `yaml:"shadow"`
@@ -115,6 +115,10 @@ type AIQGSemCacheConfig struct {
 	OllamaURL     string        `yaml:"ollama_url"`
 	EmbedModel    string        `yaml:"embed_model"`
 	Dim           int           `yaml:"dim"`
+	// JudgeDailyUSD caps the L3 async judge's spend per UTC day (§14.1 — judge
+	// tokens are recurring opex). Default 0.50; 0 (or negative) means unlimited.
+	// When the day's cap is reached the judge stops grading until UTC midnight.
+	JudgeDailyUSD float64 `yaml:"judge_daily_usd"`
 }
 
 // AIQGResponseCacheConfig configures the C1 response cache. Env:
@@ -660,6 +664,17 @@ func (c *Config) loadFromEnv() {
 			c.AIQG.SemCache.Dim = n
 		}
 	}
+	// L3 judge daily spend cap defaults to $0.50/UTC-day when unset (§14.1). An
+	// explicit env value overrides, and env "0" means unlimited (YAML cannot
+	// express unlimited — a zero there reads as unset and takes the default).
+	if c.AIQG.SemCache.JudgeDailyUSD == 0 {
+		c.AIQG.SemCache.JudgeDailyUSD = 0.50
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_JUDGE_DAILY_USD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.AIQG.SemCache.JudgeDailyUSD = f
+		}
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -868,6 +883,7 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			OllamaURL:     c.AIQG.SemCache.OllamaURL,
 			EmbedModel:    c.AIQG.SemCache.EmbedModel,
 			Dim:           c.AIQG.SemCache.Dim,
+			JudgeDailyUSD: c.AIQG.SemCache.JudgeDailyUSD,
 		},
 	}
 	if len(c.AIQG.Tokens) > 0 {

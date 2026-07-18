@@ -56,6 +56,9 @@ type Verdict struct {
 	// Confidence is the judge's self-reported certainty [0,1] (0 when unknown).
 	Confidence float64
 	Reason     string
+	// CostUSD is what this grade cost in judge tokens, priced by the transport.
+	// Metered against the daily budget (§14.1) and summed into JudgeStats.SpentUSD.
+	CostUSD float64
 }
 
 // Grader grades a sample. Implementations wrap an LLM call; the interface keeps
@@ -72,9 +75,11 @@ type GraderFunc func(ctx context.Context, s Sample) (Verdict, error)
 func (f GraderFunc) Grade(ctx context.Context, s Sample) (Verdict, error) { return f(ctx, s) }
 
 // ChatFunc is a single-shot LLM call: a system + user prompt in, the model's text
-// out. The caller binds it to the router's own client at wiring time, so this
-// package depends on no server types.
-type ChatFunc func(ctx context.Context, system, user string) (string, error)
+// plus what the call cost (USD, priced by the caller from token usage) out. The
+// caller binds it to the router's own client at wiring time, so this package
+// depends on no server types and no pricing table. Return costUSD 0 if unknown —
+// the budget then meters by grade count only if a flat per-grade cost is set.
+type ChatFunc func(ctx context.Context, system, user string) (text string, costUSD float64, err error)
 
 // PromptGrader is the default Grader: it asks an LLM, BLIND (§14.1 step 2 — the
 // judge is not told which answer is cached vs fresh, only "does this answer this
@@ -100,11 +105,16 @@ func (g *PromptGrader) Grade(ctx context.Context, s Sample) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("semcache: PromptGrader has no chat transport")
 	}
 	user := fmt.Sprintf("USER QUESTION:\n%s\n\nCANDIDATE ANSWER:\n%s", s.Query, s.CachedAnswer)
-	out, err := g.chat(ctx, judgeSystemPrompt, user)
+	out, costUSD, err := g.chat(ctx, judgeSystemPrompt, user)
 	if err != nil {
 		return Verdict{}, err
 	}
-	return parseVerdict(out)
+	v, err := parseVerdict(out)
+	if err != nil {
+		return Verdict{}, err
+	}
+	v.CostUSD = costUSD
+	return v, nil
 }
 
 // parseVerdict reads the judge's reply. It prefers the strict JSON contract and
