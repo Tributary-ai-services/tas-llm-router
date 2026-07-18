@@ -96,6 +96,25 @@ type AIQGConfig struct {
 	// Default off. Reuses the linkage Redis client; falls back to a per-pod
 	// in-memory cache when Redis isn't configured.
 	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
+
+	// SemCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
+	// Default off. Uses the dedicated redis-semcache (FT.*) + Ollama embeddings.
+	SemCache AIQGSemCacheConfig `yaml:"semantic_cache"`
+}
+
+// AIQGSemCacheConfig configures the C4 semantic cache. Env:
+// AIQG_SEMCACHE_ENABLED, AIQG_SEMCACHE_SHADOW (default true), AIQG_SEMCACHE_MIN_SIMILARITY,
+// AIQG_SEMCACHE_TTL (Go duration), AIQG_SEMCACHE_REDIS_URL, AIQG_SEMCACHE_OLLAMA_URL,
+// AIQG_SEMCACHE_EMBED_MODEL, AIQG_SEMCACHE_DIM.
+type AIQGSemCacheConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	Shadow        bool          `yaml:"shadow"`
+	MinSimilarity float64       `yaml:"min_similarity"`
+	TTL           time.Duration `yaml:"ttl"`
+	RedisURL      string        `yaml:"redis_url"`
+	OllamaURL     string        `yaml:"ollama_url"`
+	EmbedModel    string        `yaml:"embed_model"`
+	Dim           int           `yaml:"dim"`
 }
 
 // AIQGResponseCacheConfig configures the C1 response cache. Env:
@@ -609,6 +628,38 @@ func (c *Config) loadFromEnv() {
 	if v := os.Getenv("AIQG_RESPONSE_CACHE_IN_EXPERIMENTS"); v != "" {
 		c.AIQG.ResponseCache.InExperiments = v == "true" || v == "1"
 	}
+	// C4 semantic cache. Shadow defaults ON when enabled (safe first mode).
+	if v := os.Getenv("AIQG_SEMCACHE_ENABLED"); v != "" {
+		c.AIQG.SemCache.Enabled = v == "true" || v == "1"
+		c.AIQG.SemCache.Shadow = true
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_SHADOW"); v != "" {
+		c.AIQG.SemCache.Shadow = v == "true" || v == "1"
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_MIN_SIMILARITY"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.AIQG.SemCache.MinSimilarity = f
+		}
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.AIQG.SemCache.TTL = d
+		}
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_REDIS_URL"); v != "" {
+		c.AIQG.SemCache.RedisURL = v
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_OLLAMA_URL"); v != "" {
+		c.AIQG.SemCache.OllamaURL = v
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_EMBED_MODEL"); v != "" {
+		c.AIQG.SemCache.EmbedModel = v
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_DIM"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.AIQG.SemCache.Dim = n
+		}
+	}
 	if u := os.Getenv("AIQG_DASHBOARD_URL"); u != "" {
 		c.AIQG.DashboardURL = u
 	}
@@ -807,6 +858,16 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			MaxBodyBytes:          c.AIQG.ResponseCache.MaxBodyBytes,
 			AllowNondeterministic: c.AIQG.ResponseCache.AllowNondeterministic,
 			InExperiments:         c.AIQG.ResponseCache.InExperiments,
+		},
+		SemCache: server.AIQGSemCacheConfig{
+			Enabled:       c.AIQG.SemCache.Enabled,
+			Shadow:        c.AIQG.SemCache.Shadow,
+			MinSimilarity: c.AIQG.SemCache.MinSimilarity,
+			TTL:           c.AIQG.SemCache.TTL,
+			RedisURL:      c.AIQG.SemCache.RedisURL,
+			OllamaURL:     c.AIQG.SemCache.OllamaURL,
+			EmbedModel:    c.AIQG.SemCache.EmbedModel,
+			Dim:           c.AIQG.SemCache.Dim,
 		},
 	}
 	if len(c.AIQG.Tokens) > 0 {

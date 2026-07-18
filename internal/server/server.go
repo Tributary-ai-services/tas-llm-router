@@ -30,6 +30,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/promptcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/responsecache"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/semcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 
@@ -67,6 +68,11 @@ type Server struct {
 	// Nil when disabled — every cache branch is a no-op in that case.
 	respCache    responsecache.Cache
 	respCacheCfg responsecache.Config
+
+	// semCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
+	// Nil when disabled. Runs on the C1 exact-miss path (L0→L1). In shadow mode
+	// it logs would-hits and serves nothing.
+	semCache *semcache.Cache
 }
 
 // ServerConfig holds server configuration
@@ -198,6 +204,9 @@ type AIQGServerConfig struct {
 
 	// ResponseCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
 	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
+
+	// SemCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
+	SemCache AIQGSemCacheConfig `yaml:"semantic_cache"`
 }
 
 // AIQGResponseCacheConfig configures the C1 response cache. Mirrors
@@ -208,6 +217,19 @@ type AIQGResponseCacheConfig struct {
 	MaxBodyBytes          int           `yaml:"max_body_bytes"`
 	AllowNondeterministic bool          `yaml:"allow_nondeterministic"`
 	InExperiments         bool          `yaml:"in_experiments"`
+}
+
+// AIQGSemCacheConfig configures the C4 semantic cache. Runs on the C1 exact-miss
+// path (L0→L1). Mirrors config.AIQGSemCacheConfig.
+type AIQGSemCacheConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	Shadow        bool          `yaml:"shadow"`         // log would-hit, serve nothing (S1)
+	MinSimilarity float64       `yaml:"min_similarity"` // L1 candidate floor (cosine)
+	TTL           time.Duration `yaml:"ttl"`
+	RedisURL      string        `yaml:"redis_url"`   // redis-semcache (redis-stack)
+	OllamaURL     string        `yaml:"ollama_url"`  // embeddings server
+	EmbedModel    string        `yaml:"embed_model"` // all-minilm
+	Dim           int           `yaml:"dim"`         // 384
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Brokers + topic are
@@ -366,6 +388,52 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				"ttl":                   ttl,
 				"require_deterministic": server.respCacheCfg.RequireDeterministic,
 			}).Info("AIQG response cache enabled (C1 exact-match)")
+		}
+
+		// C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md). Runs on the
+		// C1 exact-miss path (L0→L1). Uses the dedicated redis-semcache (FT.* FLAT
+		// index) + Ollama embeddings — both separate from the shared AIQG Redis.
+		// Default shadow: it embeds, searches, and runs the L2 gate, but SERVES
+		// NOTHING — it only logs what WOULD have hit (§15 S1). Disabled unless a
+		// redis + ollama URL are configured.
+		if config.AIQG.SemCache.Enabled && config.AIQG.SemCache.RedisURL != "" && config.AIQG.SemCache.OllamaURL != "" {
+			if opt, err := redis.ParseURL(config.AIQG.SemCache.RedisURL); err != nil {
+				logger.WithError(err).Warn("AIQG semantic cache: invalid redis_url; semantic cache disabled")
+			} else {
+				dim := config.AIQG.SemCache.Dim
+				if dim <= 0 {
+					dim = 384
+				}
+				minSim := config.AIQG.SemCache.MinSimilarity
+				if minSim <= 0 {
+					minSim = 0.95
+				}
+				ttl := config.AIQG.SemCache.TTL
+				if ttl <= 0 {
+					ttl = 30 * time.Minute
+				}
+				scRedis := redis.NewClient(opt)
+				store := semcache.NewRedisStore(scRedis, dim)
+				if ierr := store.EnsureIndex(context.Background()); ierr != nil {
+					logger.WithError(ierr).Warn("AIQG semantic cache: FT.CREATE failed; semantic cache disabled")
+				} else {
+					embed := semcache.NewOllamaEmbedder(config.AIQG.SemCache.OllamaURL, config.AIQG.SemCache.EmbedModel, dim)
+					server.semCache = semcache.New(semcache.Config{
+						Enabled:       true,
+						Shadow:        config.AIQG.SemCache.Shadow,
+						MinSimilarity: minSim,
+						CandidateK:    5,
+						TTL:           ttl,
+					}, store, embed)
+					logger.WithFields(logrus.Fields{
+						"redis_addr":     opt.Addr,
+						"shadow":         config.AIQG.SemCache.Shadow,
+						"min_similarity": minSim,
+						"embed_model":    config.AIQG.SemCache.EmbedModel,
+						"dim":            dim,
+					}).Info("AIQG semantic cache enabled (C4 — shadow: logs would-hits, serves nothing)")
+				}
+			}
 		}
 
 		// Experiments runner resolver (Phase D). Reuses the dashboard URL +
@@ -904,7 +972,76 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 	}
 
 	middleware.StampCacheState(r.Context(), "miss")
-	return r.WithContext(responsecache.WithPending(r.Context(), tenantID, hash))
+	// C4 (L0→L1): on the exact-match miss, run the semantic cascade. In shadow
+	// mode it embeds/searches/L2s off the latency path and only LOGS would-hits;
+	// it also stashes the store intent so the produced response is indexed.
+	ctx := s.runSemanticShadow(r.Context(), req, tenantID, hash)
+	return r.WithContext(responsecache.WithPending(ctx, tenantID, hash))
+}
+
+// runSemanticShadow starts the C4 semantic cascade for a C1 exact-miss. The
+// prompt + scope are computed synchronously and stashed for the store; the
+// embed+search+L2 lookup runs async (off the request latency path) and logs what
+// WOULD have hit. Returns ctx carrying the store intent. No-op when disabled.
+func (s *Server) runSemanticShadow(ctx context.Context, req *types.ChatRequest, tenantID, key string) context.Context {
+	if s.semCache == nil {
+		return ctx
+	}
+	prompt := lastUserText(req.Messages) // the question is the semantic key
+	if prompt == "" {
+		return ctx
+	}
+	scope := semcache.Scope{TenantID: tenantID, Model: req.Model, ScoringVersion: events.ScoringVersion}
+
+	lctx := context.WithoutCancel(ctx)
+	reqID, model := req.ID, req.Model
+	go func() {
+		cctx, cancel := context.WithTimeout(lctx, 15*time.Second)
+		defer cancel()
+		out := s.semCache.Lookup(cctx, scope, prompt)
+		switch out.State {
+		case semcache.StateShadowHit, semcache.StateSemanticHit:
+			s.logger.WithFields(logrus.Fields{
+				"event": "aiqg.semcache.shadow", "state": out.State,
+				"similarity": out.Similarity, "threshold": out.Threshold,
+				"tenant_id": tenantID, "model": model, "request_id": reqID,
+			}).Info("aiqg semantic shadow: WOULD-HIT (serving nothing)")
+		case semcache.StateMiss:
+			if out.Similarity > 0 { // a candidate existed but L2 rejected it — calibration signal
+				s.logger.WithFields(logrus.Fields{
+					"event": "aiqg.semcache.shadow", "state": "miss",
+					"similarity": out.Similarity, "reject_reason": out.RejectReason,
+					"tenant_id": tenantID, "model": model, "request_id": reqID,
+				}).Info("aiqg semantic shadow: near-miss rejected by L2")
+			}
+		}
+	}()
+	return semcache.WithPending(ctx, &semcache.Pending{Scope: scope, Key: key, Prompt: prompt})
+}
+
+// storeSemantic indexes a produced response for future semantic hits. Async
+// (embedding is a network call) and best-effort. No-op unless the lookup stashed
+// a pending intent and the response is cacheable.
+func (s *Server) storeSemantic(r *http.Request, resp *types.ChatResponse) {
+	if s.semCache == nil {
+		return
+	}
+	p, ok := semcache.PendingFromContext(r.Context())
+	if !ok || !responsecache.ResponseCacheable(resp) {
+		return
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	ctx := context.WithoutCancel(r.Context())
+	go func() {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if err := s.semCache.Store(cctx, p.Scope, p.Key, p.Prompt, body, 0); err != nil {
+			s.logger.WithError(err).WithField("request_id", resp.ID).Warn("aiqg semantic cache store failed")
+		}
+	}()
 }
 
 // writeCachedResponse writes a stored response to the client. Returns false
@@ -1157,6 +1294,8 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	// cacheable miss (PendingFromContext) and the produced response is itself
 	// cacheable (no tool calls).
 	s.maybeStoreInCache(r, resp)
+	// C4: index the response for future semantic hits (async, best-effort).
+	s.storeSemantic(r, resp)
 
 	// Add routing metadata to response
 	resp.RouterMetadata = metadata
