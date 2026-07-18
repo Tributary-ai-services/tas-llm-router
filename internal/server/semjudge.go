@@ -12,6 +12,7 @@ import (
 
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/cacheconfig"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/semcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/clear"
@@ -74,8 +75,14 @@ func buildSemJudge(cfg AIQGSemCacheConfig, fallbackModel string, router *routing
 // judge. The candidate graded is the winning entry on a would-hit, or the
 // L2-rejected near-miss on a miss. No-op when judging is disabled. Runs in the
 // shadow goroutine (already off the request path); Enqueue itself never blocks.
-func (s *Server) enqueueForJudge(scope semcache.Scope, prompt string, out semcache.Outcome) {
+func (s *Server) enqueueForJudge(scope semcache.Scope, prompt string, out semcache.Outcome, cc *cacheconfig.Config) {
 	if s.semJudge == nil {
+		return
+	}
+	// Per-tenant judge control: a tenant may opt OUT of grading (JudgeEnabled) or
+	// dial its own sample rate, over the global defaults. (The Loop's daily $ cap
+	// remains a global opex ceiling — see AIQG_SEMCACHE_JUDGE_DAILY_USD.)
+	if !cc.JudgeEnabled(true) {
 		return
 	}
 	var cand *semcache.Entry
@@ -88,7 +95,9 @@ func (s *Server) enqueueForJudge(scope semcache.Scope, prompt string, out semcac
 	if cand == nil {
 		return
 	}
-	if !s.semJudgeCfg.ShouldSample(out.Similarity, out.State, scope.TenantID+"|"+prompt) {
+	sampleCfg := s.semJudgeCfg
+	sampleCfg.Rate = cc.JudgeSampleRate(s.semJudgeCfg.Rate)
+	if !sampleCfg.ShouldSample(out.Similarity, out.State, scope.TenantID+"|"+prompt) {
 		return
 	}
 	s.semJudge.Enqueue(semcache.Sample{

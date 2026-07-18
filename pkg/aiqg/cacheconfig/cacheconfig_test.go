@@ -133,3 +133,24 @@ func TestResolver_NilSafeAndEmptyTenant(t *testing.T) {
 		t.Error("empty tenant must not call the loader")
 	}
 }
+
+func TestJudgeHelpers_Override(t *testing.T) {
+	// nil / unset → global defaults.
+	var nilC *Config
+	if !nilC.JudgeEnabled(true) || nilC.JudgeSampleRate(0.5) != 0.5 {
+		t.Error("nil config should defer judge knobs to global")
+	}
+	// A tenant opts OUT of grading and dials its own sample rate.
+	c := &Config{Judge: &JudgeConfig{Enabled: bptr(false), SampleRate: fptr(0.1)}}
+	if c.JudgeEnabled(true) {
+		t.Error("judge.enabled=false override should win (opt out)")
+	}
+	if c.JudgeSampleRate(1.0) != 0.1 {
+		t.Errorf("judge.sample_rate override should win: got %v want 0.1", c.JudgeSampleRate(1.0))
+	}
+	// Unset sample rate falls back to global even when enabled is set.
+	c2 := &Config{Judge: &JudgeConfig{Enabled: bptr(true)}}
+	if c2.JudgeSampleRate(0.25) != 0.25 {
+		t.Error("unset sample rate should fall back to global")
+	}
+}
