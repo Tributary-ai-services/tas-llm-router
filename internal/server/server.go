@@ -73,6 +73,11 @@ type Server struct {
 	// Nil when disabled. Runs on the C1 exact-miss path (L0→L1). In shadow mode
 	// it logs would-hits and serves nothing.
 	semCache *semcache.Cache
+	// semJudge is the C4 L3 async judge (§5, §14.1). Nil unless judging is enabled.
+	// Off the hot path: the shadow lookup enqueues sampled near-misses/would-hits
+	// and a background worker grades them → labeled pairs + sampled FPR.
+	semJudge    *semcache.Loop
+	semJudgeCfg semcache.SampleConfig
 }
 
 // ServerConfig holds server configuration
@@ -228,9 +233,12 @@ type AIQGSemCacheConfig struct {
 	TTL           time.Duration `yaml:"ttl"`
 	RedisURL      string        `yaml:"redis_url"`   // redis-semcache (redis-stack)
 	OllamaURL     string        `yaml:"ollama_url"`  // embeddings server
-	EmbedModel    string        `yaml:"embed_model"`     // all-minilm
-	Dim           int           `yaml:"dim"`             // 384
-	JudgeDailyUSD float64       `yaml:"judge_daily_usd"` // L3 judge daily $ cap (§14.1); 0 = unlimited
+	EmbedModel      string        `yaml:"embed_model"`       // all-minilm
+	Dim             int           `yaml:"dim"`               // 384
+	JudgeDailyUSD   float64       `yaml:"judge_daily_usd"`   // L3 judge daily $ cap (§14.1); 0 = unlimited
+	JudgeEnabled    bool          `yaml:"judge_enabled"`     // L3 async judge on (opt-in opex)
+	JudgeModel      string        `yaml:"judge_model"`       // grader model; empty → AIQG JudgeModel
+	JudgeSampleRate float64       `yaml:"judge_sample_rate"` // fraction of eligible lookups graded
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Brokers + topic are
@@ -433,6 +441,15 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 						"embed_model":    config.AIQG.SemCache.EmbedModel,
 						"dim":            dim,
 					}).Info("AIQG semantic cache enabled (C4 — shadow: logs would-hits, serves nothing)")
+
+					// C4 L3 judge (§5, §14.1): opt-in, off the hot path. Grades
+					// sampled near-misses/would-hits → labeled pairs (Redis) + the
+					// sampled FPR, under a hard daily $ cap. Nil when disabled.
+					server.semJudge, server.semJudgeCfg = buildSemJudge(config.AIQG.SemCache, config.AIQG.JudgeModel, router, scRedis, logger)
+					if server.semJudge != nil {
+						go server.semJudge.Run(context.Background())
+						registerSemJudgeMetrics(server.semJudge, logger)
+					}
 				}
 			}
 		}
@@ -1016,6 +1033,11 @@ func (s *Server) runSemanticShadow(ctx context.Context, req *types.ChatRequest, 
 				}).Info("aiqg semantic shadow: near-miss rejected by L2")
 			}
 		}
+		// L3 judge (§5, §14.1): off-path, opt-in. Sample would-hits (FPR ground
+		// truth) and L2-rejected near-misses (L2 precision) in the danger band and
+		// enqueue them for the async grader; Enqueue never blocks and drops when
+		// the queue is full, so this cannot slow the shadow goroutine.
+		s.enqueueForJudge(scope, prompt, out)
 	}()
 	return semcache.WithPending(ctx, &semcache.Pending{Scope: scope, Key: key, Prompt: prompt})
 }

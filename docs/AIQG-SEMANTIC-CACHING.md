@@ -24,11 +24,16 @@ ground truth) and L2's precision, and (c) trains a vCache-style `SimCalibrator`
 FPR budget. Enqueue never blocks (drops when full — fail-open), and a
 `DailyBudget` hard-caps judge spend per UTC day (`AIQG_SEMCACHE_JUDGE_DAILY_USD`,
 default **$0.50**; the loop stops grading — `BudgetSkipped` — once the cap is hit
-and resets at midnight UTC). **Still SHADOW-only** — the judge is opt-in recurring
-LLM opex (§14.1) and is not yet wired to run in the gateway; enabling serving needs the labeled set it produces,
-not the seed set. Remaining: wire the judge into the shadow path + a Redis
-`PairSink` (needs the opex sign-off), S2-enable (on that real data), S3
-(accounting/UI/streaming).
+and resets at midnight UTC). The judge is opt-in recurring LLM opex (§14.1), so
+it is **default-off** (`AIQG_SEMCACHE_JUDGE_ENABLED`); when on it is **wired into
+the shadow path** — `enqueueForJudge` samples would-hits + L2-rejected near-misses
+in the 0.88–0.97 band, the grader routes through the gateway's own client (priced
+from real token usage), labeled pairs land in the `redis-semcache` list
+`aiqg:scache:labeled_pairs`, and the loop counters (incl.
+`aiqg_semcache_judge_budget_skipped_total` — the daily-cap tripwire — and the
+sampled FPR) export on `/aiqg/metrics`. **Serving is still OFF** (cache stays
+shadow). Remaining: run the judge to accumulate a real labeled set → S2-enable on
+that data, S3 (accounting/UI/streaming).
 Gateway feature (`tas-llm-router`). Expands §9 of [`AIQG-CACHING.md`](AIQG-CACHING.md)
 (phase C4) and closes out issue
 [tas-llm-router#97](https://github.com/Tributary-ai-services/tas-llm-router/issues/97).
