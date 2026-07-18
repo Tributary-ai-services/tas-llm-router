@@ -125,18 +125,25 @@ type semJudgeGrader struct {
 	model  string
 }
 
-// chat is a semcache.ChatFunc: system+user in, (text, costUSD, err) out.
-func (g *semJudgeGrader) chat(ctx context.Context, system, user string) (string, float64, error) {
+// chat is a semcache.ChatFunc: system+user (+ optional assistant prefill) in,
+// (text, costUSD, err) out. A non-empty prefill is sent as a trailing assistant
+// turn so the model must continue from it — Anthropic honors this and returns
+// only the continuation (no opening brace), which the grader stitches back.
+func (g *semJudgeGrader) chat(ctx context.Context, system, user, prefill string) (string, float64, error) {
 	maxTokens := 200
 	var temp float32 // 0 → deterministic grade
+	msgs := []types.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}
+	if prefill != "" {
+		msgs = append(msgs, types.Message{Role: "assistant", Content: prefill})
+	}
 	req := &types.ChatRequest{
 		Model:       g.model,
 		MaxTokens:   &maxTokens,
 		Temperature: &temp, // deterministic grade
-		Messages: []types.Message{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
+		Messages:    msgs,
 	}
 	_, provider, err := g.router.Route(ctx, req)
 	if err != nil {

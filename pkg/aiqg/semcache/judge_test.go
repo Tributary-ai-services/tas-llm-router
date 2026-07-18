@@ -38,9 +38,9 @@ func TestParseVerdict(t *testing.T) {
 }
 
 func TestPromptGrader_BuildsBlindPrompt(t *testing.T) {
-	var gotSystem, gotUser string
-	g := NewPromptGrader(func(_ context.Context, system, user string) (string, float64, error) {
-		gotSystem, gotUser = system, user
+	var gotSystem, gotUser, gotPrefill string
+	g := NewPromptGrader(func(_ context.Context, system, user, prefill string) (string, float64, error) {
+		gotSystem, gotUser, gotPrefill = system, user, prefill
 		return `{"correct": false, "confidence": 0.6, "reason": "different card tier"}`, 0.0007, nil
 	})
 	v, err := g.Grade(context.Background(), Sample{
@@ -66,6 +66,71 @@ func TestPromptGrader_BuildsBlindPrompt(t *testing.T) {
 	}
 	if contains(gotUser, "cached") || contains(gotUser, "similar") {
 		t.Errorf("prompt leaks cache framing (not blind): %q", gotUser)
+	}
+	// The grader must ask the transport to prefill the assistant reply with JSON.
+	if gotPrefill == "" || !contains(gotPrefill, "correct") {
+		t.Errorf("grader did not pass a JSON prefill: %q", gotPrefill)
+	}
+}
+
+// TestPromptGrader_StitchesPrefill: a transport that HONORS the prefill returns
+// only the continuation (no opening brace); the grader must stitch the prefill
+// back and parse it, not fall through to the lexical scan.
+func TestPromptGrader_StitchesPrefill(t *testing.T) {
+	g := NewPromptGrader(func(_ context.Context, _, _, prefill string) (string, float64, error) {
+		// Echo the classic Anthropic prefill behavior: reply continues from prefill.
+		if prefill != `{"correct":` {
+			t.Fatalf("unexpected prefill %q", prefill)
+		}
+		return `true,"confidence":0.88,"reason":"paraphrase"}`, 0, nil
+	})
+	v, err := g.Grade(context.Background(), Sample{Query: "q", CachedAnswer: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Correct || v.Confidence != 0.88 {
+		t.Errorf("stitched verdict wrong: %+v", v)
+	}
+	if v.Reason == "parsed from non-JSON reply" {
+		t.Error("should have parsed stitched JSON, not fallen back")
+	}
+}
+
+func TestParseVerdict_Hardened(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          string
+		wantCorrect bool
+		wantConf    float64
+		wantSalvage bool // reason == "salvaged from malformed JSON"
+	}{
+		{"markdown fences", "```json\n{\"correct\": false, \"confidence\": 0.9}\n```", false, 0.9, false},
+		{"leading prose + trailing prose", "Here is my verdict:\n{\"correct\": true, \"confidence\": 0.7}\nHope that helps!", true, 0.7, false},
+		{"prefill-stitched body", `{"correct":false,"confidence":0.95,"reason":"wrong tier"}`, false, 0.95, false},
+		{"trailing comma (malformed) salvaged", `{"correct": true, "confidence": 0.8,}`, true, 0.8, true},
+		{"single quotes salvaged", "{'correct': false, 'confidence': 0.6}", false, 0.6, true},
+		{"reason string with a brace", `{"correct": false, "confidence": 0.5, "reason": "not {complete}"}`, false, 0.5, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := parseVerdict(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v.Correct != tc.wantCorrect {
+				t.Errorf("Correct=%v want %v", v.Correct, tc.wantCorrect)
+			}
+			if v.Confidence != tc.wantConf {
+				t.Errorf("Confidence=%v want %v", v.Confidence, tc.wantConf)
+			}
+			salvaged := v.Reason == "salvaged from malformed JSON"
+			if salvaged != tc.wantSalvage {
+				t.Errorf("salvage path = %v, want %v (reason=%q)", salvaged, tc.wantSalvage, v.Reason)
+			}
+			if v.Reason == "parsed from non-JSON reply" {
+				t.Errorf("should not have hit the lexical fallback for %q", tc.in)
+			}
+		})
 	}
 }
 

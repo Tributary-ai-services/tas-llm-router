@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -79,7 +81,14 @@ func (f GraderFunc) Grade(ctx context.Context, s Sample) (Verdict, error) { retu
 // caller binds it to the router's own client at wiring time, so this package
 // depends on no server types and no pricing table. Return costUSD 0 if unknown —
 // the budget then meters by grade count only if a flat per-grade cost is set.
-type ChatFunc func(ctx context.Context, system, user string) (text string, costUSD float64, err error)
+//
+// prefill, when non-empty, is text the transport MUST seed the assistant's reply
+// with (an Anthropic-style response prefill). The grader uses it to force the
+// model to begin its answer mid-JSON ("{"), which is the reliable way to stop a
+// chatty model from wrapping the verdict in prose. A transport whose provider
+// can't prefill may ignore it — parseVerdict tolerates both the prefilled and
+// the full-object shapes.
+type ChatFunc func(ctx context.Context, system, user, prefill string) (text string, costUSD float64, err error)
 
 // PromptGrader is the default Grader: it asks an LLM, BLIND (§14.1 step 2 — the
 // judge is not told which answer is cached vs fresh, only "does this answer this
@@ -94,10 +103,17 @@ const judgeSystemPrompt = `You are a strict evaluator for a response cache. You 
 Rules:
 - Judge only whether the answer is correct for THIS question. Do not reward fluent but off-topic answers.
 - Any mismatch of a specific entity, product tier, number, amount, version, or date makes it INCORRECT (e.g. an answer about the base card does not answer a question about the "Reserve" tier).
-- A partial or hedged answer that omits the asked-for specifics is INCORRECT.
+- A partial, truncated, or hedged answer that omits the asked-for specifics is INCORRECT.
 - If you cannot tell, answer false.
 
-Reply with ONLY a JSON object: {"correct": <true|false>, "confidence": <0..1>, "reason": "<short>"}`
+Output format — follow EXACTLY:
+- Respond with a SINGLE minified JSON object and NOTHING else. No prose, no explanation, no markdown, no code fences.
+- Schema: {"correct":true|false,"confidence":0.0-1.0,"reason":"<=10 words"}
+- Example of a valid reply: {"correct":false,"confidence":0.9,"reason":"answer covers base tier, not Reserve"}`
+
+// jsonPrefill seeds the assistant reply so the model must continue mid-object —
+// the reliable way to stop a chatty model from wrapping the verdict in prose.
+const jsonPrefill = `{"correct":`
 
 // Grade implements Grader via the bound chat transport.
 func (g *PromptGrader) Grade(ctx context.Context, s Sample) (Verdict, error) {
@@ -105,9 +121,15 @@ func (g *PromptGrader) Grade(ctx context.Context, s Sample) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("semcache: PromptGrader has no chat transport")
 	}
 	user := fmt.Sprintf("USER QUESTION:\n%s\n\nCANDIDATE ANSWER:\n%s", s.Query, s.CachedAnswer)
-	out, costUSD, err := g.chat(ctx, judgeSystemPrompt, user)
+	out, costUSD, err := g.chat(ctx, judgeSystemPrompt, user, jsonPrefill)
 	if err != nil {
 		return Verdict{}, err
+	}
+	// If the transport prefilled (the reply continues our "{"..."), the returned
+	// text has no opening brace — stitch the prefill back on. If it ignored the
+	// prefill and returned a whole object, leave it as-is.
+	if !strings.Contains(out, "{") {
+		out = jsonPrefill + out
 	}
 	v, err := parseVerdict(out)
 	if err != nil {
@@ -117,27 +139,50 @@ func (g *PromptGrader) Grade(ctx context.Context, s Sample) (Verdict, error) {
 	return v, nil
 }
 
-// parseVerdict reads the judge's reply. It prefers the strict JSON contract and
-// falls back to a lexical yes/no scan so a chatty model still yields a usable
-// grade rather than an error (fail toward "incorrect" — never a false hit).
+type verdictJSON struct {
+	Correct    bool    `json:"correct"`
+	Confidence float64 `json:"confidence"`
+	Reason     string  `json:"reason"`
+}
+
+var (
+	// reCorrect / reConf salvage the two decision fields from a nearly-JSON reply
+	// (trailing comma, single quotes, unterminated string) that fails strict decode.
+	// Keys may be wrapped in single or double quotes, or none.
+	reCorrect = regexp.MustCompile(`(?i)['"]?correct['"]?\s*[:=]\s*(true|false)`)
+	reConf    = regexp.MustCompile(`(?i)['"]?confidence['"]?\s*[:=]\s*([01](?:\.\d+)?)`)
+)
+
+// parseVerdict reads the judge's reply, hardened against a model that ignores the
+// JSON contract. In order: (1) decode the first JSON object found (json.Decoder
+// stops at the first complete value, so leading/trailing prose and code fences
+// around it are tolerated); (2) regex-salvage the correct/confidence fields from
+// a malformed-but-recognizable reply; (3) a last-ditch lexical scan. Every path
+// fails toward "incorrect" — a parse ambiguity must never manufacture a false hit.
 func parseVerdict(out string) (Verdict, error) {
+	// (1) First complete JSON object anywhere in the reply.
 	if i := strings.IndexByte(out, '{'); i >= 0 {
-		if j := strings.LastIndexByte(out, '}'); j > i {
-			var raw struct {
-				Correct    bool    `json:"correct"`
-				Confidence float64 `json:"confidence"`
-				Reason     string  `json:"reason"`
-			}
-			if err := json.Unmarshal([]byte(out[i:j+1]), &raw); err == nil {
-				return Verdict{Correct: raw.Correct, Confidence: clamp01(raw.Confidence), Reason: raw.Reason}, nil
-			}
+		dec := json.NewDecoder(strings.NewReader(out[i:]))
+		var raw verdictJSON
+		if err := dec.Decode(&raw); err == nil {
+			return Verdict{Correct: raw.Correct, Confidence: clamp01(raw.Confidence), Reason: raw.Reason}, nil
 		}
 	}
-	// Fallback: no parseable JSON. Only an explicit affirmative reads as correct.
+	// (2) Salvage the fields from a malformed reply that still names them.
+	if m := reCorrect.FindStringSubmatch(out); m != nil {
+		v := Verdict{Correct: strings.EqualFold(m[1], "true"), Reason: "salvaged from malformed JSON"}
+		if c := reConf.FindStringSubmatch(out); c != nil {
+			if f, err := strconv.ParseFloat(c[1], 64); err == nil {
+				v.Confidence = clamp01(f)
+			}
+		}
+		return v, nil
+	}
+	// (3) No structure at all — only an explicit affirmative reads as correct.
 	l := strings.ToLower(out)
-	correct := strings.Contains(l, "\"correct\": true") ||
-		strings.HasPrefix(strings.TrimSpace(l), "true") ||
-		strings.Contains(l, "yes, ") || strings.Contains(l, "answer is correct")
+	correct := strings.HasPrefix(strings.TrimSpace(l), "true") ||
+		strings.Contains(l, "correct\":true") || strings.Contains(l, "yes, ") ||
+		strings.Contains(l, "answer is correct")
 	return Verdict{Correct: correct, Reason: "parsed from non-JSON reply"}, nil
 }
 
