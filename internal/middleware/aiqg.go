@@ -824,6 +824,8 @@ func routingView(r *Routing) events.RoutingView {
 		CacheSavedPromptTokens:     s.CacheSavedPromptTokens,
 		CacheSavedCompletionTokens: s.CacheSavedCompletionTokens,
 		CacheSavedCostUSD:          s.CacheSavedCostUSD,
+		CacheSimilarity:            s.CacheSimilarity,
+		CacheThreshold:             s.CacheThreshold,
 		FinishReason:               s.FinishReason,
 		AttemptCount:               s.AttemptCount,
 		FallbackUsed:               s.FallbackUsed,

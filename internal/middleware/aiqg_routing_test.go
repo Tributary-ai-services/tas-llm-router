@@ -284,3 +284,30 @@ func TestRouting_ConcurrentStamps(t *testing.T) {
 		t.Errorf("concurrent stamps produced inconsistent state: %#v", s)
 	}
 }
+
+// TestRoutingView_CarriesSemanticCacheFields guards the sidecar → events.RoutingView
+// copy (routingView) for the C4 fields. Regression: that copy carried cache_saved_*
+// but DROPPED cache_similarity/cache_threshold, so served semantic hits lost their
+// similarity/threshold on the event stream while savings survived.
+func TestRoutingView_CarriesSemanticCacheFields(t *testing.T) {
+	r := &Routing{}
+	ctx := WithRouting(context.Background(), r)
+	StampCacheState(ctx, "semantic_hit")
+	StampCacheSemantic(ctx, 0.983, 0.9)
+	StampCacheSavings(ctx, 20, 60, 0.00025)
+
+	v := routingView(r)
+	if v.CacheState != "semantic_hit" {
+		t.Errorf("CacheState = %q, want semantic_hit", v.CacheState)
+	}
+	if v.CacheSimilarity != 0.983 {
+		t.Errorf("CacheSimilarity dropped in routingView: got %v want 0.983", v.CacheSimilarity)
+	}
+	if v.CacheThreshold != 0.9 {
+		t.Errorf("CacheThreshold dropped in routingView: got %v want 0.9", v.CacheThreshold)
+	}
+	// Sanity: the savings field that always propagated still does.
+	if v.CacheSavedCostUSD != 0.00025 {
+		t.Errorf("CacheSavedCostUSD = %v, want 0.00025", v.CacheSavedCostUSD)
+	}
+}
