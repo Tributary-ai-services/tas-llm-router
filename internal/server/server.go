@@ -1021,13 +1021,15 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 		}
 	}
 
-	middleware.StampCacheState(r.Context(), "miss")
 	// C4 (L0→L1) on the exact-match miss. A serve-enabled tenant gets a SYNCHRONOUS
-	// semantic-hit serve (cache_state=semantic_hit); everyone else takes the async,
-	// log-only shadow path (which also stashes the store intent).
+	// semantic-hit serve; everyone else takes the async, log-only shadow path.
+	// This MUST run before stamping "miss": StampCacheState is first-write-wins, so
+	// a served hit stamps cache_state=semantic_hit itself and a premature "miss"
+	// here would win and hide the hit from the event stream (§13 reporting).
 	if s.maybeServeSemantic(w, r, req, tenantID, vendor, cc) {
 		return nil
 	}
+	middleware.StampCacheState(r.Context(), "miss")
 	ctx := s.runSemanticShadow(r.Context(), req, tenantID, hash, cc)
 	if !exactEnabled {
 		return r.WithContext(ctx) // C1 store also disabled for this tenant
