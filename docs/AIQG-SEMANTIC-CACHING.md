@@ -1,8 +1,15 @@
 # AIQG — Semantic Response Caching (Design)
 
-Status: **Design / for review** — NOT implemented. Gateway feature
-(`tas-llm-router`). Expands §9 of [`AIQG-CACHING.md`](AIQG-CACHING.md) (phase C4)
-and closes out issue
+Status: **C4 STARTED** — the store-agnostic cascade core is implemented in
+`pkg/aiqg/semcache` (L1 candidate gen + the L2 verification gate + L2 lexical
+guards + a FLAT `MemoryStore` + the `VectorStore`/`Embedder` ports), with the
+adversarial cases from §1.1/§5 as tests (Chase Sapphire vs Sapphire **Reserve**,
+negation, number/date/version, tenant/model isolation, freshness). Redaction —
+the other S0 prerequisite (§4.1.1) — is DONE and deployed (G1). **Still gated on
+S0 infra**: a shared vector store (Redis 8 `FT.*` or pgvector — §7) plus the
+production `Embedder` (TEI/Ollama), before S1 shadow mode can run in-cluster.
+Gateway feature (`tas-llm-router`). Expands §9 of [`AIQG-CACHING.md`](AIQG-CACHING.md)
+(phase C4) and closes out issue
 [tas-llm-router#97](https://github.com/Tributary-ai-services/tas-llm-router/issues/97).
 
 Related: [`AIQG-CACHING.md`](AIQG-CACHING.md) (exact-match v1 — **this doc depends
