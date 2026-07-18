@@ -1081,7 +1081,7 @@ func (s *Server) runSemanticShadow(ctx context.Context, req *types.ChatRequest, 
 		// truth) and L2-rejected near-misses (L2 precision) in the danger band and
 		// enqueue them for the async grader; Enqueue never blocks and drops when
 		// the queue is full, so this cannot slow the shadow goroutine.
-		s.enqueueForJudge(scope, prompt, out)
+		s.enqueueForJudge(scope, prompt, out, cc)
 	}()
 	return semcache.WithPending(ctx, &semcache.Pending{Scope: scope, Key: key, Prompt: prompt})
 }
@@ -1164,7 +1164,7 @@ func (s *Server) maybeServeSemantic(w http.ResponseWriter, r *http.Request, req 
 	if out.State != semcache.StateSemanticHit || out.Entry == nil {
 		// Not a hit — hand the near-miss/would-hit to the judge (FPR signal) and
 		// let the caller fall through to a live vendor call + store.
-		s.enqueueForJudge(scope, prompt, out)
+		s.enqueueForJudge(scope, prompt, out, cc)
 		return false
 	}
 	resp, ok := writeRawCachedResponse(w, out.Entry.Response, semcache.StateSemanticHit)
@@ -1179,7 +1179,7 @@ func (s *Server) maybeServeSemantic(w http.ResponseWriter, r *http.Request, req 
 		middleware.StampCacheSavings(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cost)
 	}
 	// Grade served hits too — that is the sampled-FPR ground truth (§14.1).
-	s.enqueueForJudge(scope, prompt, out)
+	s.enqueueForJudge(scope, prompt, out, cc)
 	return true
 }
 
