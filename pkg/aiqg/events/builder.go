@@ -92,6 +92,11 @@ type RoutingView struct {
 	CacheSavedCompletionTokens int
 	CacheSavedCostUSD          float64
 
+	// CacheSimilarity / CacheThreshold — the L1 similarity + admitting threshold
+	// of a served C4 semantic hit (zero unless cache_state=semantic_hit).
+	CacheSimilarity float64
+	CacheThreshold  float64
+
 	// Vendor finish_reason captured from the response. Used both
 	// to populate ResponseEvent.FinishReason (taking precedence
 	// over the BuildOptions value) and to drive clear.Efficacy.
@@ -610,6 +615,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		CacheSavedPromptTokens:     routing.CacheSavedPromptTokens,
 		CacheSavedCompletionTokens: routing.CacheSavedCompletionTokens,
 		CacheSavedCostUSD:          routing.CacheSavedCostUSD,
+		CacheSimilarity:            routing.CacheSimilarity,
+		CacheThreshold:             routing.CacheThreshold,
 		CLEAR:                      clear.Compute(clearInput),
 		ScoringVersion:             ScoringVersion,
 		GatewayVersion:             GatewayVersion,
