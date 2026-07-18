@@ -119,6 +119,14 @@ type Routing struct {
 	cacheSavedCompletionTokens int
 	cacheSavedCostUSD          float64
 
+	// C4 semantic-hit observability (docs/AIQG-SEMANTIC-CACHING.md §13): on a
+	// cache_state=semantic_hit, the L1 cosine similarity of the served entry and
+	// the threshold that admitted it. Both zero for exact hit / miss / bypass.
+	// semantic_hit MUST stay distinguishable from hit — one is provably correct,
+	// the other probabilistic — so these travel with cache_state.
+	cacheSimilarity float64
+	cacheThreshold  float64
+
 	// experiments (Phase D): the experiment + variant that claimed this
 	// request. Stamped at request time (so the routing override + the event
 	// stamp use one decision). Empty when no experiment claimed it.
@@ -218,6 +226,10 @@ type RoutingSnapshot struct {
 	CacheSavedCompletionTokens int
 	CacheSavedCostUSD          float64
 
+	// C4 semantic-hit similarity + admitting threshold. Zero unless semantic_hit.
+	CacheSimilarity float64
+	CacheThreshold  float64
+
 	// experiments (Phase D): claiming experiment + variant. Empty when none.
 	ExperimentID      string
 	ExperimentVariant string
@@ -261,6 +273,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		CacheSavedPromptTokens:     r.cacheSavedPromptTokens,
 		CacheSavedCompletionTokens: r.cacheSavedCompletionTokens,
 		CacheSavedCostUSD:          r.cacheSavedCostUSD,
+		CacheSimilarity:            r.cacheSimilarity,
+		CacheThreshold:             r.cacheThreshold,
 		ExperimentID:               r.experimentID,
 		ExperimentVariant:          r.experimentVariant,
 	}
@@ -383,6 +397,21 @@ func StampCacheSavings(ctx context.Context, promptTokens, completionTokens int, 
 		r.cacheSavedPromptTokens = promptTokens
 		r.cacheSavedCompletionTokens = completionTokens
 		r.cacheSavedCostUSD = costUSD
+	}
+}
+
+// StampCacheSemantic records the L1 similarity + admitting threshold of a served
+// semantic hit (docs/AIQG-SEMANTIC-CACHING.md §13). First-write-wins.
+func StampCacheSemantic(ctx context.Context, similarity, threshold float64) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cacheSimilarity == 0 {
+		r.cacheSimilarity = similarity
+		r.cacheThreshold = threshold
 	}
 }
 

@@ -231,6 +231,11 @@ type ResponseEvent struct {
 	CacheSavedCompletionTokens int     `json:"cache_saved_completion_tokens,omitempty"`
 	CacheSavedCostUSD          float64 `json:"cache_saved_cost_usd,omitempty"`
 
+	// C4 semantic-hit observability (§13): similarity of the served entry and the
+	// threshold that admitted it. Present only on cache_state=semantic_hit.
+	CacheSimilarity float64 `json:"cache_similarity,omitempty"`
+	CacheThreshold  float64 `json:"cache_threshold,omitempty"`
+
 	// CLEAR scores — populated by pkg/clear.Compute(). A nil *Scores
 	// (rather than a *Scores with all-nil dimension fields) means the
 	// scorer wasn't run at all, which today only happens on the noop

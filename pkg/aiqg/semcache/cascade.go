@@ -58,15 +58,40 @@ func (c *Cache) ready() bool {
 // logged). False in shadow mode.
 func (c *Cache) Serving() bool { return c.ready() && !c.cfg.Shadow }
 
-// Lookup runs the cascade for one post-redaction prompt. It NEVER mutates the
-// request and NEVER serves in shadow mode. Errors from the embedder/store are
-// swallowed into a miss (a cache must fail open — a broken cache is a slow path,
-// never a wrong answer).
+// LookupOptions overrides the cache's configured behavior for one request —
+// the seam for per-tenant config (pkg/aiqg/cacheconfig). A nil field uses the
+// Cache's global config value.
+type LookupOptions struct {
+	// Shadow overrides shadow mode: true = a passing L2 candidate is a shadow_hit
+	// (logged, not served); false = a semantic_hit (serve). nil = Cache config.
+	Shadow *bool
+	// MinSimilarity overrides the L1 candidate floor. nil = Cache config.
+	MinSimilarity *float64
+}
+
+// Lookup runs the cascade with the Cache's global config (shadow + threshold).
 func (c *Cache) Lookup(ctx context.Context, scope Scope, prompt string) Outcome {
+	return c.LookupWithOptions(ctx, scope, prompt, LookupOptions{})
+}
+
+// LookupWithOptions runs the cascade for one post-redaction prompt, honoring the
+// per-request overrides. It NEVER mutates the request; whether a passing hit is
+// served vs shadow-logged is the caller's decision, driven by the effective
+// Shadow flag. Errors from the embedder/store are swallowed into a miss (a cache
+// must fail open — a broken cache is a slow path, never a wrong answer).
+func (c *Cache) LookupWithOptions(ctx context.Context, scope Scope, prompt string, opts LookupOptions) Outcome {
 	if !c.ready() || prompt == "" {
 		return Outcome{}
 	}
-	out := Outcome{State: StateMiss, Threshold: c.cfg.MinSimilarity}
+	minSim := c.cfg.MinSimilarity
+	if opts.MinSimilarity != nil {
+		minSim = *opts.MinSimilarity
+	}
+	shadow := c.cfg.Shadow
+	if opts.Shadow != nil {
+		shadow = *opts.Shadow
+	}
+	out := Outcome{State: StateMiss, Threshold: minSim}
 
 	// L1 — embed + range search. A shortlist, not a decision.
 	vec, err := c.embed.Embed(ctx, prompt)
@@ -77,7 +102,7 @@ func (c *Cache) Lookup(ctx context.Context, scope Scope, prompt string) Outcome 
 	if k <= 0 {
 		k = 5
 	}
-	cands, err := c.store.Search(ctx, scope, vec, c.cfg.MinSimilarity, k)
+	cands, err := c.store.Search(ctx, scope, vec, minSim, k)
 	if err != nil || len(cands) == 0 {
 		return out
 	}
@@ -92,7 +117,7 @@ func (c *Cache) Lookup(ctx context.Context, scope Scope, prompt string) Outcome 
 	for i, cand := range cands {
 		res := Verify(prompt, cand.Entry, scope, now, c.cfg.TTL)
 		if res.Pass {
-			if c.cfg.Shadow {
+			if shadow {
 				out.State = StateShadowHit // would have hit — logged, not served
 			} else {
 				out.State = StateSemanticHit

@@ -24,6 +24,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/cacheconfig"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
@@ -78,6 +79,17 @@ type Server struct {
 	// and a background worker grades them → labeled pairs + sampled FPR.
 	semJudge    *semcache.Loop
 	semJudgeCfg semcache.SampleConfig
+
+	// cacheCfgResolver resolves per-tenant cache overrides from aiqg-dashboard-be
+	// (docs/AIQG-SEMANTIC-CACHING.md §3, §10). Nil when the dashboard isn't wired,
+	// in which case every tenant uses the global defaults below. The resolver is
+	// the safe per-tenant enablement path for semantic SERVING.
+	cacheCfgResolver *cacheconfig.Resolver
+	// semGlobal* are the gateway's global C4 defaults; per-tenant overrides layer
+	// over these (nil override field = the global value).
+	semGlobalEnabled bool
+	semGlobalShadow  bool
+	semGlobalMinSim  float64
 }
 
 // ServerConfig holds server configuration
@@ -434,6 +446,11 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 						CandidateK:    5,
 						TTL:           ttl,
 					}, store, embed)
+					// Remember the global C4 defaults so per-tenant overrides can
+					// layer over them (cacheconfig resolver, below).
+					server.semGlobalEnabled = true
+					server.semGlobalShadow = config.AIQG.SemCache.Shadow
+					server.semGlobalMinSim = minSim
 					logger.WithFields(logrus.Fields{
 						"redis_addr":     opt.Addr,
 						"shadow":         config.AIQG.SemCache.Shadow,
@@ -464,6 +481,17 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			experimentResolver = experiments.NewResolver(loader, 0) // 0 = 30s TTL default
 			logger.WithField("dashboard_url", config.AIQG.DashboardURL).
 				Info("AIQG experiments resolver enabled (Phase D)")
+		}
+
+		// Per-tenant cache-config resolver (docs/AIQG-SEMANTIC-CACHING.md §3, §10).
+		// Reuses the dashboard URL + internal auth token; polls /internal/cache-config
+		// on a TTL and applies C1/C4 overrides per request — the safe per-tenant path
+		// to opt a tenant into semantic SERVING. Nil when the dashboard isn't wired.
+		if config.AIQG.DashboardURL != "" && config.AIQG.DashboardInternalAuthToken != "" {
+			ccLoader := cacheconfig.NewHTTPLoader(config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken)
+			server.cacheCfgResolver = cacheconfig.NewResolver(ccLoader, 0) // 0 = 30s TTL default
+			logger.WithField("dashboard_url", config.AIQG.DashboardURL).
+				Info("AIQG per-tenant cache-config resolver enabled")
 		}
 
 		server.aiqgMiddleware = middleware.NewAIQG(middleware.AIQGConfig{
@@ -966,34 +994,44 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 	}
 
 	tenantID := s.extractTenantID(r)
+	// Per-tenant overrides (nil-safe: no resolver / no row → global defaults).
+	cc := s.cacheCfgResolver.ForTenant(r.Context(), tenantID)
+	exactEnabled := cc.ExactEnabled(s.respCacheCfg.Enabled)
+
 	hash := responsecache.KeyHash(tenantID, vendor, req, events.ScoringVersion, variant)
 	middleware.StampCacheKeyHash(r.Context(), hash)
 
-	if entry, ok, err := s.respCache.Get(r.Context(), tenantID, hash); err != nil {
-		s.logger.WithError(err).WithField("request_id", req.ID).Warn("response cache lookup failed; treating as miss")
-	} else if ok {
-		// Stamp before writing: writeCachedResponse calls WriteHeader, which
-		// flushes headers, so X-TAS-Cache must be set inside it (before the flush)
-		// — not here after it.
-		if s.writeCachedResponse(w, entry) {
-			middleware.StampCacheState(r.Context(), "hit")
-			// C2: record the avoided cost — what the vendor call would have billed,
-			// priced from the cached entry's token counts (docs/AIQG-CACHING.md §6).
-			if cost, priced := clear.DollarCost(vendor, entry.Model, entry.PromptTokens, entry.CompletionTokens); priced {
+	// C1 exact-match lookup — skipped when this tenant has disabled the exact
+	// cache (per-tenant override); the request then flows to the semantic path.
+	if exactEnabled {
+		if entry, ok, err := s.respCache.Get(r.Context(), tenantID, hash); err != nil {
+			s.logger.WithError(err).WithField("request_id", req.ID).Warn("response cache lookup failed; treating as miss")
+		} else if ok {
+			// Stamp before writing: writeCachedResponse calls WriteHeader, which
+			// flushes headers, so X-TAS-Cache must be set inside it (before the flush).
+			if s.writeCachedResponse(w, entry) {
+				middleware.StampCacheState(r.Context(), "hit")
+				// C2: record the avoided cost — what the vendor call would have billed,
+				// priced from the cached entry's token counts (docs/AIQG-CACHING.md §6).
+				cost, _ := clear.DollarCost(vendor, entry.Model, entry.PromptTokens, entry.CompletionTokens)
 				middleware.StampCacheSavings(r.Context(), entry.PromptTokens, entry.CompletionTokens, cost)
-			} else {
-				middleware.StampCacheSavings(r.Context(), entry.PromptTokens, entry.CompletionTokens, 0)
+				return nil
 			}
-			return nil
+			// A corrupt/undecodable entry falls through to a live call.
 		}
-		// A corrupt/undecodable entry falls through to a live call.
 	}
 
 	middleware.StampCacheState(r.Context(), "miss")
-	// C4 (L0→L1): on the exact-match miss, run the semantic cascade. In shadow
-	// mode it embeds/searches/L2s off the latency path and only LOGS would-hits;
-	// it also stashes the store intent so the produced response is indexed.
-	ctx := s.runSemanticShadow(r.Context(), req, tenantID, hash)
+	// C4 (L0→L1) on the exact-match miss. A serve-enabled tenant gets a SYNCHRONOUS
+	// semantic-hit serve (cache_state=semantic_hit); everyone else takes the async,
+	// log-only shadow path (which also stashes the store intent).
+	if s.maybeServeSemantic(w, r, req, tenantID, vendor, cc) {
+		return nil
+	}
+	ctx := s.runSemanticShadow(r.Context(), req, tenantID, hash, cc)
+	if !exactEnabled {
+		return r.WithContext(ctx) // C1 store also disabled for this tenant
+	}
 	return r.WithContext(responsecache.WithPending(ctx, tenantID, hash))
 }
 
@@ -1001,8 +1039,8 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 // prompt + scope are computed synchronously and stashed for the store; the
 // embed+search+L2 lookup runs async (off the request latency path) and logs what
 // WOULD have hit. Returns ctx carrying the store intent. No-op when disabled.
-func (s *Server) runSemanticShadow(ctx context.Context, req *types.ChatRequest, tenantID, key string) context.Context {
-	if s.semCache == nil {
+func (s *Server) runSemanticShadow(ctx context.Context, req *types.ChatRequest, tenantID, key string, cc *cacheconfig.Config) context.Context {
+	if s.semCache == nil || !cc.SemanticEnabled(s.semGlobalEnabled) {
 		return ctx
 	}
 	prompt := lastUserText(req.Messages) // the question is the semantic key
@@ -1010,13 +1048,17 @@ func (s *Server) runSemanticShadow(ctx context.Context, req *types.ChatRequest, 
 		return ctx
 	}
 	scope := semcache.Scope{TenantID: tenantID, Model: req.Model, ScoringVersion: events.ScoringVersion}
+	// Per-tenant threshold; shadow is forced on here (this is the log-only path —
+	// a serve-enabled tenant was already handled synchronously in maybeServeSemantic).
+	minSim := cc.SemanticMinSimilarity(s.semGlobalMinSim)
+	shadow := true
 
 	lctx := context.WithoutCancel(ctx)
 	reqID, model := req.ID, req.Model
 	go func() {
 		cctx, cancel := context.WithTimeout(lctx, 15*time.Second)
 		defer cancel()
-		out := s.semCache.Lookup(cctx, scope, prompt)
+		out := s.semCache.LookupWithOptions(cctx, scope, prompt, semcache.LookupOptions{Shadow: &shadow, MinSimilarity: &minSim})
 		switch out.State {
 		case semcache.StateShadowHit, semcache.StateSemanticHit:
 			s.logger.WithFields(logrus.Fields{
@@ -1073,14 +1115,69 @@ func (s *Server) storeSemantic(r *http.Request, resp *types.ChatResponse) {
 // the vendor wasn't called, so cost/latency accounting stays ~0 (§6), and the
 // cache_state=hit split lets dashboards surface the saving explicitly.
 func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *responsecache.Entry) bool {
+	_, ok := writeRawCachedResponse(w, entry.Response, "hit")
+	return ok
+}
+
+// writeRawCachedResponse writes a stored response body to the client, setting the
+// X-TAS-Cache header (its value distinguishes an exact "hit" from a "semantic_hit"
+// — the header must precede WriteHeader, which flushes headers). It returns the
+// decoded response (so the caller can read Usage for savings) and false when the
+// body can't be decoded, so the caller falls through to a live vendor call.
+func writeRawCachedResponse(w http.ResponseWriter, body []byte, cacheHeader string) (*types.ChatResponse, bool) {
 	var resp types.ChatResponse
-	if err := json.Unmarshal(entry.Response, &resp); err != nil {
-		return false
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-TAS-Cache", "hit") // must precede WriteHeader (it flushes headers)
+	w.Header().Set("X-TAS-Cache", cacheHeader)
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(&resp)
+	return &resp, true
+}
+
+// maybeServeSemantic serves a C4 semantic hit when the tenant is serve-enabled
+// (Semantic.Enabled && !Shadow). Returns true when it served (caller stops).
+// Unlike the shadow path, this runs the cascade SYNCHRONOUSLY — serving puts
+// the ~30ms embed+search on the request path, which the design (§6) accepts.
+// Reaches here only on a C1 exact miss, so the request is already C1-eligible
+// (deterministic, non-streaming, no tools — inherited from responsecache.Decide).
+func (s *Server) maybeServeSemantic(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, tenantID, vendor string, cc *cacheconfig.Config) bool {
+	if s.semCache == nil || !cc.SemanticEnabled(s.semGlobalEnabled) {
+		return false
+	}
+	if cc.SemanticShadow(s.semGlobalShadow) {
+		return false // shadow tenants take the async, log-only path
+	}
+	prompt := lastUserText(req.Messages)
+	if prompt == "" {
+		return false
+	}
+	scope := semcache.Scope{TenantID: tenantID, Model: req.Model, ScoringVersion: events.ScoringVersion}
+	minSim := cc.SemanticMinSimilarity(s.semGlobalMinSim)
+	serve := false // Shadow=false → a passing L2 candidate is a semantic_hit
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	out := s.semCache.LookupWithOptions(ctx, scope, prompt, semcache.LookupOptions{Shadow: &serve, MinSimilarity: &minSim})
+	if out.State != semcache.StateSemanticHit || out.Entry == nil {
+		// Not a hit — hand the near-miss/would-hit to the judge (FPR signal) and
+		// let the caller fall through to a live vendor call + store.
+		s.enqueueForJudge(scope, prompt, out)
+		return false
+	}
+	resp, ok := writeRawCachedResponse(w, out.Entry.Response, semcache.StateSemanticHit)
+	if !ok {
+		return false // corrupt entry → fall through to a live call
+	}
+	middleware.StampCacheState(r.Context(), semcache.StateSemanticHit)
+	middleware.StampCacheSemantic(r.Context(), out.Similarity, out.Threshold)
+	// Savings — a probabilistic saving, reported separately from exact hits (§13).
+	if resp.Usage != nil {
+		cost, _ := clear.DollarCost(vendor, out.Entry.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		middleware.StampCacheSavings(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cost)
+	}
+	// Grade served hits too — that is the sampled-FPR ground truth (§14.1).
+	s.enqueueForJudge(scope, prompt, out)
 	return true
 }
 
