@@ -222,6 +222,15 @@ type ResponseEvent struct {
 	CacheState   string `json:"cache_state,omitempty"`
 	CacheKeyHash string `json:"cache_key_hash,omitempty"`
 
+	// Cache savings (C2, §6): on a hit, the tokens and dollar cost the vendor
+	// call would have incurred (priced from the cached entry). This is the
+	// avoided-cost the Cost report aggregates — the CFO value prop — and is
+	// distinct from the actual hit cost (~0, vendor not called). Omitted on
+	// miss/bypass.
+	CacheSavedPromptTokens     int     `json:"cache_saved_prompt_tokens,omitempty"`
+	CacheSavedCompletionTokens int     `json:"cache_saved_completion_tokens,omitempty"`
+	CacheSavedCostUSD          float64 `json:"cache_saved_cost_usd,omitempty"`
+
 	// CLEAR scores — populated by pkg/clear.Compute(). A nil *Scores
 	// (rather than a *Scores with all-nil dimension fields) means the
 	// scorer wasn't run at all, which today only happens on the noop

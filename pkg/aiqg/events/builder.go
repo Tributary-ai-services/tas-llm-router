@@ -87,6 +87,11 @@ type RoutingView struct {
 	CacheState   string
 	CacheKeyHash string
 
+	// Cache savings (C2, §6): tokens + dollars a hit avoided. Zero on miss/bypass.
+	CacheSavedPromptTokens     int
+	CacheSavedCompletionTokens int
+	CacheSavedCostUSD          float64
+
 	// Vendor finish_reason captured from the response. Used both
 	// to populate ResponseEvent.FinishReason (taking precedence
 	// over the BuildOptions value) and to drive clear.Efficacy.
@@ -578,35 +583,38 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 	}
 
 	respEvent := ResponseEvent{
-		ResponseEventID:      respID,
-		RequestEventID:       reqID,
-		TenantID:             token.TenantID,                                        // denormalized per response-event.md §"Denormalization rationale"
-		AIQGAccountID:        token.AIQGAccountID,                                   // ditto
-		Vendor:               routing.Vendor,                                        // denormalized from routing decision (same as RequestEvent)
-		Model:                routing.Model,                                         // ditto — powers per-vendor/model dashboards off the response stream
-		Workflow:             preferredWorkflow(headers.Workflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
-		SourceApp:            sourceApp,                                             // ditto — carries the source_app dimension on the response stream
-		ExperimentID:         opts.ExperimentID,                                     // Phase D — experiment that claimed this request (per-variant rollup key)
-		ExperimentVariant:    opts.ExperimentVariant,
-		CompleteAt:           completeAt,
-		Status:               status,
-		HTTPStatus:           opts.HTTPStatus,
-		FinishReason:         finishReason,
-		Streamed:             snap.ChunkCount > 0,
-		ChunkCount:           snap.ChunkCount,
-		ContentChunkCount:    snap.ContentChunkCount,
-		EventTimestamps:      snap,
-		TokenAccounting:      tokenAcct,
-		Assurance:            assuranceSummary,
-		RedactionApplied:     routing.RedactionCount > 0,
-		RedactedCount:        routing.RedactionCount,
-		CacheState:           routing.CacheState,
-		CacheKeyHash:         routing.CacheKeyHash,
-		CLEAR:                clear.Compute(clearInput),
-		ScoringVersion:       ScoringVersion,
-		GatewayVersion:       GatewayVersion,
-		ResolvedPolicyBundle: opts.ResolvedPolicyBundle,
-		AgentContext:         agentCtx,
+		ResponseEventID:            respID,
+		RequestEventID:             reqID,
+		TenantID:                   token.TenantID,                                        // denormalized per response-event.md §"Denormalization rationale"
+		AIQGAccountID:              token.AIQGAccountID,                                   // ditto
+		Vendor:                     routing.Vendor,                                        // denormalized from routing decision (same as RequestEvent)
+		Model:                      routing.Model,                                         // ditto — powers per-vendor/model dashboards off the response stream
+		Workflow:                   preferredWorkflow(headers.Workflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
+		SourceApp:                  sourceApp,                                             // ditto — carries the source_app dimension on the response stream
+		ExperimentID:               opts.ExperimentID,                                     // Phase D — experiment that claimed this request (per-variant rollup key)
+		ExperimentVariant:          opts.ExperimentVariant,
+		CompleteAt:                 completeAt,
+		Status:                     status,
+		HTTPStatus:                 opts.HTTPStatus,
+		FinishReason:               finishReason,
+		Streamed:                   snap.ChunkCount > 0,
+		ChunkCount:                 snap.ChunkCount,
+		ContentChunkCount:          snap.ContentChunkCount,
+		EventTimestamps:            snap,
+		TokenAccounting:            tokenAcct,
+		Assurance:                  assuranceSummary,
+		RedactionApplied:           routing.RedactionCount > 0,
+		RedactedCount:              routing.RedactionCount,
+		CacheState:                 routing.CacheState,
+		CacheKeyHash:               routing.CacheKeyHash,
+		CacheSavedPromptTokens:     routing.CacheSavedPromptTokens,
+		CacheSavedCompletionTokens: routing.CacheSavedCompletionTokens,
+		CacheSavedCostUSD:          routing.CacheSavedCostUSD,
+		CLEAR:                      clear.Compute(clearInput),
+		ScoringVersion:             ScoringVersion,
+		GatewayVersion:             GatewayVersion,
+		ResolvedPolicyBundle:       opts.ResolvedPolicyBundle,
+		AgentContext:               agentCtx,
 	}
 
 	reqEnv := RequestEnvelope{
