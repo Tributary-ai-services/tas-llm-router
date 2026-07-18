@@ -23,8 +23,8 @@ func baseReq() *types.ChatRequest {
 func TestKeyHash_DeterministicAndSensitive(t *testing.T) {
 	r1 := baseReq()
 	r2 := baseReq()
-	h1 := KeyHash("tenant-a", "anthropic", r1, "clear-v1")
-	h2 := KeyHash("tenant-a", "anthropic", r2, "clear-v1")
+	h1 := KeyHash("tenant-a", "anthropic", r1, "clear-v1", "")
+	h2 := KeyHash("tenant-a", "anthropic", r2, "clear-v1", "")
 	if h1 != h2 {
 		t.Fatalf("identical requests must hash equal: %s != %s", h1, h2)
 	}
@@ -45,33 +45,50 @@ func TestKeyHash_DeterministicAndSensitive(t *testing.T) {
 		}
 		r := baseReq()
 		mut(r)
-		if got := KeyHash("tenant-a", "anthropic", r, "clear-v1"); got == h1 {
+		if got := KeyHash("tenant-a", "anthropic", r, "clear-v1", ""); got == h1 {
 			t.Errorf("%s change did not alter the hash", name)
 		}
 	}
 
 	// Tenant, vendor, and scoring_version are all in the key.
-	if KeyHash("tenant-b", "anthropic", baseReq(), "clear-v1") == h1 {
+	if KeyHash("tenant-b", "anthropic", baseReq(), "clear-v1", "") == h1 {
 		t.Error("tenant must alter the hash (isolation)")
 	}
-	if KeyHash("tenant-a", "openai", baseReq(), "clear-v1") == h1 {
+	if KeyHash("tenant-a", "openai", baseReq(), "clear-v1", "") == h1 {
 		t.Error("vendor must alter the hash")
 	}
-	if KeyHash("tenant-a", "anthropic", baseReq(), "clear-v2") == h1 {
+	if KeyHash("tenant-a", "anthropic", baseReq(), "clear-v2", "") == h1 {
 		t.Error("scoring_version must alter the hash")
 	}
 }
 
 func TestKeyHash_IgnoresNonOutputFields(t *testing.T) {
 	r := baseReq()
-	base := KeyHash("t", "anthropic", r, "v1")
+	base := KeyHash("t", "anthropic", r, "v1", "")
 	r.ID = "req-123"
 	r.UserID = "user-9"
 	r.ApplicationID = "app-x"
 	r.Timestamp = time.Unix(999, 0)
 	r.Stream = false
-	if KeyHash("t", "anthropic", r, "v1") != base {
+	if KeyHash("t", "anthropic", r, "v1", "") != base {
 		t.Error("non-output-affecting fields must not change the hash")
+	}
+}
+
+func TestKeyHash_VariantScoping(t *testing.T) {
+	// C3: a non-empty variant scopes the key so experiment arms never share.
+	base := KeyHash("t", "anthropic", baseReq(), "v1", "")
+	a := KeyHash("t", "anthropic", baseReq(), "v1", "exp-1:A")
+	b := KeyHash("t", "anthropic", baseReq(), "v1", "exp-1:B")
+	if a == base || b == base {
+		t.Error("a variant must change the hash vs the unscoped key")
+	}
+	if a == b {
+		t.Error("variant A and B must not share a cache entry")
+	}
+	// Same variant → stable.
+	if a != KeyHash("t", "anthropic", baseReq(), "v1", "exp-1:A") {
+		t.Error("same variant must hash stably")
 	}
 }
 

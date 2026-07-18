@@ -52,6 +52,12 @@ type Config struct {
 	RequireDeterministic bool
 	// MaxBodyBytes skips storing responses larger than this (0 = no limit).
 	MaxBodyBytes int
+	// InExperiments allows caching WITHIN an experiment (C3, docs/AIQG-CACHING.md
+	// §7). Default false: experiment-claimed requests bypass the cache so each
+	// variant's measurement reflects real variant calls. When true, the variant
+	// is folded into the key (variant A and B never share an entry) and the
+	// dashboard's per-variant queries exclude cache hits from the verdict.
+	InExperiments bool
 }
 
 // Entry is a stored response. Response is the marshaled, post-outbound-scan
@@ -228,7 +234,11 @@ var timeNow = time.Now
 // declaration order, map keys sorted — so identical inputs always yield an
 // identical digest (docs/AIQG-PROMPT-CACHE-CONTROL.md §12.1). No manual sorting
 // is needed.
-func KeyHash(tenantID, vendor string, req *types.ChatRequest, scoringVersion string) string {
+//
+// variant is the experiment scope (C3, §7): empty for normal traffic, or
+// "<experiment_id>:<variant>" when caching WITHIN an experiment, so variant A
+// and B never share an entry. Folded into the hash like any other key input.
+func KeyHash(tenantID, vendor string, req *types.ChatRequest, scoringVersion, variant string) string {
 	type sig struct {
 		Tenant           string           `json:"t"`
 		Vendor           string           `json:"v"`
@@ -245,13 +255,14 @@ func KeyHash(tenantID, vendor string, req *types.ChatRequest, scoringVersion str
 		Tools            []types.Tool     `json:"tools,omitempty"`
 		Functions        []types.Function `json:"funcs,omitempty"`
 		Scoring          string           `json:"sc"`
+		Variant          string           `json:"xv,omitempty"`
 	}
 	s := sig{
 		Tenant: tenantID, Vendor: vendor, Model: req.Model, Messages: req.Messages,
 		Temperature: req.Temperature, TopP: req.TopP, MaxTokens: req.MaxTokens,
 		FrequencyPenalty: req.FrequencyPenalty, PresencePenalty: req.PresencePenalty,
 		Stop: req.Stop, Seed: req.Seed, ResponseFormat: req.ResponseFormat,
-		Tools: req.Tools, Functions: req.Functions, Scoring: scoringVersion,
+		Tools: req.Tools, Functions: req.Functions, Scoring: scoringVersion, Variant: variant,
 	}
 	b, _ := json.Marshal(s)
 	sum := sha256.Sum256(b)
