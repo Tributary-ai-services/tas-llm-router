@@ -49,6 +49,12 @@ func NewApplication(configPath string) (*Application, error) {
 		return nil, fmt.Errorf("failed to register providers: %w", err)
 	}
 
+	// Start background provider health checks so each replica probes providers at
+	// boot and every interval, independent of request traffic. Without this, idle
+	// replicas report providers as "unknown" -> /health returns 503.
+	routerInstance.SetHealthCheckInterval(cfg.Router.HealthCheckInterval)
+	routerInstance.StartHealthChecks(context.Background())
+
 	// Create server
 	serverInstance, err := server.NewServer(routerInstance, cfg.ToServerConfig(), logger)
 	if err != nil {
