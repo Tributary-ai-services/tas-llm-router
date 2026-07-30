@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -19,6 +20,7 @@ type Router struct {
 	providerNames     []string // for round-robin
 	roundRobinIndex   int
 	healthStatus      map[string]*types.HealthStatus
+	healthMu          sync.RWMutex // guards healthStatus (background prober writes while routing reads)
 	logger            *logrus.Logger
 	lastHealthCheck   time.Time
 	healthCheckInterval time.Duration
@@ -52,12 +54,47 @@ func (r *Router) RegisterProvider(name string, provider providers.LLMProvider) {
 	r.providerNames = append(r.providerNames, name)
 	
 	// Initialize health status
+	r.healthMu.Lock()
 	r.healthStatus[name] = &types.HealthStatus{
 		Status:      "unknown",
 		LastChecked: 0,
 	}
-	
+	r.healthMu.Unlock()
+
 	r.logger.WithField("provider", name).Info("Provider registered")
+}
+
+// SetHealthCheckInterval overrides the provider health-check cadence. A
+// non-positive value is ignored so the default remains in effect.
+func (r *Router) SetHealthCheckInterval(d time.Duration) {
+	if d > 0 {
+		r.healthCheckInterval = d
+	}
+}
+
+// StartHealthChecks launches a background goroutine that probes every registered
+// provider once immediately (so replicas are warm from boot) and then every
+// healthCheckInterval thereafter, independent of request traffic.
+//
+// Without this, provider health was only refreshed lazily inside Route(), so an
+// idle replica never probed its providers and reported them as "unknown" ->
+// overall "degraded" -> HTTP 503 on /health. With multiple replicas behind a
+// Service, that surfaced as ~50% of /health checks returning 503. Call this once
+// after all providers are registered.
+func (r *Router) StartHealthChecks(ctx context.Context) {
+	go func() {
+		r.updateHealthStatus(ctx) // warm immediately at startup
+		ticker := time.NewTicker(r.healthCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.updateHealthStatus(ctx)
+			}
+		}
+	}()
 }
 
 // GetProvider returns a provider by name
@@ -613,7 +650,9 @@ func (r *Router) getHealthyProviders() []string {
 
 // isProviderHealthy checks if a provider is healthy
 func (r *Router) isProviderHealthy(name string) bool {
+	r.healthMu.RLock()
 	status, exists := r.healthStatus[name]
+	r.healthMu.RUnlock()
 	if !exists {
 		return false
 	}
@@ -732,7 +771,10 @@ func (r *Router) buildFallbackChain(primary string, req *types.ChatRequest) []st
 // estimateLatency returns a latency estimate from health-check measurements
 // when available, falling back to a default.
 func (r *Router) estimateLatency(providerName string) time.Duration {
-	if status, exists := r.healthStatus[providerName]; exists && status.ResponseTime > 0 {
+	r.healthMu.RLock()
+	status, exists := r.healthStatus[providerName]
+	r.healthMu.RUnlock()
+	if exists && status.ResponseTime > 0 {
 		return time.Duration(status.ResponseTime) * time.Millisecond
 	}
 	return 1000 * time.Millisecond
@@ -758,13 +800,18 @@ func (r *Router) updateHealthStatus(ctx context.Context) {
 			status.Status = "healthy"
 			r.logger.WithField("provider", name).Debug("Health check passed")
 		}
-		
+
+		// Lock only for the map write — never while HealthCheck() is in flight.
+		r.healthMu.Lock()
 		r.healthStatus[name] = status
+		r.healthMu.Unlock()
 	}
 }
 
 // GetHealthStatus returns the health status of all providers
 func (r *Router) GetHealthStatus() map[string]*types.HealthStatus {
+	r.healthMu.RLock()
+	defer r.healthMu.RUnlock()
 	status := make(map[string]*types.HealthStatus)
 	for name, health := range r.healthStatus {
 		// Create a copy to avoid external modification
@@ -849,6 +896,8 @@ func (r *Router) extractRequestFeatures(req *types.ChatRequest) []string {
 
 // getProviderHealthStatuses returns current health status of all providers
 func (r *Router) getProviderHealthStatuses() map[string]string {
+	r.healthMu.RLock()
+	defer r.healthMu.RUnlock()
 	healthStatuses := make(map[string]string)
 	for name, status := range r.healthStatus {
 		healthStatuses[name] = status.Status
