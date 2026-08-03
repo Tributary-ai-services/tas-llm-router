@@ -33,3 +33,6 @@ go.work.sum
 
 # demo-traffic generator build artifact
 /demo-traffic
+
+# semcache-calibrate build artifact (source: cmd/semcache-calibrate)
+/semcache-calibrate
