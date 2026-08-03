@@ -50,6 +50,7 @@ type AIQGHeadersView struct {
 	OTelAgentName      string
 	OTelConversationID string
 	OTelSystem         string
+	OTelMapVersion     string // op-name→workflow map version (set when an op-name was present)
 }
 
 // RoutingView is the subset of routing-layer state the event builder
@@ -371,6 +372,30 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 		}
 	}
 
+	// Attribution drift (Axis-1, classification-drift.md §3). Record the
+	// declared agent + the gateway's independent inference (the surrogate) so
+	// disagreement is queryable. v0.1 flags the clean cross-source case: both
+	// declared channels present (TAS-Agent-Id AND OTel gen_ai.agent.id) and
+	// differing. Surrogate-lineage matching is deferred to Axis-2.
+	switch {
+	case h.AgentID != "":
+		ac.AgentDeclared = h.AgentID
+		ac.DriftSource = "tas_asserted"
+	case h.OTelAgentID != "":
+		ac.AgentDeclared = h.OTelAgentID
+		ac.DriftSource = "otel"
+	}
+	// Record the inferred surrogate for the cross-check only when a declared
+	// agent exists to compare against (keeps drift fields off the vast
+	// majority of events that carry no declared signal).
+	if ac.AgentDeclared != "" {
+		ac.AgentInferred = ac.AgentSurrogateID
+	}
+	if h.AgentID != "" && h.OTelAgentID != "" {
+		d := h.AgentID != h.OTelAgentID
+		ac.AgentDrift = &d
+	}
+
 	if ac.AgentID == "" && ac.AgentName == "" && ac.UserID == "" &&
 		ac.ConversationID == "" && ac.FlowID == "" && ac.PrincipalID == "" && ac.ClientIP == "" &&
 		ac.StepID == "" && ac.ParentStepID == "" {
@@ -621,6 +646,21 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		}
 	}
 
+	// Classification drift (Axis-1, classification-drift.md §3). The declared
+	// type is a TAS-Workflow assertion or the mapped OTel op-name; the inferred
+	// type is the heuristic classifier. Both recorded so declared-vs-inferred
+	// disagreement is queryable even though `Workflow` above is the winner.
+	wfDeclared := headers.Workflow
+	if wfDeclared == "" {
+		wfDeclared = headers.OTelWorkflow
+	}
+	wfInferred := routing.Workflow
+	var wfDrift *bool
+	if wfDeclared != "" && wfInferred != "" {
+		d := wfDeclared != wfInferred
+		wfDrift = &d
+	}
+
 	respEvent := ResponseEvent{
 		ResponseEventID:            respID,
 		RequestEventID:             reqID,
@@ -630,7 +670,12 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Model:                      routing.Model,                                                               // ditto — powers per-vendor/model dashboards off the response stream
 		Workflow:                   preferredWorkflow(headers.Workflow, headers.OTelWorkflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
 		SourceApp:                  sourceApp,                                                                   // ditto — carries the source_app dimension on the response stream
-		ExperimentID:               opts.ExperimentID,                                                           // Phase D — experiment that claimed this request (per-variant rollup key)
+		WorkflowDeclared:           wfDeclared,
+		WorkflowDeclaredOp:         headers.OTelOperation,
+		WorkflowInferred:           wfInferred,
+		WorkflowDrift:              wfDrift,
+		OTelMapVersion:             headers.OTelMapVersion,
+		ExperimentID:               opts.ExperimentID, // Phase D — experiment that claimed this request (per-variant rollup key)
 		ExperimentVariant:          opts.ExperimentVariant,
 		CompleteAt:                 completeAt,
 		Status:                     status,

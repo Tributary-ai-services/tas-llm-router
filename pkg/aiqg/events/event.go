@@ -154,6 +154,20 @@ type AgentContext struct {
 	// can be surfaced (§E). When no stronger tier resolved, it also fills
 	// AgentID and IdentitySource becomes "fingerprinted".
 	AgentSurrogateID string `json:"agent_surrogate_id,omitempty"`
+
+	// Attribution drift (Axis-1, Plan #8 Phase 2 — classification-drift.md §3).
+	// Declared-vs-inferred cross-source comparison, recorded even when one side
+	// wins the ladder (the disagreement is the product). All additive/omitempty.
+	//   AgentDeclared — declared agent id (OTel gen_ai.agent.id or TAS-Agent-Id)
+	//   AgentInferred — the fingerprinted surrogate (always computed when derivable)
+	//   AgentDrift    — *bool tri-state: true iff a declared agent is present AND
+	//                   the gateway attributed a different agent via a
+	//                   stronger-than-fingerprint tier; nil = no declared signal
+	//   DriftSource   — which declared channel drove the comparison: otel|tas_asserted|none
+	AgentDeclared string `json:"agent_declared,omitempty"`
+	AgentInferred string `json:"agent_inferred,omitempty"`
+	AgentDrift    *bool  `json:"agent_drift,omitempty"`
+	DriftSource   string `json:"drift_source,omitempty"`
 }
 
 // ResponseEvent mirrors aether-shared/data-models/aiqg/response-event.md §2.2.
@@ -173,6 +187,20 @@ type ResponseEvent struct {
 	Model     string `json:"model,omitempty"`
 	Workflow  string `json:"workflow,omitempty"`   // CLEAR workflow_type — denormalized so the response stream carries the type dimension for per-type rollups (TimescaleDB)
 	SourceApp string `json:"source_app,omitempty"` // calling app — denormalized like vendor/model/workflow so the response stream carries the source dimension
+
+	// Classification drift (Axis-1, Plan #8 Phase 2 — classification-drift.md §3).
+	// `Workflow` above is the EFFECTIVE type (precedence winner); these record the
+	// declared and inferred inputs so declared-vs-inferred disagreement is queryable.
+	//   WorkflowDeclared   — declared type (TAS-Workflow assertion or mapped OTel op-name); "" when none/fallthrough
+	//   WorkflowDeclaredOp — raw gen_ai.operation.name as received (kept even on fallthrough)
+	//   WorkflowInferred   — heuristic Classify() result (always computed)
+	//   WorkflowDrift      — *bool tri-state: true iff declared and inferred both present and differ; nil = no declared signal
+	//   OTelMapVersion     — version of the op-name→workflow map (interpret historical drift)
+	WorkflowDeclared   string `json:"workflow_declared,omitempty"`
+	WorkflowDeclaredOp string `json:"workflow_declared_op,omitempty"`
+	WorkflowInferred   string `json:"workflow_inferred,omitempty"`
+	WorkflowDrift      *bool  `json:"workflow_drift,omitempty"`
+	OTelMapVersion     string `json:"otel_map_version,omitempty"`
 
 	// Experiment attribution (Phase D). Set when an experiment claimed this
 	// request (dry_run or running); the Spark scope_type='experiment_variant'

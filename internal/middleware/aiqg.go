@@ -806,7 +806,18 @@ func headersView(h AIQGHeaders) events.AIQGHeadersView {
 		OTelAgentName:      h.OTelAgentName,
 		OTelConversationID: h.OTelConversationID,
 		OTelSystem:         h.OTelSystem,
+		OTelMapVersion:     otelMapVersion(h.OTelOperation),
 	}
+}
+
+// otelMapVersion returns the op-name→workflow map version when an OTel
+// operation was present (so historical classification drift stays
+// interpretable across map changes), else "".
+func otelMapVersion(op string) string {
+	if op == "" {
+		return ""
+	}
+	return workflow.OTelOperationMapVersion
 }
 
 // otelWorkflow maps an OTel gen_ai.operation.name to a workflow_type,

@@ -2,7 +2,11 @@ package events
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 )
 
 // Workflow precedence: explicit TAS-Workflow header > OTel-declared > heuristic.
@@ -133,4 +137,115 @@ func TestAgentContext_JSONKeysRoundTrip(t *testing.T) {
 	if m["identity_source"] != "otel" {
 		t.Errorf("identity_source = %v, want otel", m["identity_source"])
 	}
+}
+
+// Workflow classification drift (Axis-1) stamped on the response event via
+// Build: declared vs inferred recorded, drift flagged when they differ.
+// See classification-drift.md §3.
+func TestBuild_ClassificationDrift(t *testing.T) {
+	c := instrumentation.NewCollector()
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	build := func(h AIQGHeadersView, inferred string) ResponseEvent {
+		_, respEnv := Build(r, h, RoutingView{Vendor: "openai", Model: "gpt-4o-mini", Workflow: inferred},
+			TokenView{}, c.Snapshot(), BuildOptions{HTTPStatus: 200})
+		return respEnv.Data
+	}
+
+	t.Run("otel declared differs from inferred -> drift true", func(t *testing.T) {
+		d := build(AIQGHeadersView{OTelWorkflow: "agentic", OTelOperation: "invoke_agent", OTelMapVersion: "otel-map-v1"}, "rag")
+		if d.WorkflowDeclared != "agentic" || d.WorkflowInferred != "rag" {
+			t.Errorf("declared=%q inferred=%q", d.WorkflowDeclared, d.WorkflowInferred)
+		}
+		if d.WorkflowDrift == nil || !*d.WorkflowDrift {
+			t.Errorf("want drift=true, got %v", d.WorkflowDrift)
+		}
+		if d.WorkflowDeclaredOp != "invoke_agent" {
+			t.Errorf("declared_op=%q", d.WorkflowDeclaredOp)
+		}
+		if d.OTelMapVersion != "otel-map-v1" {
+			t.Errorf("otel_map_version=%q", d.OTelMapVersion)
+		}
+		// The effective workflow is the OTel-declared type (beats heuristic).
+		if d.Workflow != "agentic" {
+			t.Errorf("effective workflow=%q, want agentic", d.Workflow)
+		}
+	})
+
+	t.Run("declared equals inferred -> drift false", func(t *testing.T) {
+		d := build(AIQGHeadersView{OTelWorkflow: "agentic", OTelOperation: "invoke_agent"}, "agentic")
+		if d.WorkflowDrift == nil || *d.WorkflowDrift {
+			t.Errorf("want drift=false, got %v", d.WorkflowDrift)
+		}
+	})
+
+	t.Run("no declared signal -> drift nil (absence != agreement)", func(t *testing.T) {
+		d := build(AIQGHeadersView{}, "rag")
+		if d.WorkflowDrift != nil {
+			t.Errorf("want drift nil, got %v", *d.WorkflowDrift)
+		}
+		if d.WorkflowDeclared != "" {
+			t.Errorf("declared should be empty, got %q", d.WorkflowDeclared)
+		}
+	})
+
+	t.Run("TAS-Workflow header supplies the declared value", func(t *testing.T) {
+		d := build(AIQGHeadersView{Workflow: "summarization"}, "rag")
+		if d.WorkflowDeclared != "summarization" || d.WorkflowInferred != "rag" {
+			t.Errorf("declared=%q inferred=%q", d.WorkflowDeclared, d.WorkflowInferred)
+		}
+		if d.WorkflowDrift == nil || !*d.WorkflowDrift {
+			t.Errorf("want drift=true (customer declared vs heuristic), got %v", d.WorkflowDrift)
+		}
+	})
+}
+
+// Attribution drift (Axis-1): declared agent + inferred surrogate recorded;
+// v0.1 flags the clean cross-source case (TAS + OTel both present, differing).
+func TestBuildAgentContext_AttributionDrift(t *testing.T) {
+	tok := TokenView{TenantID: "t1", TASAuthTokenID: "tok-1"}
+
+	t.Run("otel declared records source + inferred surrogate", func(t *testing.T) {
+		ac := buildAgentContext(AIQGHeadersView{OTelAgentID: "a-otel"}, tok, "", Linkage{Fingerprint: "sig"})
+		if ac.AgentDeclared != "a-otel" || ac.DriftSource != "otel" {
+			t.Errorf("declared=%q source=%q", ac.AgentDeclared, ac.DriftSource)
+		}
+		if ac.AgentInferred == "" {
+			t.Error("inferred surrogate should be recorded alongside a declared agent")
+		}
+		if ac.AgentDrift != nil {
+			t.Errorf("single declared source -> agent_drift nil, got %v", *ac.AgentDrift)
+		}
+	})
+
+	t.Run("TAS asserted records source", func(t *testing.T) {
+		ac := buildAgentContext(AIQGHeadersView{AgentID: "a-tas"}, tok, "", Linkage{})
+		if ac.AgentDeclared != "a-tas" || ac.DriftSource != "tas_asserted" {
+			t.Errorf("declared=%q source=%q", ac.AgentDeclared, ac.DriftSource)
+		}
+	})
+
+	t.Run("cross-source conflict (TAS != OTel) -> agent_drift true", func(t *testing.T) {
+		ac := buildAgentContext(AIQGHeadersView{AgentID: "a-tas", OTelAgentID: "a-otel"}, tok, "", Linkage{})
+		if ac.AgentDrift == nil || !*ac.AgentDrift {
+			t.Errorf("want agent_drift=true, got %v", ac.AgentDrift)
+		}
+		// TAS wins the declared value + source.
+		if ac.AgentDeclared != "a-tas" || ac.DriftSource != "tas_asserted" {
+			t.Errorf("declared=%q source=%q", ac.AgentDeclared, ac.DriftSource)
+		}
+	})
+
+	t.Run("matching TAS==OTel -> agent_drift false", func(t *testing.T) {
+		ac := buildAgentContext(AIQGHeadersView{AgentID: "same", OTelAgentID: "same"}, tok, "", Linkage{})
+		if ac.AgentDrift == nil || *ac.AgentDrift {
+			t.Errorf("want agent_drift=false, got %v", ac.AgentDrift)
+		}
+	})
+
+	t.Run("no declared agent -> no drift fields", func(t *testing.T) {
+		ac := buildAgentContext(AIQGHeadersView{BaggageUserID: "u1"}, tok, "", Linkage{})
+		if ac.AgentDeclared != "" || ac.DriftSource != "" || ac.AgentDrift != nil {
+			t.Errorf("expected no drift fields, got declared=%q source=%q drift=%v", ac.AgentDeclared, ac.DriftSource, ac.AgentDrift)
+		}
+	})
 }
