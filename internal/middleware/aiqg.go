@@ -48,6 +48,8 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/promptcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
+
+	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 )
 
 // AIQGConfig configures the AIQG entry middleware.
@@ -793,7 +795,40 @@ func headersView(h AIQGHeaders) events.AIQGHeadersView {
 		TraceID:          h.TraceID,
 		BaggageUserID:    h.Baggage["user.id"],
 		BaggageSessionID: h.Baggage["session.id"],
+
+		// OTel gen_ai.* declared signals. Map the raw op-name to a
+		// workflow_type here (mapped "" = fall through to heuristic); carry
+		// the raw op-name + agent/conversation for the identity ladder and
+		// classification drift. See otel-genai-ingestion.md §3/§4.
+		OTelWorkflow:       otelWorkflow(h.OTelOperation),
+		OTelOperation:      h.OTelOperation,
+		OTelAgentID:        h.OTelAgentID,
+		OTelAgentName:      h.OTelAgentName,
+		OTelConversationID: h.OTelConversationID,
+		OTelSystem:         h.OTelSystem,
+		OTelMapVersion:     otelMapVersion(h.OTelOperation),
 	}
+}
+
+// otelMapVersion returns the op-name→workflow map version when an OTel
+// operation was present (so historical classification drift stays
+// interpretable across map changes), else "".
+func otelMapVersion(op string) string {
+	if op == "" {
+		return ""
+	}
+	return workflow.OTelOperationMapVersion
+}
+
+// otelWorkflow maps an OTel gen_ai.operation.name to a workflow_type,
+// returning "" when the op-name should fall through to the heuristic
+// classifier (generic/excluded/unknown ops). Thin wrapper over
+// workflow.OperationToWorkflow so headersView stays declarative.
+func otelWorkflow(op string) string {
+	if wf, ok := workflow.OperationToWorkflow(op); ok {
+		return wf
+	}
+	return ""
 }
 
 // routingView snapshots the mutable Routing sidecar into the read-only

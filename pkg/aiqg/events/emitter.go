@@ -150,6 +150,23 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		respFields["experiment_id"] = resp.Data.ExperimentID
 		respFields["experiment_variant"] = resp.Data.ExperimentVariant
 	}
+	// Classification drift (Axis-1, Plan #8) — promote as FIELDS (never stream
+	// labels: keep cardinality off the label set). Present only when a declared
+	// signal existed; the Loki-fallback backend unwraps these until the Spark
+	// event_metrics columns land. See classification-drift.md §3/§4.
+	if resp.Data.WorkflowDeclared != "" {
+		respFields["workflow_declared"] = resp.Data.WorkflowDeclared
+		respFields["workflow_inferred"] = resp.Data.WorkflowInferred
+	}
+	if resp.Data.WorkflowDeclaredOp != "" {
+		respFields["workflow_declared_op"] = resp.Data.WorkflowDeclaredOp
+	}
+	if resp.Data.WorkflowDrift != nil {
+		respFields["workflow_drift"] = *resp.Data.WorkflowDrift
+	}
+	if resp.Data.OTelMapVersion != "" {
+		respFields["otel_map_version"] = resp.Data.OTelMapVersion
+	}
 	// Token accounting — nil-safe; either fully populated or omitted.
 	if ta := resp.Data.TokenAccounting; ta != nil {
 		respFields["prompt_tokens"] = ta.PromptTokens
@@ -314,6 +331,20 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		}
 		if ac.FlowStepSeq > 0 {
 			respFields["flow_step_seq"] = ac.FlowStepSeq
+		}
+		// Attribution drift (Axis-1, Plan #8) — promote as fields; present
+		// only when a declared agent existed. See classification-drift.md §3.
+		if ac.AgentDeclared != "" {
+			respFields["agent_declared"] = ac.AgentDeclared
+			if ac.AgentInferred != "" {
+				respFields["agent_inferred"] = ac.AgentInferred
+			}
+			if ac.DriftSource != "" {
+				respFields["drift_source"] = ac.DriftSource
+			}
+		}
+		if ac.AgentDrift != nil {
+			respFields["agent_drift"] = *ac.AgentDrift
 		}
 	}
 	e.Logger.WithFields(respFields).Info("aiqg response event")
