@@ -382,6 +382,12 @@ func TestCanonicalHeaderListExhaustive(t *testing.T) {
 		"TAS-Flow-Id":         {},
 		"TAS-Conversation-Id": {},
 		"baggage":             {},
+		// OTel gen_ai.* attribution headers (stripped before vendor).
+		"gen_ai.operation.name":  {},
+		"gen_ai.agent.id":        {},
+		"gen_ai.agent.name":      {},
+		"gen_ai.conversation.id": {},
+		"gen_ai.system":          {},
 	}
 	if len(canonicalHeaderNames) != len(expected) {
 		t.Fatalf("canonicalHeaderNames len=%d want=%d", len(canonicalHeaderNames), len(expected))

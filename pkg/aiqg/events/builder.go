@@ -37,6 +37,19 @@ type AIQGHeadersView struct {
 	TraceID          string
 	BaggageUserID    string
 	BaggageSessionID string
+
+	// OTel GenAI declared signals (gen_ai.*), projected + mapped by the
+	// middleware. OTelWorkflow is the op-name mapped to a workflow_type
+	// ("" when the op-name falls through/excluded — see
+	// otel-genai-ingestion.md §3); OTelOperation is the raw op-name kept
+	// for classification drift. The agent/conversation values feed the
+	// `otel` rung of the identity ladder.
+	OTelWorkflow       string
+	OTelOperation      string
+	OTelAgentID        string
+	OTelAgentName      string
+	OTelConversationID string
+	OTelSystem         string
 }
 
 // RoutingView is the subset of routing-layer state the event builder
@@ -284,6 +297,9 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 		ac.ConversationID = h.BaggageSessionID
 	}
 	if ac.ConversationID == "" {
+		ac.ConversationID = h.OTelConversationID
+	}
+	if ac.ConversationID == "" {
 		ac.ConversationID = lk.ConversationID
 	}
 	// flow: explicit header wins, else traceparent trace-id, else the
@@ -305,7 +321,14 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 	case ac.UserID != "":
 		ac.IdentitySource = "baggage"
 	case ac.AgentID != "" || h.FlowID != "" || h.ConversationID != "":
+		// asserted = TAS-* headers only. ac.AgentID is still TAS-only here
+		// (the OTel fold below runs after this switch), so an OTel-supplied
+		// agent id never mislabels as asserted.
 		ac.IdentitySource = "asserted"
+	case h.OTelAgentID != "" || h.OTelConversationID != "":
+		// otel = declared via gen_ai.* — stronger than the gateway's own
+		// inference (trace/linked/fingerprint), weaker than a TAS assertion.
+		ac.IdentitySource = "otel"
 	case h.TraceID != "":
 		ac.IdentitySource = "trace"
 	case lk.Linked:
@@ -316,6 +339,17 @@ func buildAgentContext(h AIQGHeadersView, t TokenView, clientIP string, lk Linka
 		ac.IdentitySource = "transport"
 	default:
 		ac.IdentitySource = "unattributed"
+	}
+
+	// OTel fold: an OTel-declared agent fills agent_id/agent_name when no
+	// TAS-Agent-* header supplied them. Runs AFTER the identity_source switch
+	// (so it can't mislabel as asserted) and BEFORE the fingerprint block
+	// (so the surrogate never overwrites a declared OTel agent).
+	if ac.AgentID == "" {
+		ac.AgentID = h.OTelAgentID
+	}
+	if ac.AgentName == "" {
+		ac.AgentName = h.OTelAgentName
 	}
 
 	// Fingerprinted tier (§B): when the request leaks a structural signature
@@ -446,7 +480,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		IsAIQGMode:      true,
 		DryRun:          headers.DryRun,
 		TraceReturned:   headers.Trace,
-		Workflow:        preferredWorkflow(headers.Workflow, routing.Workflow),
+		Workflow:        preferredWorkflow(headers.Workflow, headers.OTelWorkflow, routing.Workflow),
 		PolicyNames:     headers.Policy,
 		PolicyBundle:    headers.PolicyBundle,
 		// SourceApp override from header was already captured above; the
@@ -473,7 +507,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		EndToEndMs:                 snap.EndToEndMs,
 		GatewayOverheadMs:          snap.GatewayOverheadMs,
 		VendorTTFTMs:               snap.VendorTTFTMs,
-		Workflow:                   preferredWorkflow(headers.Workflow, routing.Workflow),
+		Workflow:                   preferredWorkflow(headers.Workflow, headers.OTelWorkflow, routing.Workflow),
 		HTTPStatus:                 opts.HTTPStatus,
 		Vendor:                     routing.Vendor,
 		Model:                      routing.Model,
@@ -590,13 +624,13 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 	respEvent := ResponseEvent{
 		ResponseEventID:            respID,
 		RequestEventID:             reqID,
-		TenantID:                   token.TenantID,                                        // denormalized per response-event.md §"Denormalization rationale"
-		AIQGAccountID:              token.AIQGAccountID,                                   // ditto
-		Vendor:                     routing.Vendor,                                        // denormalized from routing decision (same as RequestEvent)
-		Model:                      routing.Model,                                         // ditto — powers per-vendor/model dashboards off the response stream
-		Workflow:                   preferredWorkflow(headers.Workflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
-		SourceApp:                  sourceApp,                                             // ditto — carries the source_app dimension on the response stream
-		ExperimentID:               opts.ExperimentID,                                     // Phase D — experiment that claimed this request (per-variant rollup key)
+		TenantID:                   token.TenantID,                                                              // denormalized per response-event.md §"Denormalization rationale"
+		AIQGAccountID:              token.AIQGAccountID,                                                         // ditto
+		Vendor:                     routing.Vendor,                                                              // denormalized from routing decision (same as RequestEvent)
+		Model:                      routing.Model,                                                               // ditto — powers per-vendor/model dashboards off the response stream
+		Workflow:                   preferredWorkflow(headers.Workflow, headers.OTelWorkflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream
+		SourceApp:                  sourceApp,                                                                   // ditto — carries the source_app dimension on the response stream
+		ExperimentID:               opts.ExperimentID,                                                           // Phase D — experiment that claimed this request (per-variant rollup key)
 		ExperimentVariant:          opts.ExperimentVariant,
 		CompleteAt:                 completeAt,
 		Status:                     status,
@@ -747,14 +781,19 @@ func isStreaming(r *http.Request) bool {
 	return false
 }
 
-// preferredWorkflow picks the customer-supplied workflow over the
-// auto-classified value when both are present. Customer intent wins
-// because the classifier is heuristic and may miscategorize legitimate
-// edge cases (a single_turn_qa that happens to contain code blocks,
-// for instance). An empty header falls through to the classifier.
-func preferredWorkflow(headerVal, classified string) string {
+// preferredWorkflow resolves the effective workflow_type across the three
+// sources in precedence order: explicit TAS-Workflow header > OTel-declared
+// (gen_ai.operation.name mapped to a workflow_type) > heuristic classifier.
+// Customer intent wins outright because the header is authoritative; an
+// OTel-declared type beats the heuristic because it's a high-confidence
+// client assertion; both empty falls through to the classifier. See
+// aether-shared/data-models/aiqg/otel-genai-ingestion.md §4.1.
+func preferredWorkflow(headerVal, otelVal, classified string) string {
 	if headerVal != "" {
 		return headerVal
+	}
+	if otelVal != "" {
+		return otelVal
 	}
 	return classified
 }

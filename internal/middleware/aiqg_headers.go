@@ -60,6 +60,18 @@ type AIQGHeaders struct {
 	ConversationID string            // TAS-Conversation-Id
 	TraceID        string            // W3C traceparent trace-id (read, not stripped)
 	Baggage        map[string]string // W3C baggage (user.id, session.id, account.id, …)
+
+	// OTel GenAI semantic-convention attributes carried as explicit raw
+	// HTTP headers (gen_ai.*). A declared classification/attribution source
+	// that slots between TAS-* overrides and the gateway's own inference —
+	// see aether-shared/data-models/aiqg/otel-genai-ingestion.md. Stripped
+	// before the vendor (unlike traceparent). Self-asserted; not
+	// authenticated. Baggage-carried gen_ai.* is a deliberate future add-on.
+	OTelOperation      string // gen_ai.operation.name (raw op-name)
+	OTelAgentID        string // gen_ai.agent.id
+	OTelAgentName      string // gen_ai.agent.name
+	OTelConversationID string // gen_ai.conversation.id
+	OTelSystem         string // gen_ai.system (provider; observability only)
 }
 
 // IsZero reports whether any AIQG header was set. Used by the Path A
@@ -92,6 +104,13 @@ var canonicalHeaderNames = []string{
 	"TAS-Flow-Id",
 	"TAS-Conversation-Id",
 	"baggage",
+	// OTel gen_ai.* attribution headers — TAS-internal signals; stripped
+	// before the vendor (unlike traceparent). See otel-genai-ingestion.md §5.
+	"gen_ai.operation.name",
+	"gen_ai.agent.id",
+	"gen_ai.agent.name",
+	"gen_ai.conversation.id",
+	"gen_ai.system",
 }
 
 // validWorkflows is the closed enum from
@@ -157,6 +176,16 @@ func ParseHeaders(req *http.Request) (AIQGHeaders, error) {
 		ConversationID: strings.TrimSpace(req.Header.Get("TAS-Conversation-Id")),
 		TraceID:        parseTraceparentTraceID(req.Header.Get("traceparent")),
 		Baggage:        parseBaggage(req.Header.Get("baggage")),
+
+		// OTel gen_ai.* explicit headers. Go canonicalizes header names on
+		// both store and lookup ('.' and '_' are valid token chars, and
+		// canonicalization lowercases everything after the first letter), so
+		// any client casing of gen_ai.* resolves via Header.Get here.
+		OTelOperation:      strings.TrimSpace(req.Header.Get("gen_ai.operation.name")),
+		OTelAgentID:        strings.TrimSpace(req.Header.Get("gen_ai.agent.id")),
+		OTelAgentName:      strings.TrimSpace(req.Header.Get("gen_ai.agent.name")),
+		OTelConversationID: strings.TrimSpace(req.Header.Get("gen_ai.conversation.id")),
+		OTelSystem:         strings.TrimSpace(req.Header.Get("gen_ai.system")),
 	}
 
 	if raw := req.Header.Get("TAS-Policy"); raw != "" {

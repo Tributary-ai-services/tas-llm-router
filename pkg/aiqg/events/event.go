@@ -133,7 +133,7 @@ type AgentContext struct {
 	FlowID         string `json:"flow_id,omitempty"`         // TAS-Flow-Id or traceparent trace-id
 	PrincipalID    string `json:"principal_id,omitempty"`    // AIQG token source_app / token id
 	ClientIP       string `json:"client_ip,omitempty"`       // gated client IP (raw/truncated/off per ip_capture_mode)
-	IdentitySource string `json:"identity_source,omitempty"` // baggage|asserted|trace|linked|principal|transport|unattributed
+	IdentitySource string `json:"identity_source,omitempty"` // baggage|asserted|otel|trace|linked|fingerprinted|principal|transport|unattributed
 
 	// Flow-step topology (the `linked` tier, docs/AIQG-AGENT-FLOW-ATTRIBUTION.md
 	// §A). StepID is this event's step (= response_event_id). ParentStepID and
