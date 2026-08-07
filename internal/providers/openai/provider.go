@@ -11,6 +11,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
 )
 
 // OpenAIProvider implements the LLMProvider interface for OpenAI
@@ -22,31 +23,49 @@ type OpenAIProvider struct {
 
 // OpenAIConfig holds OpenAI-specific configuration
 type OpenAIConfig struct {
-	APIKey      string            `yaml:"api_key"`
-	BaseURL     string            `yaml:"base_url"`
-	OrgID       string            `yaml:"org_id"`
-	Models      []types.ModelInfo `yaml:"models"`
-	Timeout     time.Duration     `yaml:"timeout"`
+	APIKey  string            `yaml:"api_key"`
+	BaseURL string            `yaml:"base_url"`
+	OrgID   string            `yaml:"org_id"`
+	Models  []types.ModelInfo `yaml:"models"`
+	Timeout time.Duration     `yaml:"timeout"`
 }
 
 // NewOpenAIProvider creates a new OpenAI provider instance
 func NewOpenAIProvider(config *OpenAIConfig, logger *logrus.Logger) *OpenAIProvider {
 	clientConfig := openai.DefaultConfig(config.APIKey)
-	
+
 	if config.BaseURL != "" {
 		clientConfig.BaseURL = config.BaseURL
 	}
 	if config.OrgID != "" {
 		clientConfig.OrgID = config.OrgID
 	}
-	
+
 	client := openai.NewClientWithConfig(clientConfig)
-	
+
 	return &OpenAIProvider{
 		client: client,
 		config: config,
 		logger: logger,
 	}
+}
+
+// clientFor returns a per-request client keyed by the BYOK override on ctx
+// (Plan #14), or the statically-configured client when none is set. Inert until
+// a tenant stores a key, so default traffic is unchanged.
+func (p *OpenAIProvider) clientFor(ctx context.Context) *openai.Client {
+	key := upstreamkey.From(ctx)
+	if key == "" {
+		return p.client
+	}
+	cc := openai.DefaultConfig(key)
+	if p.config.BaseURL != "" {
+		cc.BaseURL = p.config.BaseURL
+	}
+	if p.config.OrgID != "" {
+		cc.OrgID = p.config.OrgID
+	}
+	return openai.NewClientWithConfig(cc)
 }
 
 // GetProviderName returns the provider name
@@ -102,7 +121,7 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *types.ChatRequ
 	ctx = instrumentation.Attach(ctx)
 
 	// Make the API call
-	resp, err := p.client.CreateChatCompletion(ctx, *openaiReq)
+	resp, err := p.clientFor(ctx).CreateChatCompletion(ctx, *openaiReq)
 	if err != nil {
 		p.logger.WithError(err).Error("OpenAI API call failed")
 		return nil, fmt.Errorf("openai api call failed: %w", err)
@@ -131,7 +150,7 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 	ctx = instrumentation.Attach(ctx)
 
 	// Make the streaming API call
-	stream, err := p.client.CreateChatCompletionStream(ctx, *openaiReq)
+	stream, err := p.clientFor(ctx).CreateChatCompletionStream(ctx, *openaiReq)
 	if err != nil {
 		p.logger.WithError(err).Error("OpenAI streaming API call failed")
 		return nil, fmt.Errorf("openai streaming api call failed: %w", err)
@@ -259,7 +278,7 @@ func (p *OpenAIProvider) HealthCheck(ctx context.Context) error {
 		p.logger.WithError(err).Error("OpenAI health check failed")
 		return fmt.Errorf("openai health check failed: %w", err)
 	}
-	
+
 	p.logger.Debug("OpenAI health check passed")
 	return nil
 }
@@ -680,7 +699,7 @@ func (p *OpenAIProvider) convertFromOpenAIChunk(chunk *openai.ChatCompletionStre
 // estimateTokens provides a rough estimate of tokens in the request
 func (p *OpenAIProvider) estimateTokens(req *types.ChatRequest) int {
 	totalChars := 0
-	
+
 	for _, msg := range req.Messages {
 		switch content := msg.Content.(type) {
 		case string:
@@ -696,11 +715,11 @@ func (p *OpenAIProvider) estimateTokens(req *types.ChatRequest) int {
 				}
 			}
 		}
-		
+
 		// Add role and name tokens
 		totalChars += len(msg.Role) + len(msg.Name)
 	}
-	
+
 	// Add function/tool tokens
 	for _, fn := range req.Functions {
 		totalChars += len(fn.Name) + len(fn.Description)
@@ -708,7 +727,7 @@ func (p *OpenAIProvider) estimateTokens(req *types.ChatRequest) int {
 	for _, tool := range req.Tools {
 		totalChars += len(tool.Function.Name) + len(tool.Function.Description)
 	}
-	
+
 	// Rough approximation: 4 chars per token
 	return totalChars / 4
 }

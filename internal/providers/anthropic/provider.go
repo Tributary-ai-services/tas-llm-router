@@ -14,6 +14,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
 )
 
 // AnthropicProvider implements the LLMProvider interface for Anthropic Claude
@@ -48,6 +49,23 @@ func NewAnthropicProvider(config *AnthropicConfig, logger *logrus.Logger) *Anthr
 		config: config,
 		logger: logger,
 	}
+}
+
+// clientFor returns a per-request client keyed by the BYOK override on ctx
+// (Plan #14), or the statically-configured client when none is set. The
+// override branch is inert until a tenant stores a key, so default traffic is
+// unchanged. SDK client construction is a cheap HTTP-wrapper build.
+func (p *AnthropicProvider) clientFor(ctx context.Context) *anthropic.Client {
+	key := upstreamkey.From(ctx)
+	if key == "" {
+		return p.client
+	}
+	opts := []option.RequestOption{option.WithAPIKey(key)}
+	if p.config.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(p.config.BaseURL))
+	}
+	c := anthropic.NewClient(opts...)
+	return &c
 }
 
 // GetProviderName returns the provider name
@@ -101,7 +119,7 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *types.ChatR
 	ctx = instrumentation.Attach(ctx)
 
 	// Make the API call
-	resp, err := p.client.Messages.New(ctx, *anthropicReq)
+	resp, err := p.clientFor(ctx).Messages.New(ctx, *anthropicReq)
 	if err != nil {
 		p.logger.WithError(err).Error("Anthropic API call failed")
 		return nil, fmt.Errorf("anthropic api call failed: %w", err)
@@ -126,7 +144,7 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 	ctx = instrumentation.Attach(ctx)
 
 	// Create the streaming request
-	stream := p.client.Messages.NewStreaming(ctx, *anthropicReq)
+	stream := p.clientFor(ctx).Messages.NewStreaming(ctx, *anthropicReq)
 
 	// Create our response channel
 	chunks := make(chan *types.ChatChunk, 100)
