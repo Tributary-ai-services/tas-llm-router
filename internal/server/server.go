@@ -22,9 +22,11 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
 	"github.com/tributary-ai/llm-router-waf/internal/workflow"
-	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/cacheconfig"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/credentials"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/linkage"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
@@ -85,6 +87,10 @@ type Server struct {
 	// in which case every tenant uses the global defaults below. The resolver is
 	// the safe per-tenant enablement path for semantic SERVING.
 	cacheCfgResolver *cacheconfig.Resolver
+	// credResolver resolves a tenant's stored BYOK vendor key (Plan #14) from
+	// aiqg-dashboard-be. Nil when the dashboard isn't wired → BYOK is off and
+	// traffic uses per-request / TAS-configured keys exactly as before.
+	credResolver *credentials.Resolver
 	// semGlobal* are the gateway's global C4 defaults; per-tenant overrides layer
 	// over these (nil override field = the global value).
 	semGlobalEnabled bool
@@ -239,12 +245,12 @@ type AIQGResponseCacheConfig struct {
 // AIQGSemCacheConfig configures the C4 semantic cache. Runs on the C1 exact-miss
 // path (L0→L1). Mirrors config.AIQGSemCacheConfig.
 type AIQGSemCacheConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	Shadow        bool          `yaml:"shadow"`         // log would-hit, serve nothing (S1)
-	MinSimilarity float64       `yaml:"min_similarity"` // L1 candidate floor (cosine)
-	TTL           time.Duration `yaml:"ttl"`
-	RedisURL      string        `yaml:"redis_url"`   // redis-semcache (redis-stack)
-	OllamaURL     string        `yaml:"ollama_url"`  // embeddings server
+	Enabled         bool          `yaml:"enabled"`
+	Shadow          bool          `yaml:"shadow"`         // log would-hit, serve nothing (S1)
+	MinSimilarity   float64       `yaml:"min_similarity"` // L1 candidate floor (cosine)
+	TTL             time.Duration `yaml:"ttl"`
+	RedisURL        string        `yaml:"redis_url"`         // redis-semcache (redis-stack)
+	OllamaURL       string        `yaml:"ollama_url"`        // embeddings server
 	EmbedModel      string        `yaml:"embed_model"`       // all-minilm
 	Dim             int           `yaml:"dim"`               // 384
 	JudgeDailyUSD   float64       `yaml:"judge_daily_usd"`   // L3 judge daily $ cap (§14.1); 0 = unlimited
@@ -492,6 +498,12 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			server.cacheCfgResolver = cacheconfig.NewResolver(ccLoader, 0) // 0 = 30s TTL default
 			logger.WithField("dashboard_url", config.AIQG.DashboardURL).
 				Info("AIQG per-tenant cache-config resolver enabled")
+
+			// BYOK credential resolver (Plan #14 Phase 2) — resolves the
+			// tenant's stored provider key + fallback policy per request.
+			server.credResolver = credentials.NewResolver(config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken, 0)
+			logger.WithField("dashboard_url", config.AIQG.DashboardURL).
+				Info("AIQG BYOK credential resolver enabled")
 		}
 
 		server.aiqgMiddleware = middleware.NewAIQG(middleware.AIQGConfig{
@@ -944,6 +956,15 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	vendor := provider.GetProviderName()
 	middleware.StampVendor(r.Context(), vendor)
 
+	// AIQG BYOK (Plan #14): resolve the effective upstream key for the routed
+	// vendor and carry it on ctx for the provider to inject. Returns nil to
+	// signal it already wrote a 402 (BYOK-only tenant with no stored key).
+	if nr := s.applyBYOKKey(w, r, vendor); nr == nil {
+		return
+	} else {
+		r = nr
+	}
+
 	// AIQG C1 exact-match response cache (docs/AIQG-CACHING.md §2). Checked after
 	// routing so the key carries the resolved vendor, but before the vendor call —
 	// a hit skips that 1–5s call entirely (the whole latency win). Routing itself
@@ -959,6 +980,77 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.handleNonStreamingCompletionWithRetry(w, r, &req, provider, metadata)
 	}
+}
+
+// bearerKey strips a leading "Bearer " (case-insensitive) so a raw vendor key
+// reaches the provider SDK, which adds its own auth scheme.
+func bearerKey(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 7 && strings.EqualFold(s[:7], "bearer ") {
+		s = strings.TrimSpace(s[7:])
+	}
+	return s
+}
+
+// applyBYOKKey resolves the effective upstream vendor key for the routed vendor
+// (Plan #14) and returns a request carrying it on ctx for the provider to
+// inject. Precedence: per-request customer key (TAS-Upstream-Authorization, then
+// the raw Authorization) > the tenant's stored credential > the TAS shared key
+// (fallback, only when the tenant allows it). Returns nil after writing a 402
+// when a BYOK-only tenant has no key for the vendor. A no-op (returns r
+// unchanged) outside AIQG mode or when the resolver isn't wired — so non-BYOK
+// traffic is unaffected and the provider falls back to its configured key.
+func (s *Server) applyBYOKKey(w http.ResponseWriter, r *http.Request, vendor string) *http.Request {
+	ctx := r.Context()
+	tenant := middleware.ResolvedTenantFromContext(ctx)
+	if tenant == "" || s.credResolver == nil {
+		return r // non-AIQG, or BYOK not configured
+	}
+
+	// 1. Explicit per-request customer key wins (the never-store path stays
+	//    first-class). ONLY the deliberate TAS-Upstream-Authorization signal —
+	//    NOT the raw Authorization header, which historically was required by
+	//    the gate but never forwarded, so clients may send a placeholder there;
+	//    injecting that would break them. Raw Authorization stays ignored → TAS
+	//    key, exactly as today.
+	if perReq := bearerKey(vendorUpstreamKey(ctx)); perReq != "" {
+		middleware.StampCredentialSource(ctx, "upstream_header", "")
+		return r.WithContext(upstreamkey.With(ctx, perReq))
+	}
+
+	// 2. Stored credential for (tenant, vendor).
+	res, err := s.credResolver.Resolve(ctx, tenant, vendor)
+	if err != nil {
+		// Resolver blip → degrade to the TAS shared key rather than fail the
+		// request. Logged once; the event records tas_shared.
+		s.logger.WithError(err).WithField("vendor", vendor).
+			Warn("BYOK credential resolve failed; using TAS shared key")
+		middleware.StampCredentialSource(ctx, "tas_shared", "")
+		return r
+	}
+	if res.Found {
+		middleware.StampCredentialSource(ctx, "stored", res.CredentialID)
+		return r.WithContext(upstreamkey.With(ctx, res.APIKey))
+	}
+
+	// 3. No stored key. Fall back to the TAS shared key, or hard-fail if the
+	//    tenant is BYOK-only.
+	if res.AllowSharedFallback {
+		middleware.StampCredentialSource(ctx, "tas_shared", "")
+		return r
+	}
+	s.writeErrorResponse(w, http.StatusPaymentRequired,
+		fmt.Sprintf("provider_key_required: no stored %s credential for this account and shared-key fallback is disabled", vendor))
+	return nil
+}
+
+// vendorUpstreamKey reads the customer-supplied TAS-Upstream-Authorization from
+// the parsed AIQG headers on ctx, or "" when absent.
+func vendorUpstreamKey(ctx context.Context) string {
+	if h, ok := middleware.FromContext(ctx); ok {
+		return h.UpstreamAuthorization
+	}
+	return ""
 }
 
 // maybeServeFromCache runs the C1 cache lookup. It returns nil when it served a

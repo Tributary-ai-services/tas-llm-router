@@ -123,7 +123,10 @@ func TestAIQG_StrictRejectsMissingTASAuth(t *testing.T) {
 // TAS-Auth set, Authorization missing = 401 regardless of strict — once
 // a caller asserts TAS-Auth they've opted into Path A semantics, and
 // Path A requires the customer's vendor key in Authorization.
-func TestAIQG_RejectsTASAuthWithoutAuthorization(t *testing.T) {
+// BYOK (Plan #14): Authorization is now OPTIONAL on Path A. TAS-Auth alone
+// proceeds; the vendor key is resolved after routing (stored credential / TAS
+// shared key / 402) in server.applyBYOKKey, not gated here.
+func TestAIQG_TASAuthWithoutAuthorization_Proceeds(t *testing.T) {
 	for _, strict := range []bool{true, false} {
 		next := &echoHandler{}
 		mw := NewAIQG(AIQGConfig{Strict: strict, Logger: silentLogger()})
@@ -133,14 +136,11 @@ func TestAIQG_RejectsTASAuthWithoutAuthorization(t *testing.T) {
 		rec := httptest.NewRecorder()
 		mw(next).ServeHTTP(rec, req)
 
-		if next.called {
-			t.Fatalf("strict=%v: downstream called despite 401", strict)
+		if !next.called {
+			t.Fatalf("strict=%v: downstream should run (Authorization optional under BYOK)", strict)
 		}
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("strict=%v: code=%d want=401", strict, rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "Authorization") {
-			t.Errorf("strict=%v: body should name Authorization as missing", strict)
+		if rec.Code == http.StatusUnauthorized {
+			t.Fatalf("strict=%v: must not 401 on missing Authorization anymore", strict)
 		}
 	}
 }

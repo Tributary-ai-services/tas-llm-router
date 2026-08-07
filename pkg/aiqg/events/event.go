@@ -215,6 +215,12 @@ type ResponseEvent struct {
 	FinishReason    string    `json:"finish_reason,omitempty"`
 	VendorRequestID string    `json:"vendor_request_id,omitempty"`
 
+	// BYOK credential attribution (Plan #14): which key served the vendor call
+	// — upstream_header | stored | tas_shared — and the stored credential id
+	// (present only when credential_source=stored). NEVER the key. omitempty.
+	CredentialSource string `json:"credential_source,omitempty"`
+	CredentialID     string `json:"credential_id,omitempty"`
+
 	// Streaming telemetry (from timing snapshot)
 	Streamed          bool `json:"streamed"`
 	ChunkCount        int  `json:"chunk_count"`
