@@ -146,17 +146,16 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Case 2: TAS-Auth set, Authorization missing. Path A explicitly
-	// requires both — there's no fallback to stored keys on AIQG
-	// ingress (build-vs-reuse §7.3 strict resolution). This is
-	// rejected in BOTH strict and permissive modes because once a
-	// caller asserts TAS-Auth they've opted into Path A semantics.
-	if customerAuth == "" {
-		rejectPathA(cfg.Logger, w, r, "Authorization")
-		return
-	}
+	// Case 2: TAS-Auth set, Authorization missing. Historically rejected, but
+	// with BYOK (Plan #14) the vendor key can come from a stored credential or
+	// the TAS shared key, so Authorization is now OPTIONAL. The effective-key
+	// resolution after routing (server.applyBYOKKey) decides: stored key →
+	// inject; no key + shared-fallback allowed → TAS key; BYOK-only + no key →
+	// 402. Fall through to parse the TAS-* taxonomy. (An unused customerAuth
+	// here is fine — the raw Authorization is handled downstream, not injected.)
+	_ = customerAuth
 
-	// Case 3: both headers present. Parse the TAS-* taxonomy.
+	// Case 3: parse the TAS-* taxonomy (works with or without Authorization).
 	parsed, err := ParseHeaders(r)
 	switch {
 	case err == nil:
@@ -862,6 +861,8 @@ func routingView(r *Routing) events.RoutingView {
 		CacheSimilarity:            s.CacheSimilarity,
 		CacheThreshold:             s.CacheThreshold,
 		FinishReason:               s.FinishReason,
+		CredentialSource:           s.CredentialSource,
+		CredentialID:               s.CredentialID,
 		AttemptCount:               s.AttemptCount,
 		FallbackUsed:               s.FallbackUsed,
 		RetrySet:                   s.RetrySet,

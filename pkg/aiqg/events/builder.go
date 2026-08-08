@@ -116,6 +116,11 @@ type RoutingView struct {
 	// over the BuildOptions value) and to drive clear.Efficacy.
 	FinishReason string
 
+	// BYOK credential attribution (Plan #14): which key served the vendor
+	// call and the stored credential id. Never the key itself.
+	CredentialSource string
+	CredentialID     string
+
 	// Routing-layer retry signals from types.RouterMetadata. Drive
 	// the MVP Reliability score (a gateway-fulfillment proxy for
 	// the spec's pass@k). RetrySet=false means the routing layer
@@ -681,6 +686,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Status:                     status,
 		HTTPStatus:                 opts.HTTPStatus,
 		FinishReason:               finishReason,
+		CredentialSource:           routing.CredentialSource,
+		CredentialID:               routing.CredentialID,
 		Streamed:                   snap.ChunkCount > 0,
 		ChunkCount:                 snap.ChunkCount,
 		ContentChunkCount:          snap.ContentChunkCount,

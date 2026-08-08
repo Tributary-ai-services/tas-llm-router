@@ -44,6 +44,12 @@ type Routing struct {
 	// vendor response). First-write-wins like the other stampers.
 	finishReason string
 
+	// BYOK credential attribution (Plan #14): which key served the vendor
+	// call — "upstream_header" | "stored" | "tas_shared" — and the stored
+	// credential id (empty unless credentialSource=="stored"). Never the key.
+	credentialSource string
+	credentialID     string
+
 	// Routing-layer retry metadata for the MVP Reliability proxy.
 	// attemptCount=0 means unset; 1 = clean first try.
 	attemptCount int
@@ -174,6 +180,10 @@ type RoutingSnapshot struct {
 	// truncation).
 	FinishReason string
 
+	// BYOK credential attribution (Plan #14). Never the key.
+	CredentialSource string
+	CredentialID     string
+
 	// Routing-layer retry signals (from types.RouterMetadata).
 	// RetrySet distinguishes "router didn't surface metadata" (no
 	// score) from "1 attempt, no fallback" (Healthy score).
@@ -255,6 +265,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		OutboundFindings:           copyCounts(r.outboundFindings),
 		ScanRan:                    r.scanRan,
 		FinishReason:               r.finishReason,
+		CredentialSource:           r.credentialSource,
+		CredentialID:               r.credentialID,
 		AttemptCount:               r.attemptCount,
 		FallbackUsed:               r.fallbackUsed,
 		RetrySet:                   r.retrySet,
@@ -530,6 +542,22 @@ func StampVendor(ctx context.Context, vendor string) {
 	defer r.mu.Unlock()
 	if r.vendor == "" {
 		r.vendor = vendor
+	}
+}
+
+// StampCredentialSource records which key served the vendor call (Plan #14
+// BYOK): "upstream_header" | "stored" | "tas_shared", plus the stored
+// credential id (empty otherwise). Never the key itself. First write wins.
+func StampCredentialSource(ctx context.Context, source, credentialID string) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.credentialSource == "" {
+		r.credentialSource = source
+		r.credentialID = credentialID
 	}
 }
 

@@ -125,6 +125,7 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		"chunk_count":       resp.Data.ChunkCount,
 		"streamed":          resp.Data.Streamed,
 		"finish_reason":     resp.Data.FinishReason,
+		"credential_source": resp.Data.CredentialSource,
 		"tenant_id":         resp.Data.TenantID,
 		"aiqg_account_id":   resp.Data.AIQGAccountID,
 		"gateway_version":   resp.Data.GatewayVersion,
