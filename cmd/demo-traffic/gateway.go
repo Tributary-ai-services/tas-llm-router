@@ -73,11 +73,14 @@ func (c *gatewayClient) send(ctx context.Context, headers map[string]string, mod
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("TAS-Auth", c.Token)
-	// Path A (strict) requires an Authorization header to be present; the
-	// gateway uses its own server-side upstream creds, so the dummy
-	// upstream key still yields a real (tiny) vendor call.
+	// The gateway uses its own server-side upstream creds for this demo tenant,
+	// so we send a placeholder raw Authorization (historically gate-required,
+	// and deliberately never forwarded upstream by the gateway). We do NOT set
+	// TAS-Upstream-Authorization: since BYOK (Plan #14) that header is a
+	// first-class per-request customer key and would be injected as the real
+	// vendor key — a bogus "demo-traffic" value there yields a 401 from the
+	// vendor. Omitting it lets the gateway fall through to the TAS shared key.
 	req.Header.Set("Authorization", "Bearer demo-traffic")
-	req.Header.Set("TAS-Upstream-Authorization", "Bearer demo-traffic")
 	for k, v := range headers {
 		if v != "" {
 			req.Header.Set(k, v)
