@@ -19,6 +19,9 @@ resources:
 - deployment-aiqg-strict.yaml
 - service-aiqg-strict.yaml
 - ingress-aiqg-strict.yaml
+# Public API docs at docs.air-ops.net, scoped to /docs only — the host has
+# no Cloudflare Access in front of it.
+- ingress-docs-airops.yaml
 
 commonLabels:
   app.kubernetes.io/name: llm-router
