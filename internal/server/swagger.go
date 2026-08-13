@@ -3,14 +3,23 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
-	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/mux"
-	"gopkg.in/yaml.v2"
+	"github.com/tributary-ai/llm-router-waf/docs"
+	"gopkg.in/yaml.v3"
 )
+
+// openAPIJSON converts the embedded YAML spec to JSON once, on first request.
+var openAPIJSON = sync.OnceValues(func() ([]byte, error) {
+	var spec interface{}
+	if err := yaml.Unmarshal(docs.OpenAPISpec, &spec); err != nil {
+		return nil, fmt.Errorf("parsing embedded OpenAPI spec: %w", err)
+	}
+	return json.MarshalIndent(spec, "", "  ")
+})
 
 // setupSwaggerRoutes sets up Swagger UI routes for API documentation
 func (s *Server) setupSwaggerRoutes(r *mux.Router) {
@@ -24,49 +33,26 @@ func (s *Server) setupSwaggerRoutes(r *mux.Router) {
 	r.HandleFunc("/docs/{path:.*}", s.handleSwaggerUI).Methods("GET")
 }
 
-// handleOpenAPISpec serves the OpenAPI specification
+// handleOpenAPISpec serves the embedded OpenAPI specification
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
 	// Determine if JSON or YAML is requested
-	path := r.URL.Path
-	isJSON := strings.HasSuffix(path, ".json")
-	
-	if isJSON {
+	if strings.HasSuffix(r.URL.Path, ".json") {
+		jsonData, err := openAPIJSON()
+		if err != nil {
+			http.Error(w, "Error converting OpenAPI spec to JSON", http.StatusInternalServerError)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		
-		// Read and convert YAML to JSON
-		specPath := filepath.Join("docs", "openapi.yaml")
-		yamlData, err := ioutil.ReadFile(specPath)
-		if err != nil {
-			http.Error(w, "OpenAPI spec not found", http.StatusNotFound)
-			return
-		}
-		
-		// Parse YAML
-		var spec interface{}
-		if err := yaml.Unmarshal(yamlData, &spec); err != nil {
-			http.Error(w, "Error parsing OpenAPI spec", http.StatusInternalServerError)
-			return
-		}
-		
-		// Convert to JSON
-		jsonData, err := json.MarshalIndent(spec, "", "  ")
-		if err != nil {
-			http.Error(w, "Error converting to JSON", http.StatusInternalServerError)
-			return
-		}
-		
 		w.Write(jsonData)
 		return
 	}
-	
+
 	// Serve YAML spec
 	w.Header().Set("Content-Type", "text/yaml")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
-	// Read the OpenAPI spec file
-	specPath := filepath.Join("docs", "openapi.yaml")
-	http.ServeFile(w, r, specPath)
+	w.Write(docs.OpenAPISpec)
 }
 
 // handleSwaggerUI serves the Swagger UI interface
