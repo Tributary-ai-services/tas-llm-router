@@ -1,0 +1,48 @@
+/* Page chrome around Swagger UI. Previously an inline <style> block in
+   serveSwaggerIndex; moved to a file because the service sets a strict
+   Content-Security-Policy that blocks inline styles. */
+
+html {
+    box-sizing: border-box;
+    overflow: -moz-scrollbars-vertical;
+    overflow-y: scroll;
+}
+
+*, *:before, *:after {
+    box-sizing: inherit;
+}
+
+body {
+    margin: 0;
+    background: #fafafa;
+}
+
+.swagger-ui .topbar {
+    display: none;
+}
+
+.custom-header {
+    background: #1f2937;
+    color: white;
+    padding: 1rem 2rem;
+    margin-bottom: 2rem;
+}
+
+.custom-header h1 {
+    margin: 0;
+    font-size: 1.5rem;
+}
+
+.custom-header p {
+    margin: 0.5rem 0 0 0;
+    opacity: 0.8;
+}
+
+.feature-highlight {
+    background: #10b981;
+    color: white;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.875rem;
+    margin-left: 0.5rem;
+}

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tributary-ai/llm-router-waf/docs"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -61,20 +64,25 @@ func NewValidationMiddleware(config *ValidationConfig, logger *logrus.Logger) (*
 	return vm, nil
 }
 
-// loadOpenAPISpec loads and parses the OpenAPI specification
+// loadOpenAPISpec loads and parses the OpenAPI specification.
+//
+// The spec embedded in the binary is authoritative; specPath is only consulted
+// as an override so an operator can point the validator at a modified spec
+// without rebuilding. On-disk lookup failures are not fatal — the container
+// image does not ship docs/, so the embedded copy is the normal path.
 func (vm *ValidationMiddleware) loadOpenAPISpec(specPath string, strictMode bool) error {
 	// Load the OpenAPI spec
 	loader := openapi3.NewLoader()
 	loader.IsExternalRefsAllowed = true
 
-	// Try to load from relative path
-	doc, err := loader.LoadFromFile(specPath)
+	doc, err := vm.loadSpecFromFile(loader, specPath)
 	if err != nil {
-		// If relative path fails, try from project root
-		rootPath := filepath.Join("..", "..", specPath)
-		doc, err = loader.LoadFromFile(rootPath)
+		return err
+	}
+	if doc == nil {
+		doc, err = loader.LoadFromData(docs.OpenAPISpec)
 		if err != nil {
-			return fmt.Errorf("failed to load OpenAPI spec from %s or %s: %w", specPath, rootPath, err)
+			return fmt.Errorf("failed to load embedded OpenAPI spec: %w", err)
 		}
 	}
 
@@ -92,6 +100,34 @@ func (vm *ValidationMiddleware) loadOpenAPISpec(specPath string, strictMode bool
 
 	vm.router = router
 	return nil
+}
+
+// loadSpecFromFile loads an override spec from disk. It returns (nil, nil) when
+// no file is present at specPath, signalling that the embedded spec should be
+// used instead; a file that exists but fails to parse is a hard error.
+func (vm *ValidationMiddleware) loadSpecFromFile(loader *openapi3.Loader, specPath string) (*openapi3.T, error) {
+	if specPath == "" {
+		return nil, nil
+	}
+
+	// Also try from the project root, for binaries run out of a package dir
+	candidates := []string{specPath, filepath.Join("..", "..", specPath)}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+
+		doc, err := loader.LoadFromFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load OpenAPI spec from %s: %w", path, err)
+		}
+
+		vm.logger.WithField("spec_path", path).Info("Loaded OpenAPI spec from disk")
+		return doc, nil
+	}
+
+	vm.logger.WithField("spec_path", specPath).Debug("No OpenAPI spec on disk, using embedded spec")
+	return nil, nil
 }
 
 // Middleware returns the HTTP middleware function

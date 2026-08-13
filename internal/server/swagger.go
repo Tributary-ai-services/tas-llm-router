@@ -1,213 +1,149 @@
 package server
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"net/http"
-	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/mux"
-	"gopkg.in/yaml.v2"
+	"github.com/tributary-ai/llm-router-waf/docs"
+	"gopkg.in/yaml.v3"
 )
+
+// swaggerUIAssets holds the vendored Swagger UI distribution plus our own
+// stylesheet and bootstrap script. See swaggerui/README.md for provenance.
+//
+//go:embed swaggerui/swagger-ui.css swaggerui/swagger-ui-bundle.js swaggerui/custom.css swaggerui/init.js
+var swaggerUIAssets embed.FS
+
+// docsContentSecurityPolicy overrides the service-wide `default-src 'self'`
+// for the documentation page only. Swagger UI needs style attributes on the
+// elements it renders and data: URIs for its icons, neither of which bare
+// 'self' permits — but scripts stay same-origin, so the vendored bundle is
+// the only code that can run here.
+const docsContentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; " +
+	"font-src 'self' data:; " +
+	// Try-it-out targets. Must list every non-localhost `servers` entry in
+	// the spec, or the browser blocks the request before it is sent —
+	// TestCSPCoversSpecServers keeps the two in step.
+	"connect-src 'self' https://gateway.air-ops.net https://llm.air-ops.net; " +
+	"base-uri 'none'; " +
+	"frame-ancestors 'none'"
+
+// openAPIJSON converts the embedded YAML spec to JSON once, on first request.
+var openAPIJSON = sync.OnceValues(func() ([]byte, error) {
+	var spec interface{}
+	if err := yaml.Unmarshal(docs.OpenAPISpec, &spec); err != nil {
+		return nil, fmt.Errorf("parsing embedded OpenAPI spec: %w", err)
+	}
+	return json.MarshalIndent(spec, "", "  ")
+})
 
 // setupSwaggerRoutes sets up Swagger UI routes for API documentation
 func (s *Server) setupSwaggerRoutes(r *mux.Router) {
 	// Serve OpenAPI spec
 	r.HandleFunc("/docs/openapi.yaml", s.handleOpenAPISpec).Methods("GET")
 	r.HandleFunc("/docs/openapi.json", s.handleOpenAPISpec).Methods("GET")
-	
+
+	// Serve the vendored Swagger UI bundle, stylesheet and bootstrap script.
+	// Registered before the /docs/{path:.*} catch-all below, which would
+	// otherwise answer every asset request with the index page.
+	assets, err := fs.Sub(swaggerUIAssets, "swaggerui")
+	if err != nil {
+		// Only reachable if the embed directive and this path disagree,
+		// which the build would have caught.
+		panic(fmt.Sprintf("swagger UI assets: %v", err))
+	}
+	r.PathPrefix("/docs/ui/").Handler(
+		http.StripPrefix("/docs/ui/", http.FileServer(http.FS(assets))),
+	).Methods("GET")
+
 	// Serve Swagger UI
 	r.HandleFunc("/docs", s.handleSwaggerUI).Methods("GET")
 	r.HandleFunc("/docs/", s.handleSwaggerUI).Methods("GET")
 	r.HandleFunc("/docs/{path:.*}", s.handleSwaggerUI).Methods("GET")
 }
 
-// handleOpenAPISpec serves the OpenAPI specification
+// handleOpenAPISpec serves the embedded OpenAPI specification
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
 	// Determine if JSON or YAML is requested
-	path := r.URL.Path
-	isJSON := strings.HasSuffix(path, ".json")
-	
-	if isJSON {
+	if strings.HasSuffix(r.URL.Path, ".json") {
+		jsonData, err := openAPIJSON()
+		if err != nil {
+			http.Error(w, "Error converting OpenAPI spec to JSON", http.StatusInternalServerError)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		
-		// Read and convert YAML to JSON
-		specPath := filepath.Join("docs", "openapi.yaml")
-		yamlData, err := ioutil.ReadFile(specPath)
-		if err != nil {
-			http.Error(w, "OpenAPI spec not found", http.StatusNotFound)
-			return
-		}
-		
-		// Parse YAML
-		var spec interface{}
-		if err := yaml.Unmarshal(yamlData, &spec); err != nil {
-			http.Error(w, "Error parsing OpenAPI spec", http.StatusInternalServerError)
-			return
-		}
-		
-		// Convert to JSON
-		jsonData, err := json.MarshalIndent(spec, "", "  ")
-		if err != nil {
-			http.Error(w, "Error converting to JSON", http.StatusInternalServerError)
-			return
-		}
-		
 		w.Write(jsonData)
 		return
 	}
-	
+
 	// Serve YAML spec
 	w.Header().Set("Content-Type", "text/yaml")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
-	// Read the OpenAPI spec file
-	specPath := filepath.Join("docs", "openapi.yaml")
-	http.ServeFile(w, r, specPath)
+	w.Write(docs.OpenAPISpec)
 }
 
 // handleSwaggerUI serves the Swagger UI interface
 func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/docs")
-	
+
 	// If requesting root docs path, serve the main UI
 	if path == "" || path == "/" {
 		s.serveSwaggerIndex(w, r)
 		return
 	}
-	
-	// For now, serve a simple HTML page
-	// In production, you'd serve static Swagger UI assets
+
+	// Deep links like /docs/v1-chat-completions are client-side routes —
+	// serve the index and let Swagger UI resolve them. Static assets never
+	// reach here; /docs/ui/ is matched by the file server registered first.
 	s.serveSwaggerIndex(w, r)
 }
 
-// serveSwaggerIndex serves the main Swagger UI HTML page
+// serveSwaggerIndex serves the main Swagger UI HTML page.
+//
+// The markup carries no inline <style> or <script>: everything is loaded from
+// /docs/ui/, so the page renders under the strict CSP set below without
+// needing 'unsafe-inline' for scripts or a third-party origin.
 func (s *Server) serveSwaggerIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
-	
-	// Get the base URL for the API spec
-	baseURL := getBaseURL(r)
-	specURL := fmt.Sprintf("%s/docs/openapi.yaml", baseURL)
-	
-	html := fmt.Sprintf(`<!DOCTYPE html>
+	// Overrides the service-wide `default-src 'self'` from the security
+	// middleware, which blocks the style attributes and data: icons Swagger
+	// UI needs.
+	w.Header().Set("Content-Security-Policy", docsContentSecurityPolicy)
+
+	w.Write([]byte(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Router WAF - API Documentation</title>
-    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css" />
-    <style>
-        html {
-            box-sizing: border-box;
-            overflow: -moz-scrollbars-vertical;
-            overflow-y: scroll;
-        }
-        *, *:before, *:after {
-            box-sizing: inherit;
-        }
-        body {
-            margin:0;
-            background: #fafafa;
-        }
-        .swagger-ui .topbar { display: none; }
-        .custom-header {
-            background: #1f2937;
-            color: white;
-            padding: 1rem 2rem;
-            margin-bottom: 2rem;
-        }
-        .custom-header h1 {
-            margin: 0;
-            font-size: 1.5rem;
-        }
-        .custom-header p {
-            margin: 0.5rem 0 0 0;
-            opacity: 0.8;
-        }
-        .feature-highlight {
-            background: #10b981;
-            color: white;
-            padding: 0.25rem 0.5rem;
-            border-radius: 0.25rem;
-            font-size: 0.875rem;
-            margin-left: 0.5rem;
-        }
-    </style>
+    <link rel="stylesheet" type="text/css" href="/docs/ui/swagger-ui.css" />
+    <link rel="stylesheet" type="text/css" href="/docs/ui/custom.css" />
 </head>
 <body>
     <div class="custom-header">
         <h1>LLM Router WAF API Documentation</h1>
         <p>
             Intelligent routing, security, and observability for Large Language Model APIs
-            <span class="feature-highlight">🔄 Retry & Fallback</span>
+            <span class="feature-highlight">🔄 Retry &amp; Fallback</span>
             <span class="feature-highlight">🛡️ Security</span>
             <span class="feature-highlight">📊 Observability</span>
         </p>
     </div>
     <div id="swagger-ui"></div>
-    
-    <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js"></script>
-    <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js"></script>
-    <script>
-        window.onload = function() {
-            const ui = SwaggerUIBundle({
-                url: '%s',
-                dom_id: '#swagger-ui',
-                deepLinking: true,
-                presets: [
-                    SwaggerUIBundle.presets.apis,
-                    SwaggerUIStandalonePreset
-                ],
-                plugins: [
-                    SwaggerUIBundle.plugins.DownloadUrl
-                ],
-                layout: "StandaloneLayout",
-                defaultModelsExpandDepth: 0,
-                defaultModelExpandDepth: 3,
-                docExpansion: "list",
-                filter: true,
-                showRequestHeaders: true,
-                supportedSubmitMethods: ['get', 'post', 'put', 'delete', 'patch'],
-                validatorUrl: null,
-                onComplete: function() {
-                    // Add custom styling or behavior after load
-                    console.log('LLM Router WAF API Documentation loaded');
-                },
-                requestInterceptor: function(request) {
-                    // Add default headers or modify requests
-                    if (!request.headers['X-API-Key'] && !request.headers['Authorization']) {
-                        request.headers['X-API-Key'] = 'your-api-key-here';
-                    }
-                    return request;
-                }
-            });
-        };
-    </script>
-</body>
-</html>`, specURL)
-	
-	w.Write([]byte(html))
-}
 
-// getBaseURL extracts the base URL from the request
-func getBaseURL(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	
-	// Check for forwarded headers (common in reverse proxy setups)
-	if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
-		scheme = forwardedProto
-	}
-	
-	host := r.Host
-	if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
-		host = forwardedHost
-	}
-	
-	return fmt.Sprintf("%s://%s", scheme, host)
+    <script src="/docs/ui/swagger-ui-bundle.js"></script>
+    <script src="/docs/ui/init.js"></script>
+</body>
+</html>`))
 }

@@ -20,12 +20,20 @@ info:
     url: https://opensource.org/licenses/MIT
 
 servers:
+  - url: https://gateway.air-ops.net
+    description: |
+      AI Quality Gateway (production). Strict-mode AIQG ingress — the
+      completion endpoints require BOTH a TAS-Auth token and an
+      Authorization header; requests missing either are rejected before
+      routing.
+  - url: https://llm.air-ops.net
+    description: |
+      LLM Router (production). Sits behind Cloudflare Access, so a browser
+      without an Access session receives 403 before reaching the router.
   - url: http://localhost:8086
-    description: Aether Backend - LLM Router Service (Shared Infrastructure Mode)
-  - url: http://localhost:8085  
-    description: LLM Router Standalone Mode (Development)
-  - url: https://api.example.com
-    description: Production server
+    description: Local development (shared-infrastructure mode)
+  - url: http://localhost:8085
+    description: Local development (standalone mode)
 
 security:
   - ApiKeyAuth: []
@@ -296,10 +304,63 @@ paths:
 
   /metrics:
     get:
-      summary: Prometheus metrics
-      description: Returns metrics in Prometheus format for monitoring.
+      summary: Router metrics
+      description: |
+        Returns router metrics in Prometheus format from a hand-rolled string
+        builder rather than prometheus/client_golang.
+
+        WARNING: only `llm_router_provider_health` reflects real state. The
+        request, token, cost, error, rate-limit, auth, and security-score
+        series are demo placeholders — hardcoded values, or counters derived
+        from the wall clock (see handleMetrics in internal/server/server.go).
+        Do not build dashboards or alerts on them.
+
+        AIQG gateway metrics are real and served separately from
+        `/aiqg/metrics`.
+
+        Scraped unauthenticated — the endpoint is intended for in-cluster
+        Prometheus and is not exposed through the public ingress.
       tags:
         - Monitoring
+      security: []
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /aiqg/metrics:
+    get:
+      summary: AIQG gateway metrics
+      description: |
+        Returns AI Quality Gateway metrics in Prometheus format, served from a
+        dedicated registry (`pkg/aiqg/metrics`) via promhttp and scraped as its
+        own Prometheus target, independent of `/metrics`.
+
+        Exposed series:
+        - `aiqg_events_emitted_total` — emit attempts by emitter (log, kafka,
+          memory, noop) and outcome (success, failure); counted once per
+          (request, response) envelope pair
+        - `aiqg_emit_duration_seconds` — histogram of `Emitter.Emit` latency by
+          emitter type; alerts watch p99 for Kafka broker backpressure
+        - `aiqg_scan_findings_total` — Gatekeeper findings by direction
+          (inbound, outbound) and severity
+        - `aiqg_request_tier_total` — requests bucketed into healthy, marginal,
+          or failing tiers per CLEAR dimension; one bump per (dimension, tier)
+          on each emitted response event
+        - `aiqg_requests_total` — total AIQG response events emitted; the
+          denominator for tier and finding rates
+
+        The route is registered unconditionally. With AIQG disabled nothing is
+        recorded, so the response carries only the registered series at zero.
+
+        Scraped unauthenticated — the endpoint is intended for in-cluster
+        Prometheus and is not exposed through the public ingress.
+      tags:
+        - Monitoring
+      security: []
       responses:
         '200':
           description: Prometheus metrics
