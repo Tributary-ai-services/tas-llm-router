@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/gorilla/mux"
+	"github.com/tributary-ai/llm-router-waf/docs"
 )
 
 // TestHandleOpenAPISpecFromAnyWorkingDirectory guards the regression that made
@@ -134,6 +136,36 @@ func TestSwaggerUIAssetsAreServed(t *testing.T) {
 				t.Error("served the index page instead of the asset — catch-all route shadows /docs/ui/")
 			}
 		})
+	}
+}
+
+// TestCSPCoversSpecServers keeps connect-src in step with the spec's servers
+// list. A server the CSP omits looks fine in the dropdown and then fails at
+// "Try it out", with the request blocked before it leaves the browser.
+func TestCSPCoversSpecServers(t *testing.T) {
+	doc, err := openapi3.NewLoader().LoadFromData(docs.OpenAPISpec)
+	if err != nil {
+		t.Fatalf("loading embedded spec: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	(&Server{}).serveSwaggerIndex(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	csp := rec.Header().Get("Content-Security-Policy")
+
+	for _, server := range doc.Servers {
+		u, err := url.Parse(server.URL)
+		if err != nil {
+			t.Errorf("server %q is not a URL: %v", server.URL, err)
+			continue
+		}
+		// Localhost entries are same-origin when the page is served from
+		// the dev binary, so 'self' already covers them.
+		if u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" {
+			continue
+		}
+		if origin := u.Scheme + "://" + u.Host; !strings.Contains(csp, origin) {
+			t.Errorf("connect-src omits spec server %s; CSP is %q", origin, csp)
+		}
 	}
 }
 

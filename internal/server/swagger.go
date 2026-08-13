@@ -30,7 +30,10 @@ const docsContentSecurityPolicy = "default-src 'self'; " +
 	"style-src 'self' 'unsafe-inline'; " +
 	"img-src 'self' data:; " +
 	"font-src 'self' data:; " +
-	"connect-src 'self'; " +
+	// Try-it-out targets. Must list every non-localhost `servers` entry in
+	// the spec, or the browser blocks the request before it is sent —
+	// TestCSPCoversSpecServers keeps the two in step.
+	"connect-src 'self' https://gateway.air-ops.net https://llm.air-ops.net; " +
 	"base-uri 'none'; " +
 	"frame-ancestors 'none'"
 

@@ -20,12 +20,20 @@ info:
     url: https://opensource.org/licenses/MIT
 
 servers:
+  - url: https://gateway.air-ops.net
+    description: |
+      AI Quality Gateway (production). Strict-mode AIQG ingress — the
+      completion endpoints require BOTH a TAS-Auth token and an
+      Authorization header; requests missing either are rejected before
+      routing.
+  - url: https://llm.air-ops.net
+    description: |
+      LLM Router (production). Sits behind Cloudflare Access, so a browser
+      without an Access session receives 403 before reaching the router.
   - url: http://localhost:8086
-    description: Aether Backend - LLM Router Service (Shared Infrastructure Mode)
-  - url: http://localhost:8085  
-    description: LLM Router Standalone Mode (Development)
-  - url: https://api.example.com
-    description: Production server
+    description: Local development (shared-infrastructure mode)
+  - url: http://localhost:8085
+    description: Local development (standalone mode)
 
 security:
   - ApiKeyAuth: []
