@@ -1,0 +1,47 @@
+# Public API documentation host: https://docs.air-ops.net
+#
+# Serves the Swagger UI and the OpenAPI spec from the llm-router deployment,
+# fronted by the air-ops.net Cloudflare Tunnel (see deploy/cloudflared).
+#
+# SCOPED TO /docs ON PURPOSE. The service's other Ingresses route `/` Prefix,
+# which publishes the entire route table on their host — acceptable there
+# because llm-router.tas.scharber.com is internal and llm.air-ops.net sits
+# behind Cloudflare Access. This host has NO Access policy in front of it, so
+# it must expose the documentation and nothing else: /metrics, /aiqg/metrics,
+# /health and every /v1 endpoint 404 at nginx on this hostname.
+#
+# Backend is `llm-router`, not `llm-router-aiqg` — the AIQG gateway serves the
+# same spec but is reachable at gateway.air-ops.net, which is already public
+# and unauthenticated on every path.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-router-docs-ingress
+  namespace: tas-llm-router
+  labels:
+    app: llm-router
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/part-of: tas
+  annotations:
+    cert-manager.io/cluster-issuer: tas-ca-issuer
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Bare hostname lands on the Swagger UI instead of a 404.
+    nginx.ingress.kubernetes.io/app-root: /docs
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - docs.air-ops.net
+      secretName: llm-router-docs-airops-tls
+  rules:
+    - host: docs.air-ops.net
+      http:
+        paths:
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-router
+                port:
+                  number: 8086
