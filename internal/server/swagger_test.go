@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/gorilla/mux"
 )
 
 // TestHandleOpenAPISpecFromAnyWorkingDirectory guards the regression that made
@@ -62,6 +63,78 @@ func TestHandleOpenAPISpecFromAnyWorkingDirectory(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSwaggerIndexHasNoBlockedResources guards the regression that left the
+// page rendering its header and nothing else: the service sets
+// `default-src 'self'`, so the CDN <link>/<script> tags and the inline
+// bootstrap script the page used to carry were all blocked by the browser.
+func TestSwaggerIndexHasNoBlockedResources(t *testing.T) {
+	rec := httptest.NewRecorder()
+	(&Server{}).serveSwaggerIndex(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "unpkg.com") || strings.Contains(body, "//cdn.") {
+		t.Error("page references a third-party origin, which default-src 'self' blocks")
+	}
+	for _, tag := range []string{"<script>", "<style>"} {
+		if strings.Contains(body, tag) {
+			t.Errorf("page carries an inline %s, which the CSP blocks", tag)
+		}
+	}
+	for _, asset := range []string{"/docs/ui/swagger-ui.css", "/docs/ui/custom.css", "/docs/ui/swagger-ui-bundle.js", "/docs/ui/init.js"} {
+		if !strings.Contains(body, asset) {
+			t.Errorf("page does not reference %s", asset)
+		}
+	}
+
+	// The page must override the service-wide policy, or the style
+	// attributes Swagger UI renders are dropped.
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'self'") || !strings.Contains(csp, "style-src 'self' 'unsafe-inline'") {
+		t.Errorf("unexpected CSP: %q", csp)
+	}
+	if strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Error("CSP allows inline scripts; the bundle is self-hosted, so it should not need to")
+	}
+}
+
+// TestSwaggerUIAssetsAreServed checks the vendored bundle is reachable at the
+// paths the page asks for, and that the catch-all route does not shadow it.
+func TestSwaggerUIAssetsAreServed(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	router := mux.NewRouter()
+	(&Server{}).setupSwaggerRoutes(router)
+
+	for path, wantType := range map[string]string{
+		"/docs/ui/swagger-ui-bundle.js": "text/javascript",
+		"/docs/ui/init.js":              "text/javascript",
+		"/docs/ui/swagger-ui.css":       "text/css",
+		"/docs/ui/custom.css":           "text/css",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, wantType) {
+				t.Errorf("Content-Type = %q, want prefix %q", got, wantType)
+			}
+			if rec.Body.Len() == 0 {
+				t.Error("empty body")
+			}
+			if strings.Contains(rec.Body.String(), "<!DOCTYPE html>") {
+				t.Error("served the index page instead of the asset — catch-all route shadows /docs/ui/")
+			}
+		})
+	}
 }
 
 // TestEmbeddedSpecIsValid keeps the embedded spec loadable by the validation
