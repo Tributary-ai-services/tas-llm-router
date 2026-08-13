@@ -56,8 +56,10 @@ func TestHandleOpenAPISpecFromAnyWorkingDirectory(t *testing.T) {
 		if spec.OpenAPI == "" {
 			t.Error("openapi version missing from JSON spec")
 		}
-		if _, ok := spec.Paths["/v1/chat/completions"]; !ok {
-			t.Errorf("/v1/chat/completions missing from JSON spec, got paths %v", spec.Paths)
+		for _, path := range []string{"/v1/chat/completions", "/metrics", "/aiqg/metrics"} {
+			if _, ok := spec.Paths[path]; !ok {
+				t.Errorf("%s missing from JSON spec", path)
+			}
 		}
 	})
 }
