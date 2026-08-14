@@ -42,6 +42,7 @@ type responseFormat int
 const (
 	responseFormatOpenAI    responseFormat = iota // default — OpenAI ChatCompletion
 	responseFormatAnthropic                       // Anthropic Messages
+	responseFormatResponses                       // OpenAI Responses API
 )
 
 type responseFormatCtxKey struct{}
@@ -139,7 +140,7 @@ type anthropicMessage struct {
 // parseAnthropicToChatRequest decodes a native Anthropic Messages request body
 // and translates it into the gateway's internal ChatRequest. Returns a
 // client-facing error string (safe to echo) for malformed / unsupported input.
-func parseAnthropicToChatRequest(body []byte) (*types.ChatRequest, error) {
+func parseAnthropicToChatRequest(body []byte, requireMaxTokens bool) (*types.ChatRequest, error) {
 	var ar anthropicMessagesRequest
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if err := dec.Decode(&ar); err != nil {
@@ -148,9 +149,9 @@ func parseAnthropicToChatRequest(body []byte) (*types.ChatRequest, error) {
 	if strings.TrimSpace(ar.Model) == "" {
 		return nil, fmt.Errorf("field 'model' is required")
 	}
-	// Anthropic requires max_tokens; mirror that so callers get a clear 400
-	// here rather than a downstream provider error.
-	if ar.MaxTokens <= 0 {
+	// /v1/messages requires max_tokens; mirror that so callers get a clear 400
+	// here rather than a downstream provider error. count_tokens does not.
+	if requireMaxTokens && ar.MaxTokens <= 0 {
 		return nil, fmt.Errorf("field 'max_tokens' is required and must be greater than 0")
 	}
 
@@ -161,8 +162,10 @@ func parseAnthropicToChatRequest(body []byte) (*types.ChatRequest, error) {
 		TopP:        ar.TopP,
 		Stop:        ar.StopSequences,
 	}
-	mt := ar.MaxTokens
-	req.MaxTokens = &mt
+	if ar.MaxTokens > 0 {
+		mt := ar.MaxTokens
+		req.MaxTokens = &mt
+	}
 
 	// System prompt → a leading system message (the internal + OpenAI
 	// convention; the Anthropic provider lifts it back to top-level `system`).
@@ -481,7 +484,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		s.writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "could not read request body")
 		return
 	}
-	chatReq, err := parseAnthropicToChatRequest(body)
+	chatReq, err := parseAnthropicToChatRequest(body, true)
 	if err != nil {
 		s.writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -512,6 +515,15 @@ func responseFormatFromContext(ctx context.Context) responseFormat {
 	return responseFormatOpenAI
 }
 
+// fmtOf is the request-scoped convenience for responseFormatFromContext,
+// nil-safe for call sites (e.g. cache serve) that may pass a nil request.
+func fmtOf(r *http.Request) responseFormat {
+	if r == nil {
+		return responseFormatOpenAI
+	}
+	return responseFormatFromContext(r.Context())
+}
+
 // writeChatResponse writes a completed ChatResponse in the wire shape selected
 // by the request context — Anthropic message for /v1/messages, OpenAI
 // ChatCompletion otherwise. Replaces the raw json-encode at the non-streaming
@@ -524,8 +536,12 @@ func (s *Server) writeChatResponse(w http.ResponseWriter, r *http.Request, resp 
 	// resp.RouterMetadata is populated by the completion handlers before they
 	// call this. Must precede WriteHeader.
 	setRouterMetadataHeaders(w, resp.RouterMetadata)
-	if responseFormatFromContext(r.Context()) == responseFormatAnthropic {
+	switch responseFormatFromContext(r.Context()) {
+	case responseFormatAnthropic:
 		s.writeAnthropicMessage(w, resp)
+		return
+	case responseFormatResponses:
+		s.writeResponsesObject(w, resp)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -585,8 +601,11 @@ type streamEncoder interface {
 // otherwise.
 func (s *Server) newStreamEncoder(w http.ResponseWriter, r *http.Request, req *types.ChatRequest) streamEncoder {
 	flusher, _ := w.(http.Flusher)
-	if responseFormatFromContext(r.Context()) == responseFormatAnthropic {
+	switch responseFormatFromContext(r.Context()) {
+	case responseFormatAnthropic:
 		return newAnthropicStreamEncoder(w, flusher, req, s.logger)
+	case responseFormatResponses:
+		return newResponsesStreamEncoder(w, flusher, req, s.logger)
 	}
 	return &openAIStreamEncoder{w: w, flusher: flusher, logger: s.logger}
 }
