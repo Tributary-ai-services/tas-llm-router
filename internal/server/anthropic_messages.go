@@ -517,6 +517,13 @@ func responseFormatFromContext(ctx context.Context) responseFormat {
 // ChatCompletion otherwise. Replaces the raw json-encode at the non-streaming
 // write-sites.
 func (s *Server) writeChatResponse(w http.ResponseWriter, r *http.Request, resp *types.ChatResponse) {
+	// Publish the routing decision as X-TAS-Router-* headers on non-streaming
+	// responses too (streaming sets them on its own path). For an Anthropic
+	// response this is the ONLY place the routing decision surfaces — the
+	// Anthropic envelope has no router_metadata field, unlike the OpenAI body.
+	// resp.RouterMetadata is populated by the completion handlers before they
+	// call this. Must precede WriteHeader.
+	setRouterMetadataHeaders(w, resp.RouterMetadata)
 	if responseFormatFromContext(r.Context()) == responseFormatAnthropic {
 		s.writeAnthropicMessage(w, resp)
 		return

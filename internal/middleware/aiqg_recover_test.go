@@ -1,9 +1,62 @@
 package middleware
 
 import (
+	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/sirupsen/logrus"
 )
+
+func TestAuthRejection_AnthropicWireShape(t *testing.T) {
+	log := logrus.New()
+	log.SetOutput(io.Discard) // silence
+
+	// /v1/messages → Anthropic error envelope
+	t.Run("messages path -> anthropic error", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/v1/messages", nil)
+		rejectPathA(log, w, r, "TAS-Auth")
+		if w.Code != 401 {
+			t.Fatalf("status = %d, want 401", w.Code)
+		}
+		var body struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("bad json: %v (%s)", err, w.Body.String())
+		}
+		if body.Type != "error" || body.Error.Type != "authentication_error" {
+			t.Errorf("not Anthropic-shaped: %s", w.Body.String())
+		}
+	})
+
+	// chat/completions → keep the standard (OpenAI-ish) envelope
+	t.Run("chat path -> standard error", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		rejectPathA(log, w, r, "TAS-Auth")
+		if w.Code != 401 {
+			t.Fatalf("status = %d, want 401", w.Code)
+		}
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		if body.Error.Code != "path_a_auth_required" {
+			t.Errorf("expected standard envelope, got: %s", w.Body.String())
+		}
+	})
+}
 
 func TestRecoverGatewayToken(t *testing.T) {
 	tok := authTokenPrefix + "abc123"

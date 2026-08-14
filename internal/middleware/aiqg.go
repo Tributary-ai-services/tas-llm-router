@@ -222,7 +222,7 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		case err != nil:
 			cfg.Logger.WithError(err).WithField("event", "aiqg.token_resolve_error").
 				Error("AIQG token resolver returned unexpected error")
-			writeResolverError(w)
+			writeResolverError(w, r)
 			return
 		}
 		resolvedToken = tok
@@ -961,6 +961,23 @@ func tokenView(t *tokens.Token) events.TokenView {
 	}
 }
 
+// isAnthropicWirePath reports whether the request targets the Anthropic
+// Messages API (POST /v1/messages). The AIQG middleware runs before the handler
+// sets the response-format flag, so auth/validation rejections detect the
+// Anthropic wire from the path to render an error a stock Anthropic SDK parses.
+func isAnthropicWirePath(r *http.Request) bool {
+	return strings.HasSuffix(r.URL.Path, "/messages")
+}
+
+// writeAnthropicWireError writes Anthropic's {type:"error",error:{type,message}}
+// envelope, so an Anthropic SDK surfaces a well-formed error on an auth/validation
+// rejection instead of the gateway's OpenAI-ish body.
+func writeAnthropicWireError(w http.ResponseWriter, status int, errType, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%q}}`, errType, message)))
+}
+
 // rejectTokenUnknown emits 401 for a TAS-Auth bearer that the resolver
 // didn't recognize. Distinct response code (`token_unknown`) so
 // dashboards can break out genuine misconfigurations from "auth header
@@ -973,8 +990,12 @@ func rejectTokenUnknown(log *logrus.Logger, w http.ResponseWriter, r *http.Reque
 		"method": r.Method,
 	}).Warn("Path A auth rejected — token unknown")
 
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", `TAS realm="aiqg"`)
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusUnauthorized, "authentication_error", "AIQG ingress requires a recognized TAS-Auth token")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = w.Write([]byte(`{"error":{"code":"path_a_auth_required","message":"AIQG ingress requires a recognized TAS-Auth token","reason":"token_unknown","docs":"https://docs.tas.scharber.com/aiqg/auth"}}`))
 }
@@ -995,6 +1016,10 @@ func rejectAccountSuspended(log *logrus.Logger, w http.ResponseWriter, r *http.R
 	}
 	log.WithFields(fields).Warn("AIQG request rejected — account suspended")
 
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusForbidden, "permission_error", "AIQG account is currently suspended; contact support")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = w.Write([]byte(`{"error":{"code":"account_suspended","message":"AIQG account is currently suspended; contact support"}}`))
@@ -1005,7 +1030,11 @@ func rejectAccountSuspended(log *logrus.Logger, w http.ResponseWriter, r *http.R
 // of 500 because the failure is upstream-dependency unavailability, and
 // callers should retry rather than treat the request as permanently
 // broken.
-func writeResolverError(w http.ResponseWriter) {
+func writeResolverError(w http.ResponseWriter, r *http.Request) {
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusServiceUnavailable, "api_error", "AIQG token resolver is temporarily unavailable; retry")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write([]byte(`{"error":{"code":"token_resolver_unavailable","message":"AIQG token resolver is temporarily unavailable; retry"}}`))
@@ -1079,8 +1108,12 @@ func rejectPathA(log *logrus.Logger, w http.ResponseWriter, r *http.Request, mis
 		"remote_addr":    r.RemoteAddr,
 	}).Warn("Path A auth rejected")
 
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", `TAS realm="aiqg"`)
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusUnauthorized, "authentication_error", fmt.Sprintf("AIQG ingress requires authentication; %s is missing", missing))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 
 	body := fmt.Sprintf(`{"error":{"code":"path_a_auth_required","message":"AIQG ingress requires both TAS-Auth and Authorization headers; %s is missing","missing_header":%q,"docs":"https://docs.tas.scharber.com/aiqg/auth"}}`, missing, missing)
@@ -1098,6 +1131,10 @@ func writeValidationError(log *logrus.Logger, w http.ResponseWriter, r *http.Req
 		"err":   err.Error(),
 	}).Warn("AIQG header validation failed")
 
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
 
