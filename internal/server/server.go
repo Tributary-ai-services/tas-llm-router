@@ -647,10 +647,15 @@ func (s *Server) setupRoutes() *mux.Router {
 
 	// Anthropic compatible endpoints
 	api.Handle("/messages", wrapAIQG(s.handleMessages)).Methods("POST")
+	api.Handle("/messages/count_tokens", wrapAIQG(s.handleCountTokens)).Methods("POST")
 
 	// OpenAI-compatible embeddings (client.embeddings.create). Wrapped in AIQG
 	// for auth + event emission; routes to the embeddings-capable provider.
 	api.Handle("/embeddings", wrapAIQG(s.handleEmbeddings)).Methods("POST")
+
+	// OpenAI Responses API (client.responses.create). Translated at the
+	// boundary and run through the shared chat pipeline, like /v1/messages.
+	api.Handle("/responses", wrapAIQG(s.handleResponses)).Methods("POST")
 
 	// OpenAI-compatible model discovery (client.models.list()/retrieve()).
 	// Unwrapped, like /providers — provider metadata, no TAS-* auth needed.
@@ -1244,11 +1249,14 @@ func writeRawCachedResponse(w http.ResponseWriter, r *http.Request, body []byte,
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-TAS-Cache", cacheHeader)
 	w.WriteHeader(http.StatusOK)
-	// Render in the request's wire shape — a /v1/messages hit must serve a
-	// native Anthropic message, not the stored OpenAI-shaped body.
-	if r != nil && responseFormatFromContext(r.Context()) == responseFormatAnthropic {
+	// Render in the request's wire shape — a /v1/messages or /v1/responses hit
+	// must serve that shape, not the stored OpenAI-shaped body.
+	switch fmtOf(r) {
+	case responseFormatAnthropic:
 		_ = json.NewEncoder(w).Encode(chatResponseToAnthropic(&resp))
-	} else {
+	case responseFormatResponses:
+		_ = json.NewEncoder(w).Encode(chatResponseToResponses(&resp))
+	default:
 		_ = json.NewEncoder(w).Encode(&resp)
 	}
 	return &resp, true

@@ -2,15 +2,37 @@ openapi: 3.0.3
 info:
   title: LLM Router WAF API
   description: |
-    LLM Router Web Application Firewall (WAF) provides intelligent routing, security, and observability for Large Language Model APIs.
-    
-    ## Features
-    - **Intelligent Routing**: Cost-optimized, performance-based, and round-robin strategies
-    - **Client-Controlled Retry**: Configurable retry logic with exponential/linear backoff
-    - **Smart Fallback**: Automatic failover to healthy providers with cost/feature constraints
-    - **Security**: Rate limiting, authentication, and request validation
-    - **Observability**: Comprehensive metrics and routing metadata
-    
+    The LLM Router is an intelligent, policy-aware gateway for Large Language Model APIs.
+    Point a stock OpenAI or Anthropic SDK at it and it routes, scans, meters, and secures the
+    traffic while staying wire-compatible with the vendor APIs.
+
+    ## Compatible endpoints
+    - **OpenAI**: `POST /v1/chat/completions`, `POST /v1/responses` (Responses API),
+      `POST /v1/embeddings`, `GET /v1/models` — set the SDK's `base_url` to a server below.
+    - **Anthropic**: `POST /v1/messages`, `POST /v1/messages/count_tokens`; `GET /v1/models`
+      returns Anthropic's shape when the caller sends `anthropic-version`.
+
+    Requests are translated to a common internal form, run through one pipeline (classification,
+    scanning, caching, routing, retry/fallback), and rendered back in the caller's wire shape —
+    so a `/v1/messages` or `/v1/responses` request can still be cost-routed to any provider.
+
+    ## Authentication (Design 1 / Design 2)
+    The customer-facing ingress authenticates on a **gateway token** (`tas_qg_live_…`):
+    - **Design 1 (default)**: pass the token as the SDK's `api_key`; the gateway recognizes it by
+      prefix in `Authorization: Bearer` (OpenAI) or `x-api-key` (Anthropic), and injects your
+      stored provider (BYOK) key upstream.
+    - **Design 2 (power users)**: pass a real vendor key as `api_key` and set the token via
+      `default_headers={"TAS-Auth": "tas_qg_live_…"}`.
+
+    ## TAS control plane
+    - **Routing extensions** (request body): `optimize_for`, `max_cost`, `required_features`,
+      `retry_config`, `fallback_config` — native on chat/completions; via `extra_body` on
+      `/v1/messages` and `/v1/responses`.
+    - **`TAS-*` request headers**: policy, workflow, dry-run, per-request BYOK key, source-app
+      (see the header parameters on each completion endpoint).
+    - **`X-TAS-*` response headers**: routing decision, cache disposition, scan status, redaction,
+      and the AIQG response-event id.
+
   version: 1.0.0
   contact:
     name: LLM Router WAF
@@ -42,19 +64,26 @@ security:
 paths:
   /v1/chat/completions:
     post:
-      summary: Create chat completion
-      description: |
-        Creates a chat completion response for the provided messages with optional retry and fallback configuration.
-        
-        **New Features:**
-        - `retry_config`: Configure retry attempts with backoff strategies
-        - `fallback_config`: Enable fallback to alternative providers
-        
+      summary: Create chat completion (OpenAI-compatible)
+      description: >
+        Creates a chat completion for the provided messages. Set `"stream": true`
+        for an SSE stream. Supports the TAS routing extensions — `optimize_for`,
+        `max_cost`, `retry_config`, and `fallback_config` — alongside the standard
+        OpenAI fields.
       tags:
         - Chat Completions
       security:
         - ApiKeyAuth: []
         - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -75,7 +104,7 @@ paths:
                 value:
                   model: "gpt-3.5-turbo"
                   messages:
-                    - role: "user"  
+                    - role: "user"
                       content: "Hello with retry support!"
                   max_tokens: 100
                   retry_config:
@@ -117,6 +146,17 @@ paths:
       responses:
         '200':
           description: Successful completion
+          headers:
+            TAS-Response-Event-Id: { $ref: '#/components/headers/TASResponseEventId' }
+            X-TAS-Cache: { $ref: '#/components/headers/XTASCache' }
+            X-TAS-Scan-Status: { $ref: '#/components/headers/XTASScanStatus' }
+            X-TAS-Redaction: { $ref: '#/components/headers/XTASRedaction' }
+            X-TAS-Router-Provider: { $ref: '#/components/headers/XTASRouterProvider' }
+            X-TAS-Router-Model: { $ref: '#/components/headers/XTASRouterModel' }
+            X-TAS-Router-Request-Id: { $ref: '#/components/headers/XTASRouterRequestId' }
+            X-TAS-Router-Attempt-Count: { $ref: '#/components/headers/XTASRouterAttemptCount' }
+            X-TAS-Router-Fallback-Used: { $ref: '#/components/headers/XTASRouterFallbackUsed' }
+            X-TAS-Router-Estimated-Cost: { $ref: '#/components/headers/XTASRouterEstimatedCost' }
           content:
             application/json:
               schema:
@@ -140,6 +180,15 @@ paths:
       tags:
         - Text Completions
       deprecated: true
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -158,7 +207,7 @@ paths:
 
   /v1/messages:
     post:
-      summary: Create Anthropic-compatible message (native Messages API)
+      summary: Create message (Anthropic Messages API)
       description: >
         Native Anthropic Messages API. Accepts the Anthropic wire shape
         (top-level `system`, required `max_tokens`, `content` block arrays,
@@ -171,15 +220,281 @@ paths:
         provider. Point a stock Anthropic SDK's `base_url` here.
       tags:
         - Messages
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/MessageRequest'
+            example:
+              model: claude-haiku-4-5-20251001
+              max_tokens: 256
+              system: You are a concise assistant.
+              messages:
+                - role: user
+                  content: What is the capital of France?
       responses:
         '200':
           description: Native Anthropic message object (non-streaming) or SSE stream (streaming)
+          headers:
+            TAS-Response-Event-Id: { $ref: '#/components/headers/TASResponseEventId' }
+            X-TAS-Cache: { $ref: '#/components/headers/XTASCache' }
+            X-TAS-Scan-Status: { $ref: '#/components/headers/XTASScanStatus' }
+            X-TAS-Router-Provider: { $ref: '#/components/headers/XTASRouterProvider' }
+            X-TAS-Router-Model: { $ref: '#/components/headers/XTASRouterModel' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnthropicMessage'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '503':
+          description: Service unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+
+  /v1/messages/count_tokens:
+    post:
+      summary: Count tokens (Anthropic-compatible)
+      description: >
+        Returns the exact number of input tokens Anthropic would bill for the
+        given system + messages + tools, via the vendor's count_tokens endpoint.
+        Same body as /v1/messages but `max_tokens` is not required. Supports a
+        stock Anthropic SDK's client.messages.count_tokens().
+      tags:
+        - Messages
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+            example:
+              model: claude-haiku-4-5-20251001
+              system: You are a concise assistant.
+              messages:
+                - role: user
+                  content: How many tokens is this sentence?
+      responses:
+        '200':
+          description: Token count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  input_tokens:
+                    type: integer
+                    example: 20
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '503':
+          description: Service unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+
+  /v1/responses:
+    post:
+      summary: Create response (OpenAI Responses API)
+      description: >
+        OpenAI's Responses API — the default surface in the current OpenAI SDK
+        (client.responses.create()). Accepts a string or typed-item `input`,
+        optional `instructions`, `tools`/`tool_choice`, and `max_output_tokens`,
+        and returns a Responses object (`{object:"response", output:[…], usage}`).
+        With `"stream": true` the response is the native Responses SSE event
+        taxonomy (`response.created` / `response.output_text.delta` /
+        `response.completed` / …). Translated at the boundary and run through the
+        same pipeline as chat completions, so it may be cost-routed to any provider.
+      tags:
+        - Responses
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model:
+                  type: string
+                  example: gpt-4o-mini
+                input:
+                  description: A string, or an array of typed input items (message / function_call / function_call_output).
+                instructions:
+                  type: string
+                  description: System-level guidance, prepended as a system message.
+                max_output_tokens:
+                  type: integer
+                temperature:
+                  type: number
+                top_p:
+                  type: number
+                stream:
+                  type: boolean
+                tools:
+                  type: array
+                  items:
+                    type: object
+                    description: A Responses tool (flat shape — not nested under "function").
+                    properties:
+                      type:
+                        type: string
+                        example: function
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      parameters:
+                        type: object
+                        additionalProperties: true
+                        description: JSON Schema for the tool's arguments.
+                tool_choice:
+                  description: '"auto" | "none" | "required" | {type:"function", name}'
+                optimize_for:
+                  type: string
+                  enum: [cost, performance, quality]
+                  description: TAS routing hint (set via the SDK's extra_body).
+                max_cost:
+                  type: number
+                  description: TAS max USD cost hint (extra_body).
+                required_features:
+                  type: array
+                  items: { type: string }
+                  description: TAS required-capability filter (extra_body).
+                retry_config:
+                  $ref: '#/components/schemas/RetryConfig'
+                fallback_config:
+                  $ref: '#/components/schemas/FallbackConfig'
+            example:
+              model: gpt-4o-mini
+              max_output_tokens: 256
+              instructions: You are a concise assistant.
+              input: What is the capital of France?
+      responses:
+        '200':
+          description: Responses object (non-streaming) or Responses SSE event stream (streaming)
+          headers:
+            TAS-Response-Event-Id: { $ref: '#/components/headers/TASResponseEventId' }
+            X-TAS-Cache: { $ref: '#/components/headers/XTASCache' }
+            X-TAS-Scan-Status: { $ref: '#/components/headers/XTASScanStatus' }
+            X-TAS-Router-Provider: { $ref: '#/components/headers/XTASRouterProvider' }
+            X-TAS-Router-Model: { $ref: '#/components/headers/XTASRouterModel' }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, example: resp_abc123 }
+                  object: { type: string, example: response }
+                  created_at: { type: integer, format: int64 }
+                  status: { type: string, example: completed }
+                  model: { type: string }
+                  output:
+                    type: array
+                    items:
+                      type: object
+                      description: An output item — a message (with output_text content) or a function_call.
+                      properties:
+                        type:
+                          type: string
+                          enum: [message, function_call]
+                        id:
+                          type: string
+                        status:
+                          type: string
+                          example: completed
+                        role:
+                          type: string
+                          description: Present on message items.
+                        content:
+                          type: array
+                          description: Present on message items.
+                          items:
+                            type: object
+                            properties:
+                              type:
+                                type: string
+                                example: output_text
+                              text:
+                                type: string
+                        call_id:
+                          type: string
+                          description: Present on function_call items.
+                        name:
+                          type: string
+                          description: Present on function_call items.
+                        arguments:
+                          type: string
+                          description: Present on function_call items (JSON-encoded arguments).
+                  usage:
+                    type: object
+                    properties:
+                      input_tokens: { type: integer }
+                      output_tokens: { type: integer }
+                      total_tokens: { type: integer }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /v1/embeddings:
     post:
@@ -192,6 +507,15 @@ paths:
         regardless of the encoding_format it requested.
       tags:
         - Embeddings
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -212,6 +536,9 @@ paths:
                   type: integer
                 user:
                   type: string
+            example:
+              model: text-embedding-3-small
+              input: The quick brown fox jumps over the lazy dog.
       responses:
         '200':
           description: Embedding vectors in OpenAI shape
@@ -240,6 +567,14 @@ paths:
                     properties:
                       prompt_tokens: { type: integer }
                       total_tokens: { type: integer }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /v1/models:
     get:
@@ -493,6 +828,99 @@ components:
       scheme: bearer
       description: Bearer token authentication (API key or JWT)
 
+  parameters:
+    # TAS-* control-plane request headers (AIQG). Applied by the gateway
+    # middleware on every completion endpoint. All optional except TAS-Auth on
+    # the customer-facing ingress.
+    TASAuth:
+      name: TAS-Auth
+      in: header
+      required: false
+      schema: { type: string, example: tas_qg_live_... }
+      description: >
+        AIQG gateway token. On a stock SDK it may instead ride the native
+        credential slot (Authorization: Bearer / x-api-key) when it carries the
+        tas_qg_live_ prefix.
+    TASPolicy:
+      name: TAS-Policy
+      in: header
+      required: false
+      schema: { type: string }
+      description: Comma-separated policy names to apply (mutually exclusive with TAS-Policy-Bundle).
+    TASPolicyBundle:
+      name: TAS-Policy-Bundle
+      in: header
+      required: false
+      schema: { type: string }
+      description: Named policy bundle to apply (mutually exclusive with TAS-Policy).
+    TASWorkflow:
+      name: TAS-Workflow
+      in: header
+      required: false
+      schema:
+        type: string
+        enum: [single_turn_qa, rag, agentic, summarization, code_generation, classification_extraction]
+      description: Override the classified workflow type (drives SLA/quality scoring).
+    TASDryRun:
+      name: TAS-Dry-Run
+      in: header
+      required: false
+      schema: { type: string, enum: ["1"] }
+      description: '"1" computes policy decisions but does not enforce them.'
+    TASUpstreamAuthorization:
+      name: TAS-Upstream-Authorization
+      in: header
+      required: false
+      schema: { type: string }
+      description: Per-request upstream vendor key (BYOK). Overrides stored/shared keys.
+    TASSourceApp:
+      name: TAS-Source-App
+      in: header
+      required: false
+      schema: { type: string, maxLength: 128 }
+      description: Free-form source-app label for attribution.
+    TASTrace:
+      name: TAS-Trace
+      in: header
+      required: false
+      schema: { type: string, enum: ["1"] }
+      description: '"1" returns the captured AIQG event id/details on the response.'
+    # Identity / OTel attribution headers (observability only; also accepted):
+    # TAS-Agent-Id, TAS-Agent-Name, TAS-Agent-Version, TAS-Flow-Id,
+    # TAS-Conversation-Id, baggage, gen_ai.operation.name, gen_ai.agent.id,
+    # gen_ai.agent.name, gen_ai.conversation.id, gen_ai.system.
+
+  headers:
+    TASResponseEventId:
+      description: The AIQG response-event id (correlate feedback / tracing).
+      schema: { type: string }
+    XTASCache:
+      description: Cache disposition — "hit" or "semantic_hit" when served from cache.
+      schema: { type: string }
+    XTASScanStatus:
+      description: Gatekeeper inbound scan result — "clean" or "violations".
+      schema: { type: string }
+    XTASRedaction:
+      description: '"applied" when inbound PII redaction modified the request.'
+      schema: { type: string }
+    XTASRouterProvider:
+      description: The provider the request was routed to.
+      schema: { type: string }
+    XTASRouterModel:
+      description: The model the request was routed to.
+      schema: { type: string }
+    XTASRouterRequestId:
+      description: The router's request id.
+      schema: { type: string }
+    XTASRouterAttemptCount:
+      description: Number of attempts made (1 = no retries).
+      schema: { type: string }
+    XTASRouterFallbackUsed:
+      description: '"true" when a fallback provider served the request.'
+      schema: { type: string }
+    XTASRouterEstimatedCost:
+      description: Estimated USD cost of the request.
+      schema: { type: string }
   schemas:
     ChatCompletionRequest:
       type: object
@@ -1055,6 +1483,77 @@ components:
           minimum: 1
           description: Number of completions
 
+    AnthropicMessage:
+      type: object
+      description: Native Anthropic Messages API response object.
+      properties:
+        id:
+          type: string
+          example: msg_abc123
+        type:
+          type: string
+          example: message
+        role:
+          type: string
+          example: assistant
+        model:
+          type: string
+        content:
+          type: array
+          description: Content blocks (text and/or tool_use).
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [text, tool_use]
+              text:
+                type: string
+                description: Present on text blocks.
+              id:
+                type: string
+                description: Present on tool_use blocks.
+              name:
+                type: string
+                description: Present on tool_use blocks.
+              input:
+                type: object
+                description: Present on tool_use blocks (the tool arguments).
+        stop_reason:
+          type: string
+          enum: [end_turn, max_tokens, stop_sequence, tool_use]
+        stop_sequence:
+          type: string
+          nullable: true
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            cache_creation_input_tokens:
+              type: integer
+            cache_read_input_tokens:
+              type: integer
+
+    AnthropicError:
+      type: object
+      description: Anthropic-shaped error envelope returned by /v1/messages and /v1/messages/count_tokens.
+      properties:
+        type:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            type:
+              type: string
+              enum: [invalid_request_error, authentication_error, permission_error, not_found_error, rate_limit_error, api_error, overloaded_error]
+              example: invalid_request_error
+            message:
+              type: string
+
     MessageRequest:
       type: object
       required:
@@ -1075,6 +1574,22 @@ components:
           type: number
           minimum: 0
           maximum: 1
+        # TAS-native routing extensions (set via the Anthropic SDK's extra_body).
+        optimize_for:
+          type: string
+          enum: [cost, performance, quality]
+          description: TAS routing hint.
+        max_cost:
+          type: number
+          description: TAS max USD cost hint.
+        required_features:
+          type: array
+          items: { type: string }
+          description: TAS required-capability filter.
+        retry_config:
+          $ref: '#/components/schemas/RetryConfig'
+        fallback_config:
+          $ref: '#/components/schemas/FallbackConfig'
 
     Model:
       type: object
@@ -1507,7 +2022,11 @@ tags:
   - name: Text Completions
     description: Legacy text completion endpoints
   - name: Messages
-    description: Anthropic-compatible message endpoints
+    description: Anthropic-compatible message + token-count endpoints
+  - name: Responses
+    description: OpenAI Responses API endpoints
+  - name: Embeddings
+    description: OpenAI-compatible text embedding endpoints
   - name: Management
     description: Provider and router management endpoints
   - name: Health
