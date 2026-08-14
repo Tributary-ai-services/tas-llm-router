@@ -648,6 +648,10 @@ func (s *Server) setupRoutes() *mux.Router {
 	// Anthropic compatible endpoints
 	api.Handle("/messages", wrapAIQG(s.handleMessages)).Methods("POST")
 
+	// OpenAI-compatible embeddings (client.embeddings.create). Wrapped in AIQG
+	// for auth + event emission; routes to the embeddings-capable provider.
+	api.Handle("/embeddings", wrapAIQG(s.handleEmbeddings)).Methods("POST")
+
 	// OpenAI-compatible model discovery (client.models.list()/retrieve()).
 	// Unwrapped, like /providers — provider metadata, no TAS-* auth needed.
 	api.HandleFunc("/models", s.handleListModels).Methods("GET")
@@ -2261,6 +2265,13 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	caps := s.router.GetCapabilities()
 
+	// The Anthropic SDK's models.list() hits this same path but expects
+	// Anthropic's native shape — serve it when the caller sends anthropic-version.
+	if anthropicSDKRequest(r) {
+		s.writeAnthropicModelList(w, caps)
+		return
+	}
+
 	// Stable, deterministic output: sort providers, then models, dedupe by id.
 	provNames := make([]string, 0, len(caps))
 	for name := range caps {
@@ -2303,7 +2314,16 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 // OpenAI's model object shape; 404 when no provider offers it.
 func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["model"]
-	for pName, pc := range s.router.GetCapabilities() {
+	caps := s.router.GetCapabilities()
+	// Anthropic SDK's models.retrieve() expects Anthropic's model shape.
+	if anthropicSDKRequest(r) {
+		if s.writeAnthropicModel(w, caps, id) {
+			return
+		}
+		s.writeErrorResponse(w, http.StatusNotFound, fmt.Sprintf("Model %s not found", id))
+		return
+	}
+	for pName, pc := range caps {
 		owner := pc.ProviderName
 		if owner == "" {
 			owner = pName

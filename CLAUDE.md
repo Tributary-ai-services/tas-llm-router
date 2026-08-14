@@ -95,8 +95,9 @@ go run cmd/llm-router/main.go --config configs/config.yaml
 ### OpenAI-compatible
 - `POST /v1/chat/completions` - Chat completion endpoint (set `"stream": true` for SSE streaming)
 - `POST /v1/completions` - Accepted for compatibility; delegates to chat (expects a `messages[]` body, not the legacy `prompt` shape)
-- `GET /v1/models` - List available models across all providers (OpenAI `{object:"list", data:[…]}` shape)
-- `GET /v1/models/{model}` - Retrieve a single model
+- `POST /v1/embeddings` - Text embeddings (`client.embeddings.create`); routes to the embeddings-capable provider (OpenAI). Returns float vectors regardless of the requested `encoding_format`.
+- `GET /v1/models` - List available models. **SDK-aware:** returns OpenAI `{object:"list", data:[…]}` by default, or Anthropic's `{data:[{type:"model",…}]}` shape (Anthropic-owned models only) when the caller sends `anthropic-version` (the Anthropic SDK).
+- `GET /v1/models/{model}` - Retrieve a single model (also SDK-aware)
 
 ### Anthropic-compatible
 - `POST /v1/messages` - Native Anthropic Messages API (top-level `system`, required `max_tokens`, `content` block arrays, native named-event SSE streaming). Translated at the boundary and run through the same pipeline, so a `/v1/messages` request can still be cost-routed to any provider.
