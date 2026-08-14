@@ -134,6 +134,50 @@ func TestResponsesStreamEncoder_TextEventOrder(t *testing.T) {
 	if strings.Contains(out, "[DONE]") {
 		t.Error("responses stream must not emit [DONE]")
 	}
+
+	// The response.completed event must carry the FULL output so the SDK can
+	// reconstruct output_text from it (regression: empty output → empty
+	// get_final_response().output_text).
+	var completedText string
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev struct {
+			Type     string `json:"type"`
+			Response struct {
+				Status string `json:"status"`
+				Output []struct {
+					Type    string `json:"type"`
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"output"`
+				Usage responsesUsage `json:"usage"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+			continue
+		}
+		if ev.Type == "response.completed" {
+			if ev.Response.Status != "completed" {
+				t.Errorf("completed status = %q", ev.Response.Status)
+			}
+			if ev.Response.Usage.OutputTokens != 2 {
+				t.Errorf("completed usage output_tokens = %d, want 2", ev.Response.Usage.OutputTokens)
+			}
+			for _, it := range ev.Response.Output {
+				if it.Type == "message" {
+					for _, c := range it.Content {
+						completedText += c.Text
+					}
+				}
+			}
+		}
+	}
+	if completedText != "Hello" {
+		t.Errorf("response.completed output text = %q, want Hello", completedText)
+	}
 	// every data line is valid JSON and carries a sequence_number
 	for _, line := range strings.Split(out, "\n") {
 		if !strings.HasPrefix(line, "data: ") {
