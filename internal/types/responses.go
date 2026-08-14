@@ -123,3 +123,21 @@ type ModelsResponse struct {
 	Object string      `json:"object"`
 	Data   []ModelInfo `json:"data"`
 }
+
+// OpenAIModel is the OpenAI-native model object returned by GET /v1/models so a
+// stock OpenAI SDK's client.models.list()/retrieve() deserializes correctly.
+// It is deliberately distinct from ModelInfo (the rich internal capability
+// record) — the OpenAI wire shape is just id/object/created/owned_by.
+type OpenAIModel struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`   // always "model"
+	Created int64  `json:"created"`  // creation epoch; 0 when unknown
+	OwnedBy string `json:"owned_by"` // provider name (e.g. "openai", "anthropic")
+}
+
+// OpenAIModelList is the {object:"list", data:[…]} envelope OpenAI's
+// GET /v1/models returns.
+type OpenAIModelList struct {
+	Object string        `json:"object"` // always "list"
+	Data   []OpenAIModel `json:"data"`
+}

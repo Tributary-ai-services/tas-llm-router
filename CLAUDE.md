@@ -92,19 +92,37 @@ go run cmd/llm-router/main.go --config configs/config.yaml
 
 ## API Endpoints
 
-### Chat Completions
-- `POST /v1/chat/completions` - Standard chat completion endpoint (OpenAI-compatible)
-- `POST /v1/chat/completions?stream=true` - Streaming chat completions
+### OpenAI-compatible
+- `POST /v1/chat/completions` - Chat completion endpoint (set `"stream": true` for SSE streaming)
+- `POST /v1/completions` - Accepted for compatibility; delegates to chat (expects a `messages[]` body, not the legacy `prompt` shape)
+- `GET /v1/models` - List available models across all providers (OpenAI `{object:"list", data:[…]}` shape)
+- `GET /v1/models/{model}` - Retrieve a single model
 
-### Provider-Specific
-- `POST /v1/openai/*` - Direct OpenAI API passthrough
-- `POST /v1/anthropic/*` - Direct Anthropic API passthrough
+### Anthropic-compatible
+- `POST /v1/messages` - Native Anthropic Messages API (top-level `system`, required `max_tokens`, `content` block arrays, native named-event SSE streaming). Translated at the boundary and run through the same pipeline, so a `/v1/messages` request can still be cost-routed to any provider.
+
+> Note: there are **no** `/v1/openai/*` or `/v1/anthropic/*` raw passthrough routes — requests are parsed, scanned, routed, and re-serialized, never reverse-proxied verbatim.
+
+### Pointing a stock SDK at the gateway (AIQG mode)
+
+The customer-facing ingress authenticates on the **gateway token** (`tas_qg_live_*`). Two supported setups:
+
+- **Design 1 (default): token in the SDK slot, vendor key in the vault.** The customer stores their provider (BYOK) key once in the encrypted vault (Plan #14), then points the SDK at the gateway using the gateway token as the `api_key`:
+  ```python
+  OpenAI(api_key="tas_qg_live_…", base_url="https://<gw>/v1")
+  Anthropic(api_key="tas_qg_live_…", base_url="https://<gw>")
+  ```
+  The gateway lifts the token from `Authorization: Bearer` (OpenAI SDK) or `x-api-key` (Anthropic SDK) — recognized by the `tas_qg_live_` prefix — resolves the tenant, then injects the stored vendor key upstream (falling back to the TAS shared key only when the tenant allows it).
+- **Design 2 (power users): vendor key in the SDK slot, identity in a header.** Send the real vendor key as `api_key` and set the gateway token via a custom header:
+  ```python
+  OpenAI(api_key="sk-…", base_url="https://<gw>/v1", default_headers={"TAS-Auth": "tas_qg_live_…"})
+  ```
 
 ### Management
 - `GET /health` - Health check endpoint
 - `GET /metrics` - Prometheus metrics endpoint
-- `GET /v1/models` - List available models across all providers
 - `GET /v1/providers` - Provider status and health information
+- `GET /v1/capabilities` - Per-provider capability matrix
 
 ## Integration Points
 

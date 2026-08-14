@@ -135,6 +135,38 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	tasAuth := r.Header.Get("TAS-Auth")
 	customerAuth := r.Header.Get("Authorization")
 
+	// Native-SDK auth (Design 1): a stock OpenAI/Anthropic SDK can only
+	// populate its provider's native credential slot — Authorization: Bearer
+	// (OpenAI SDK) or x-api-key (Anthropic SDK) — and has no way to set the
+	// custom TAS-Auth header. When TAS-Auth is absent but one of those slots
+	// carries OUR gateway token (the distinctive `tas_qg_live_` prefix), lift
+	// it into TAS-Auth so the rest of the Path A chain resolves it exactly as
+	// if the customer had sent TAS-Auth. The prefix gate is what keeps this
+	// unambiguous: a real BYOK vendor key (sk-…, sk-ant-…) never matches, so
+	// it falls through untouched. This is what makes
+	//   OpenAI(api_key="tas_qg_live_…", base_url="<gw>/v1")
+	//   Anthropic(api_key="tas_qg_live_…", base_url="<gw>")
+	// work with no custom headers. Power users who instead put a real vendor
+	// key in the native slot set TAS-Auth explicitly (Design 2) and never hit
+	// this path.
+	if tasAuth == "" {
+		if tok, from := recoverGatewayToken(r); tok != "" {
+			r.Header.Set("TAS-Auth", tok)
+			tasAuth = tok
+			// The native slot held only our gateway token (Design 1), not an
+			// upstream vendor key — clear it so the tas_qg_live_ secret is
+			// never forwarded to the vendor. The effective upstream key is
+			// selected later by applyBYOKKey (stored credential → shared key).
+			switch from {
+			case tokenFromAuthorization:
+				r.Header.Del("Authorization")
+				customerAuth = ""
+			case tokenFromXAPIKey:
+				r.Header.Del("X-Api-Key")
+			}
+		}
+	}
+
 	// Case 1: no TAS-Auth. Either reject (strict ingress) or pass
 	// through untouched (internal ingress; preserves existing behavior).
 	if tasAuth == "" {
@@ -190,7 +222,7 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		case err != nil:
 			cfg.Logger.WithError(err).WithField("event", "aiqg.token_resolve_error").
 				Error("AIQG token resolver returned unexpected error")
-			writeResolverError(w)
+			writeResolverError(w, r)
 			return
 		}
 		resolvedToken = tok
@@ -342,6 +374,46 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	defer instrumentation.StampComplete(ctx)
 
 	next.ServeHTTP(sw, r.WithContext(ctx))
+}
+
+// tokenSource names which native SDK credential slot a recovered gateway
+// token came from, so handleAIQG can clear exactly that slot.
+type tokenSource int
+
+const (
+	tokenFromNone          tokenSource = iota
+	tokenFromAuthorization             // OpenAI SDK: Authorization: Bearer <token>
+	tokenFromXAPIKey                   // Anthropic SDK: x-api-key: <token>
+)
+
+// recoverGatewayToken looks for the gateway token (`tas_qg_live_*`) in a stock
+// SDK's native credential slot — `Authorization: Bearer <token>` (OpenAI SDK)
+// or `x-api-key: <token>` (Anthropic SDK) — and reports which slot it came
+// from. Returns ("", tokenFromNone) when neither slot carries our prefix.
+//
+// The prefix gate is load-bearing: a real vendor key in these slots (sk-…,
+// sk-ant-…) does NOT start with `tas_qg_live_`, so it is not mistaken for our
+// token and is left in place for downstream (BYOK) handling. Authorization is
+// checked before x-api-key; a request that (unusually) carries our token in
+// both resolves from Authorization.
+func recoverGatewayToken(r *http.Request) (string, tokenSource) {
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); auth != "" {
+		tok := auth
+		// Strip an optional "Bearer " scheme (what the OpenAI SDK sends);
+		// also accept a bare token for hand-rolled clients.
+		if len(auth) >= 7 && strings.EqualFold(auth[:7], "Bearer ") {
+			tok = strings.TrimSpace(auth[7:])
+		}
+		if strings.HasPrefix(tok, authTokenPrefix) {
+			return tok, tokenFromAuthorization
+		}
+	}
+	if xk := strings.TrimSpace(r.Header.Get("X-Api-Key")); xk != "" {
+		if strings.HasPrefix(xk, authTokenPrefix) {
+			return xk, tokenFromXAPIKey
+		}
+	}
+	return "", tokenFromNone
 }
 
 // probePromptCache measures vendor prompt-cache opportunity for one request
@@ -889,6 +961,23 @@ func tokenView(t *tokens.Token) events.TokenView {
 	}
 }
 
+// isAnthropicWirePath reports whether the request targets the Anthropic
+// Messages API (POST /v1/messages). The AIQG middleware runs before the handler
+// sets the response-format flag, so auth/validation rejections detect the
+// Anthropic wire from the path to render an error a stock Anthropic SDK parses.
+func isAnthropicWirePath(r *http.Request) bool {
+	return strings.HasSuffix(r.URL.Path, "/messages")
+}
+
+// writeAnthropicWireError writes Anthropic's {type:"error",error:{type,message}}
+// envelope, so an Anthropic SDK surfaces a well-formed error on an auth/validation
+// rejection instead of the gateway's OpenAI-ish body.
+func writeAnthropicWireError(w http.ResponseWriter, status int, errType, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%q}}`, errType, message)))
+}
+
 // rejectTokenUnknown emits 401 for a TAS-Auth bearer that the resolver
 // didn't recognize. Distinct response code (`token_unknown`) so
 // dashboards can break out genuine misconfigurations from "auth header
@@ -901,8 +990,12 @@ func rejectTokenUnknown(log *logrus.Logger, w http.ResponseWriter, r *http.Reque
 		"method": r.Method,
 	}).Warn("Path A auth rejected — token unknown")
 
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", `TAS realm="aiqg"`)
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusUnauthorized, "authentication_error", "AIQG ingress requires a recognized TAS-Auth token")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = w.Write([]byte(`{"error":{"code":"path_a_auth_required","message":"AIQG ingress requires a recognized TAS-Auth token","reason":"token_unknown","docs":"https://docs.tas.scharber.com/aiqg/auth"}}`))
 }
@@ -923,6 +1016,10 @@ func rejectAccountSuspended(log *logrus.Logger, w http.ResponseWriter, r *http.R
 	}
 	log.WithFields(fields).Warn("AIQG request rejected — account suspended")
 
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusForbidden, "permission_error", "AIQG account is currently suspended; contact support")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = w.Write([]byte(`{"error":{"code":"account_suspended","message":"AIQG account is currently suspended; contact support"}}`))
@@ -933,7 +1030,11 @@ func rejectAccountSuspended(log *logrus.Logger, w http.ResponseWriter, r *http.R
 // of 500 because the failure is upstream-dependency unavailability, and
 // callers should retry rather than treat the request as permanently
 // broken.
-func writeResolverError(w http.ResponseWriter) {
+func writeResolverError(w http.ResponseWriter, r *http.Request) {
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusServiceUnavailable, "api_error", "AIQG token resolver is temporarily unavailable; retry")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write([]byte(`{"error":{"code":"token_resolver_unavailable","message":"AIQG token resolver is temporarily unavailable; retry"}}`))
@@ -1007,8 +1108,12 @@ func rejectPathA(log *logrus.Logger, w http.ResponseWriter, r *http.Request, mis
 		"remote_addr":    r.RemoteAddr,
 	}).Warn("Path A auth rejected")
 
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", `TAS realm="aiqg"`)
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusUnauthorized, "authentication_error", fmt.Sprintf("AIQG ingress requires authentication; %s is missing", missing))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 
 	body := fmt.Sprintf(`{"error":{"code":"path_a_auth_required","message":"AIQG ingress requires both TAS-Auth and Authorization headers; %s is missing","missing_header":%q,"docs":"https://docs.tas.scharber.com/aiqg/auth"}}`, missing, missing)
@@ -1026,6 +1131,10 @@ func writeValidationError(log *logrus.Logger, w http.ResponseWriter, r *http.Req
 		"err":   err.Error(),
 	}).Warn("AIQG header validation failed")
 
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
 
