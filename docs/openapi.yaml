@@ -224,6 +224,10 @@ paths:
             X-TAS-Scan-Status: { $ref: '#/components/headers/XTASScanStatus' }
             X-TAS-Router-Provider: { $ref: '#/components/headers/XTASRouterProvider' }
             X-TAS-Router-Model: { $ref: '#/components/headers/XTASRouterModel' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnthropicMessage'
 
   /v1/messages/count_tokens:
     post:
@@ -1337,6 +1341,60 @@ components:
           type: integer
           minimum: 1
           description: Number of completions
+
+    AnthropicMessage:
+      type: object
+      description: Native Anthropic Messages API response object.
+      properties:
+        id:
+          type: string
+          example: msg_abc123
+        type:
+          type: string
+          example: message
+        role:
+          type: string
+          example: assistant
+        model:
+          type: string
+        content:
+          type: array
+          description: Content blocks (text and/or tool_use).
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [text, tool_use]
+              text:
+                type: string
+                description: Present on text blocks.
+              id:
+                type: string
+                description: Present on tool_use blocks.
+              name:
+                type: string
+                description: Present on tool_use blocks.
+              input:
+                type: object
+                description: Present on tool_use blocks (the tool arguments).
+        stop_reason:
+          type: string
+          enum: [end_turn, max_tokens, stop_sequence, tool_use]
+        stop_sequence:
+          type: string
+          nullable: true
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            cache_creation_input_tokens:
+              type: integer
+            cache_read_input_tokens:
+              type: integer
 
     MessageRequest:
       type: object
