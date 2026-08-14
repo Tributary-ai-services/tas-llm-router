@@ -42,14 +42,12 @@ security:
 paths:
   /v1/chat/completions:
     post:
-      summary: Create chat completion
-      description: |
-        Creates a chat completion response for the provided messages with optional retry and fallback configuration.
-
-        **New Features:**
-        - `retry_config`: Configure retry attempts with backoff strategies
-        - `fallback_config`: Enable fallback to alternative providers
-
+      summary: Create chat completion (OpenAI-compatible)
+      description: >
+        Creates a chat completion for the provided messages. Set `"stream": true`
+        for an SSE stream. Supports the TAS routing extensions — `optimize_for`,
+        `max_cost`, `retry_config`, and `fallback_config` — alongside the standard
+        OpenAI fields.
       tags:
         - Chat Completions
       security:
@@ -187,7 +185,7 @@ paths:
 
   /v1/messages:
     post:
-      summary: Create Anthropic-compatible message (native Messages API)
+      summary: Create message (Anthropic Messages API)
       description: >
         Native Anthropic Messages API. Accepts the Anthropic wire shape
         (top-level `system`, required `max_tokens`, `content` block arrays,
@@ -268,7 +266,7 @@ paths:
 
   /v1/responses:
     post:
-      summary: Create a response (OpenAI Responses API)
+      summary: Create response (OpenAI Responses API)
       description: >
         OpenAI's Responses API — the default surface in the current OpenAI SDK
         (client.responses.create()). Accepts a string or typed-item `input`,
