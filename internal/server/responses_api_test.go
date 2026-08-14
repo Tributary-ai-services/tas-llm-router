@@ -64,6 +64,48 @@ func TestParseResponses_ItemsWithToolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseResponses_TASExtensions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini","input":"hi","optimize_for":"cost","max_cost":0.01,
+		"required_features":["vision"],
+		"retry_config":{"max_attempts":3,"backoff_type":"exponential"},
+		"fallback_config":{"enabled":true,"preferred_chain":["anthropic"]}}`)
+	req, err := parseResponsesToChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.OptimizeFor != "cost" {
+		t.Errorf("optimize_for not carried: %q", req.OptimizeFor)
+	}
+	if req.MaxCost == nil || *req.MaxCost != 0.01 {
+		t.Errorf("max_cost not carried: %+v", req.MaxCost)
+	}
+	if len(req.RequiredFeatures) != 1 || req.RequiredFeatures[0] != "vision" {
+		t.Errorf("required_features not carried: %+v", req.RequiredFeatures)
+	}
+	if req.RetryConfig == nil || req.RetryConfig.MaxAttempts != 3 {
+		t.Errorf("retry_config not carried: %+v", req.RetryConfig)
+	}
+	if req.FallbackConfig == nil || !req.FallbackConfig.Enabled {
+		t.Errorf("fallback_config not carried: %+v", req.FallbackConfig)
+	}
+}
+
+func TestParseAnthropicMessages_TASExtensions(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":16,
+		"messages":[{"role":"user","content":"hi"}],
+		"optimize_for":"quality","max_cost":0.5}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.OptimizeFor != "quality" {
+		t.Errorf("optimize_for not carried on messages: %q", req.OptimizeFor)
+	}
+	if req.MaxCost == nil || *req.MaxCost != 0.5 {
+		t.Errorf("max_cost not carried on messages: %+v", req.MaxCost)
+	}
+}
+
 func TestChatResponseToResponses_TextAndTool(t *testing.T) {
 	resp := &types.ChatResponse{
 		ID:    "chatcmpl-1",

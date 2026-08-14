@@ -3,14 +3,14 @@ info:
   title: LLM Router WAF API
   description: |
     LLM Router Web Application Firewall (WAF) provides intelligent routing, security, and observability for Large Language Model APIs.
-    
+
     ## Features
     - **Intelligent Routing**: Cost-optimized, performance-based, and round-robin strategies
     - **Client-Controlled Retry**: Configurable retry logic with exponential/linear backoff
     - **Smart Fallback**: Automatic failover to healthy providers with cost/feature constraints
     - **Security**: Rate limiting, authentication, and request validation
     - **Observability**: Comprehensive metrics and routing metadata
-    
+
   version: 1.0.0
   contact:
     name: LLM Router WAF
@@ -45,16 +45,25 @@ paths:
       summary: Create chat completion
       description: |
         Creates a chat completion response for the provided messages with optional retry and fallback configuration.
-        
+
         **New Features:**
         - `retry_config`: Configure retry attempts with backoff strategies
         - `fallback_config`: Enable fallback to alternative providers
-        
+
       tags:
         - Chat Completions
       security:
         - ApiKeyAuth: []
         - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -75,7 +84,7 @@ paths:
                 value:
                   model: "gpt-3.5-turbo"
                   messages:
-                    - role: "user"  
+                    - role: "user"
                       content: "Hello with retry support!"
                   max_tokens: 100
                   retry_config:
@@ -117,6 +126,17 @@ paths:
       responses:
         '200':
           description: Successful completion
+          headers:
+            TAS-Response-Event-Id: { $ref: '#/components/headers/TASResponseEventId' }
+            X-TAS-Cache: { $ref: '#/components/headers/XTASCache' }
+            X-TAS-Scan-Status: { $ref: '#/components/headers/XTASScanStatus' }
+            X-TAS-Redaction: { $ref: '#/components/headers/XTASRedaction' }
+            X-TAS-Router-Provider: { $ref: '#/components/headers/XTASRouterProvider' }
+            X-TAS-Router-Model: { $ref: '#/components/headers/XTASRouterModel' }
+            X-TAS-Router-Request-Id: { $ref: '#/components/headers/XTASRouterRequestId' }
+            X-TAS-Router-Attempt-Count: { $ref: '#/components/headers/XTASRouterAttemptCount' }
+            X-TAS-Router-Fallback-Used: { $ref: '#/components/headers/XTASRouterFallbackUsed' }
+            X-TAS-Router-Estimated-Cost: { $ref: '#/components/headers/XTASRouterEstimatedCost' }
           content:
             application/json:
               schema:
@@ -140,6 +160,15 @@ paths:
       tags:
         - Text Completions
       deprecated: true
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -171,6 +200,15 @@ paths:
         provider. Point a stock Anthropic SDK's `base_url` here.
       tags:
         - Messages
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -180,6 +218,12 @@ paths:
       responses:
         '200':
           description: Native Anthropic message object (non-streaming) or SSE stream (streaming)
+          headers:
+            TAS-Response-Event-Id: { $ref: '#/components/headers/TASResponseEventId' }
+            X-TAS-Cache: { $ref: '#/components/headers/XTASCache' }
+            X-TAS-Scan-Status: { $ref: '#/components/headers/XTASScanStatus' }
+            X-TAS-Router-Provider: { $ref: '#/components/headers/XTASRouterProvider' }
+            X-TAS-Router-Model: { $ref: '#/components/headers/XTASRouterModel' }
 
   /v1/messages/count_tokens:
     post:
@@ -191,6 +235,15 @@ paths:
         stock Anthropic SDK's client.messages.count_tokens().
       tags:
         - Messages
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -223,6 +276,15 @@ paths:
         same pipeline as chat completions, so it may be cost-routed to any provider.
       tags:
         - Responses
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -254,9 +316,30 @@ paths:
                     description: Flat Responses tool ({type:"function", name, description, parameters}).
                 tool_choice:
                   description: '"auto" | "none" | "required" | {type:"function", name}'
+                optimize_for:
+                  type: string
+                  enum: [cost, performance, quality]
+                  description: TAS routing hint (set via the SDK's extra_body).
+                max_cost:
+                  type: number
+                  description: TAS max USD cost hint (extra_body).
+                required_features:
+                  type: array
+                  items: { type: string }
+                  description: TAS required-capability filter (extra_body).
+                retry_config:
+                  $ref: '#/components/schemas/RetryConfig'
+                fallback_config:
+                  $ref: '#/components/schemas/FallbackConfig'
       responses:
         '200':
           description: Responses object (non-streaming) or Responses SSE event stream (streaming)
+          headers:
+            TAS-Response-Event-Id: { $ref: '#/components/headers/TASResponseEventId' }
+            X-TAS-Cache: { $ref: '#/components/headers/XTASCache' }
+            X-TAS-Scan-Status: { $ref: '#/components/headers/XTASScanStatus' }
+            X-TAS-Router-Provider: { $ref: '#/components/headers/XTASRouterProvider' }
+            X-TAS-Router-Model: { $ref: '#/components/headers/XTASRouterModel' }
           content:
             application/json:
               schema:
@@ -290,6 +373,15 @@ paths:
         regardless of the encoding_format it requested.
       tags:
         - Embeddings
+      parameters:
+        - $ref: '#/components/parameters/TASAuth'
+        - $ref: '#/components/parameters/TASPolicy'
+        - $ref: '#/components/parameters/TASPolicyBundle'
+        - $ref: '#/components/parameters/TASWorkflow'
+        - $ref: '#/components/parameters/TASDryRun'
+        - $ref: '#/components/parameters/TASUpstreamAuthorization'
+        - $ref: '#/components/parameters/TASSourceApp'
+        - $ref: '#/components/parameters/TASTrace'
       requestBody:
         required: true
         content:
@@ -591,6 +683,99 @@ components:
       scheme: bearer
       description: Bearer token authentication (API key or JWT)
 
+  parameters:
+    # TAS-* control-plane request headers (AIQG). Applied by the gateway
+    # middleware on every completion endpoint. All optional except TAS-Auth on
+    # the customer-facing ingress.
+    TASAuth:
+      name: TAS-Auth
+      in: header
+      required: false
+      schema: { type: string, example: tas_qg_live_... }
+      description: >
+        AIQG gateway token. On a stock SDK it may instead ride the native
+        credential slot (Authorization: Bearer / x-api-key) when it carries the
+        tas_qg_live_ prefix.
+    TASPolicy:
+      name: TAS-Policy
+      in: header
+      required: false
+      schema: { type: string }
+      description: Comma-separated policy names to apply (mutually exclusive with TAS-Policy-Bundle).
+    TASPolicyBundle:
+      name: TAS-Policy-Bundle
+      in: header
+      required: false
+      schema: { type: string }
+      description: Named policy bundle to apply (mutually exclusive with TAS-Policy).
+    TASWorkflow:
+      name: TAS-Workflow
+      in: header
+      required: false
+      schema:
+        type: string
+        enum: [single_turn_qa, rag, agentic, summarization, code_generation, classification_extraction]
+      description: Override the classified workflow type (drives SLA/quality scoring).
+    TASDryRun:
+      name: TAS-Dry-Run
+      in: header
+      required: false
+      schema: { type: string, enum: ["1"] }
+      description: '"1" computes policy decisions but does not enforce them.'
+    TASUpstreamAuthorization:
+      name: TAS-Upstream-Authorization
+      in: header
+      required: false
+      schema: { type: string }
+      description: Per-request upstream vendor key (BYOK). Overrides stored/shared keys.
+    TASSourceApp:
+      name: TAS-Source-App
+      in: header
+      required: false
+      schema: { type: string, maxLength: 128 }
+      description: Free-form source-app label for attribution.
+    TASTrace:
+      name: TAS-Trace
+      in: header
+      required: false
+      schema: { type: string, enum: ["1"] }
+      description: '"1" returns the captured AIQG event id/details on the response.'
+    # Identity / OTel attribution headers (observability only; also accepted):
+    # TAS-Agent-Id, TAS-Agent-Name, TAS-Agent-Version, TAS-Flow-Id,
+    # TAS-Conversation-Id, baggage, gen_ai.operation.name, gen_ai.agent.id,
+    # gen_ai.agent.name, gen_ai.conversation.id, gen_ai.system.
+
+  headers:
+    TASResponseEventId:
+      description: The AIQG response-event id (correlate feedback / tracing).
+      schema: { type: string }
+    XTASCache:
+      description: Cache disposition — "hit" or "semantic_hit" when served from cache.
+      schema: { type: string }
+    XTASScanStatus:
+      description: Gatekeeper inbound scan result — "clean" or "violations".
+      schema: { type: string }
+    XTASRedaction:
+      description: '"applied" when inbound PII redaction modified the request.'
+      schema: { type: string }
+    XTASRouterProvider:
+      description: The provider the request was routed to.
+      schema: { type: string }
+    XTASRouterModel:
+      description: The model the request was routed to.
+      schema: { type: string }
+    XTASRouterRequestId:
+      description: The router's request id.
+      schema: { type: string }
+    XTASRouterAttemptCount:
+      description: Number of attempts made (1 = no retries).
+      schema: { type: string }
+    XTASRouterFallbackUsed:
+      description: '"true" when a fallback provider served the request.'
+      schema: { type: string }
+    XTASRouterEstimatedCost:
+      description: Estimated USD cost of the request.
+      schema: { type: string }
   schemas:
     ChatCompletionRequest:
       type: object
@@ -1173,6 +1358,22 @@ components:
           type: number
           minimum: 0
           maximum: 1
+        # TAS-native routing extensions (set via the Anthropic SDK's extra_body).
+        optimize_for:
+          type: string
+          enum: [cost, performance, quality]
+          description: TAS routing hint.
+        max_cost:
+          type: number
+          description: TAS max USD cost hint.
+        required_features:
+          type: array
+          items: { type: string }
+          description: TAS required-capability filter.
+        retry_config:
+          $ref: '#/components/schemas/RetryConfig'
+        fallback_config:
+          $ref: '#/components/schemas/FallbackConfig'
 
     Model:
       type: object
