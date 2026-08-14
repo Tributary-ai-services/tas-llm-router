@@ -282,6 +282,9 @@ func TestOpenAIStreamEncoder_UnchangedFraming(t *testing.T) {
 	rec := httptest.NewRecorder()
 	enc := &openAIStreamEncoder{w: rec}
 	enc.writeChunk(&types.ChatChunk{ID: "chatcmpl-3", Object: "chat.completion.chunk", Choices: []types.ChoiceChunk{{Delta: &types.Message{Content: "hi"}}}})
+	// Terminal finish chunk WITHOUT a delta — providers emit these; the OpenAI
+	// SDK's .stream() helper crashes on a choice with no delta.
+	enc.writeChunk(&types.ChatChunk{ID: "chatcmpl-3", Object: "chat.completion.chunk", Choices: []types.ChoiceChunk{{FinishReason: "stop"}}})
 	enc.done()
 	out := rec.Body.String()
 	if !strings.Contains(out, "data: ") || !strings.Contains(out, "[DONE]") {
@@ -289,5 +292,22 @@ func TestOpenAIStreamEncoder_UnchangedFraming(t *testing.T) {
 	}
 	if strings.Contains(out, "event: ") {
 		t.Errorf("openai stream must not use named events:\n%s", out)
+	}
+	// Every emitted choice must carry a delta object (helper calls delta.to_dict()).
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "data: ") || strings.Contains(line, "[DONE]") {
+			continue
+		}
+		var chunk struct {
+			Choices []map[string]interface{} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+			t.Fatalf("bad chunk json: %v", err)
+		}
+		for _, ch := range chunk.Choices {
+			if _, ok := ch["delta"]; !ok {
+				t.Errorf("choice missing delta (breaks OpenAI .stream()): %s", line)
+			}
+		}
 	}
 }

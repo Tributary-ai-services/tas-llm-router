@@ -593,6 +593,17 @@ type openAIStreamEncoder struct {
 }
 
 func (e *openAIStreamEncoder) writeChunk(c *types.ChatChunk) {
+	// The OpenAI SDK's high-level .stream() helper calls delta.to_dict() on
+	// every choice, so a choice with no `delta` (e.g. the terminal
+	// finish_reason chunk, which providers emit without one) crashes it with
+	// "'NoneType' object has no attribute 'to_dict'". Guarantee a (possibly
+	// empty) delta object on every choice so the helper — not just the
+	// low-level stream=True iterator — works against the gateway.
+	for i := range c.Choices {
+		if c.Choices[i].Delta == nil {
+			c.Choices[i].Delta = &types.Message{}
+		}
+	}
 	data, err := json.Marshal(c)
 	if err != nil {
 		if e.logger != nil {
