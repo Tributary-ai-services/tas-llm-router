@@ -60,6 +60,10 @@ type anthropicMessagesRequest struct {
 	Stream        bool                   `json:"stream,omitempty"`
 	Tools         []anthropicWireTool    `json:"tools,omitempty"`
 	ToolChoice    json.RawMessage        `json:"tool_choice,omitempty"`
+
+	// TAS-native routing extensions (optimize_for, max_cost, retry/fallback…),
+	// settable via the Anthropic SDK's extra_body.
+	tasExtensions
 }
 
 type anthropicWireMessage struct {
@@ -199,6 +203,8 @@ func parseAnthropicToChatRequest(body []byte, requireMaxTokens bool) (*types.Cha
 			req.ToolChoice = tc
 		}
 	}
+
+	applyTASExtensions(req, ar.tasExtensions)
 
 	return req, nil
 }

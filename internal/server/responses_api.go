@@ -40,6 +40,9 @@ type responsesRequest struct {
 	Stream          bool            `json:"stream,omitempty"`
 	Tools           []responsesTool `json:"tools,omitempty"`
 	ToolChoice      json.RawMessage `json:"tool_choice,omitempty"`
+
+	// TAS-native routing extensions, settable via the OpenAI SDK's extra_body.
+	tasExtensions
 }
 
 // responsesTool is a Responses-API tool: unlike Chat Completions it is FLAT —
@@ -193,6 +196,8 @@ func parseResponsesToChatRequest(body []byte) (*types.ChatRequest, error) {
 			req.ToolChoice = tc
 		}
 	}
+
+	applyTASExtensions(req, rr.tasExtensions)
 
 	return req, nil
 }
