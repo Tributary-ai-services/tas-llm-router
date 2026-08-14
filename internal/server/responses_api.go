@@ -359,6 +359,11 @@ type responsesStreamEncoder struct {
 
 	toolOrder []string
 	tools     map[string]*responsesStreamTool
+
+	// completed output items, accumulated as each item finishes, so the final
+	// response.completed event carries the full output (the SDK reconstructs
+	// get_final_response()/output_text from it).
+	finalOutput []map[string]interface{}
 }
 
 type responsesStreamTool struct {
@@ -502,13 +507,12 @@ func (e *responsesStreamEncoder) done() {
 			"item_id": e.msgID, "output_index": e.outputIndex, "content_index": 0,
 			"part": map[string]interface{}{"type": "output_text", "text": full, "annotations": []interface{}{}},
 		})
-		e.emit("response.output_item.done", map[string]interface{}{
-			"output_index": e.outputIndex,
-			"item": map[string]interface{}{
-				"type": "message", "id": e.msgID, "status": "completed", "role": "assistant",
-				"content": []map[string]interface{}{{"type": "output_text", "text": full, "annotations": []interface{}{}}},
-			},
-		})
+		msgItem := map[string]interface{}{
+			"type": "message", "id": e.msgID, "status": "completed", "role": "assistant",
+			"content": []map[string]interface{}{{"type": "output_text", "text": full, "annotations": []interface{}{}}},
+		}
+		e.emit("response.output_item.done", map[string]interface{}{"output_index": e.outputIndex, "item": msgItem})
+		e.finalOutput = append(e.finalOutput, msgItem)
 		e.outputIndex++
 	}
 	// Emit buffered tool calls as function_call output items.
@@ -521,13 +525,16 @@ func (e *responsesStreamEncoder) done() {
 		}
 		e.emit("response.output_item.added", map[string]interface{}{"output_index": e.outputIndex, "item": item})
 		e.emit("response.output_item.done", map[string]interface{}{"output_index": e.outputIndex, "item": item})
+		e.finalOutput = append(e.finalOutput, item)
 		e.outputIndex++
 	}
-	e.emit("response.completed", map[string]interface{}{
-		"response": e.responseEnvelope("completed", &responsesUsage{
-			InputTokens: e.inputTokens, OutputTokens: e.outputTokens, TotalTokens: e.inputTokens + e.outputTokens,
-		}),
+	// The completed event carries the FULL output so the SDK can reconstruct
+	// the final response object (output_text, tool calls) from it.
+	env := e.responseEnvelope("completed", &responsesUsage{
+		InputTokens: e.inputTokens, OutputTokens: e.outputTokens, TotalTokens: e.inputTokens + e.outputTokens,
 	})
+	env["output"] = e.finalOutput
+	e.emit("response.completed", map[string]interface{}{"response": env})
 }
 
 // responseEnvelope builds the response object embedded in response.created /
