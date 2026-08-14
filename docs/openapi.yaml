@@ -2,14 +2,36 @@ openapi: 3.0.3
 info:
   title: LLM Router WAF API
   description: |
-    LLM Router Web Application Firewall (WAF) provides intelligent routing, security, and observability for Large Language Model APIs.
+    The LLM Router is an intelligent, policy-aware gateway for Large Language Model APIs.
+    Point a stock OpenAI or Anthropic SDK at it and it routes, scans, meters, and secures the
+    traffic while staying wire-compatible with the vendor APIs.
 
-    ## Features
-    - **Intelligent Routing**: Cost-optimized, performance-based, and round-robin strategies
-    - **Client-Controlled Retry**: Configurable retry logic with exponential/linear backoff
-    - **Smart Fallback**: Automatic failover to healthy providers with cost/feature constraints
-    - **Security**: Rate limiting, authentication, and request validation
-    - **Observability**: Comprehensive metrics and routing metadata
+    ## Compatible endpoints
+    - **OpenAI**: `POST /v1/chat/completions`, `POST /v1/responses` (Responses API),
+      `POST /v1/embeddings`, `GET /v1/models` — set the SDK's `base_url` to a server below.
+    - **Anthropic**: `POST /v1/messages`, `POST /v1/messages/count_tokens`; `GET /v1/models`
+      returns Anthropic's shape when the caller sends `anthropic-version`.
+
+    Requests are translated to a common internal form, run through one pipeline (classification,
+    scanning, caching, routing, retry/fallback), and rendered back in the caller's wire shape —
+    so a `/v1/messages` or `/v1/responses` request can still be cost-routed to any provider.
+
+    ## Authentication (Design 1 / Design 2)
+    The customer-facing ingress authenticates on a **gateway token** (`tas_qg_live_…`):
+    - **Design 1 (default)**: pass the token as the SDK's `api_key`; the gateway recognizes it by
+      prefix in `Authorization: Bearer` (OpenAI) or `x-api-key` (Anthropic), and injects your
+      stored provider (BYOK) key upstream.
+    - **Design 2 (power users)**: pass a real vendor key as `api_key` and set the token via
+      `default_headers={"TAS-Auth": "tas_qg_live_…"}`.
+
+    ## TAS control plane
+    - **Routing extensions** (request body): `optimize_for`, `max_cost`, `required_features`,
+      `retry_config`, `fallback_config` — native on chat/completions; via `extra_body` on
+      `/v1/messages` and `/v1/responses`.
+    - **`TAS-*` request headers**: policy, workflow, dry-run, per-request BYOK key, source-app
+      (see the header parameters on each completion endpoint).
+    - **`X-TAS-*` response headers**: routing decision, cache disposition, scan status, redaction,
+      and the AIQG response-event id.
 
   version: 1.0.0
   contact:
@@ -213,6 +235,13 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/MessageRequest'
+            example:
+              model: claude-haiku-4-5-20251001
+              max_tokens: 256
+              system: You are a concise assistant.
+              messages:
+                - role: user
+                  content: What is the capital of France?
       responses:
         '200':
           description: Native Anthropic message object (non-streaming) or SSE stream (streaming)
@@ -226,6 +255,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnthropicMessage'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '503':
+          description: Service unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
 
   /v1/messages/count_tokens:
     post:
@@ -252,6 +301,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/MessageRequest'
+            example:
+              model: claude-haiku-4-5-20251001
+              system: You are a concise assistant.
+              messages:
+                - role: user
+                  content: How many tokens is this sentence?
       responses:
         '200':
           description: Token count
@@ -263,6 +318,26 @@ paths:
                   input_tokens:
                     type: integer
                     example: 20
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
+        '503':
+          description: Service unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnthropicError' }
 
   /v1/responses:
     post:
@@ -315,7 +390,19 @@ paths:
                   type: array
                   items:
                     type: object
-                    description: Flat Responses tool ({type:"function", name, description, parameters}).
+                    description: A Responses tool (flat shape — not nested under "function").
+                    properties:
+                      type:
+                        type: string
+                        example: function
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      parameters:
+                        type: object
+                        additionalProperties: true
+                        description: JSON Schema for the tool's arguments.
                 tool_choice:
                   description: '"auto" | "none" | "required" | {type:"function", name}'
                 optimize_for:
@@ -333,6 +420,11 @@ paths:
                   $ref: '#/components/schemas/RetryConfig'
                 fallback_config:
                   $ref: '#/components/schemas/FallbackConfig'
+            example:
+              model: gpt-4o-mini
+              max_output_tokens: 256
+              instructions: You are a concise assistant.
+              input: What is the capital of France?
       responses:
         '200':
           description: Responses object (non-streaming) or Responses SSE event stream (streaming)
@@ -357,12 +449,52 @@ paths:
                     items:
                       type: object
                       description: An output item — a message (with output_text content) or a function_call.
+                      properties:
+                        type:
+                          type: string
+                          enum: [message, function_call]
+                        id:
+                          type: string
+                        status:
+                          type: string
+                          example: completed
+                        role:
+                          type: string
+                          description: Present on message items.
+                        content:
+                          type: array
+                          description: Present on message items.
+                          items:
+                            type: object
+                            properties:
+                              type:
+                                type: string
+                                example: output_text
+                              text:
+                                type: string
+                        call_id:
+                          type: string
+                          description: Present on function_call items.
+                        name:
+                          type: string
+                          description: Present on function_call items.
+                        arguments:
+                          type: string
+                          description: Present on function_call items (JSON-encoded arguments).
                   usage:
                     type: object
                     properties:
                       input_tokens: { type: integer }
                       output_tokens: { type: integer }
                       total_tokens: { type: integer }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /v1/embeddings:
     post:
@@ -404,6 +536,9 @@ paths:
                   type: integer
                 user:
                   type: string
+            example:
+              model: text-embedding-3-small
+              input: The quick brown fox jumps over the lazy dog.
       responses:
         '200':
           description: Embedding vectors in OpenAI shape
@@ -432,6 +567,14 @@ paths:
                     properties:
                       prompt_tokens: { type: integer }
                       total_tokens: { type: integer }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /v1/models:
     get:
@@ -1393,6 +1536,23 @@ components:
               type: integer
             cache_read_input_tokens:
               type: integer
+
+    AnthropicError:
+      type: object
+      description: Anthropic-shaped error envelope returned by /v1/messages and /v1/messages/count_tokens.
+      properties:
+        type:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            type:
+              type: string
+              enum: [invalid_request_error, authentication_error, permission_error, not_found_error, rate_limit_error, api_error, overloaded_error]
+              example: invalid_request_error
+            message:
+              type: string
 
     MessageRequest:
       type: object
