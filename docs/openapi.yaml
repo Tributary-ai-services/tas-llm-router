@@ -181,9 +181,69 @@ paths:
         '200':
           description: Native Anthropic message object (non-streaming) or SSE stream (streaming)
 
+  /v1/embeddings:
+    post:
+      summary: Create embeddings (OpenAI-compatible)
+      description: >
+        Text embeddings, compatible with a stock OpenAI SDK's
+        client.embeddings.create(). Routes to the embeddings-capable provider
+        (OpenAI). The `embedding` field is always a float array — the gateway
+        decodes any base64 vendor response, which the OpenAI SDK accepts
+        regardless of the encoding_format it requested.
+      tags:
+        - Embeddings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model:
+                  type: string
+                  example: text-embedding-3-small
+                input:
+                  description: A string, array of strings, or array of token arrays.
+                encoding_format:
+                  type: string
+                  enum: [float, base64]
+                dimensions:
+                  type: integer
+                user:
+                  type: string
+      responses:
+        '200':
+          description: Embedding vectors in OpenAI shape
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    example: list
+                  model:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        object: { type: string, example: embedding }
+                        index: { type: integer }
+                        embedding:
+                          type: array
+                          items: { type: number, format: float }
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens: { type: integer }
+                      total_tokens: { type: integer }
+
   /v1/models:
     get:
-      summary: List models (OpenAI-compatible)
+      summary: List models (OpenAI or Anthropic shape)
       description: >
         Lists every model declared by every configured provider, in OpenAI's
         `{object:"list", data:[{id,object,created,owned_by}]}` shape. Supports a

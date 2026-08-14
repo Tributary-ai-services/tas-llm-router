@@ -141,3 +141,49 @@ type OpenAIModelList struct {
 	Object string        `json:"object"` // always "list"
 	Data   []OpenAIModel `json:"data"`
 }
+
+// AnthropicModel is the Anthropic-native model object returned by GET /v1/models
+// when the caller is the Anthropic SDK (detected via the anthropic-version
+// header). Distinct wire shape from OpenAIModel: type/id/display_name/created_at.
+type AnthropicModel struct {
+	Type        string `json:"type"` // always "model"
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   string `json:"created_at,omitempty"` // RFC3339; omitted when unknown
+}
+
+// AnthropicModelList is Anthropic's list envelope for GET /v1/models.
+type AnthropicModelList struct {
+	Data    []AnthropicModel `json:"data"`
+	HasMore bool             `json:"has_more"`
+	FirstID string           `json:"first_id,omitempty"`
+	LastID  string           `json:"last_id,omitempty"`
+}
+
+// EmbeddingRequest is the OpenAI-compatible POST /v1/embeddings request.
+type EmbeddingRequest struct {
+	Model          string      `json:"model"`
+	Input          interface{} `json:"input"` // string | []string | []int | [][]int
+	EncodingFormat string      `json:"encoding_format,omitempty"`
+	Dimensions     *int        `json:"dimensions,omitempty"`
+	User           string      `json:"user,omitempty"`
+}
+
+// EmbeddingResponse is the OpenAI-compatible embeddings response.
+type EmbeddingResponse struct {
+	Object string          `json:"object"` // "list"
+	Data   []EmbeddingData `json:"data"`
+	Model  string          `json:"model"`
+	Usage  *EmbeddingUsage `json:"usage,omitempty"`
+}
+
+type EmbeddingData struct {
+	Object    string    `json:"object"` // "embedding"
+	Index     int       `json:"index"`
+	Embedding []float32 `json:"embedding"`
+}
+
+type EmbeddingUsage struct {
+	PromptTokens int `json:"prompt_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}

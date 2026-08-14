@@ -46,3 +46,10 @@ type AssistantProvider interface {
 	SupportsAssistants() bool
 	CreateAssistant(ctx context.Context, req *types.AssistantRequest) (*types.AssistantResponse, error)
 }
+
+// EmbeddingProvider is implemented by providers that expose a text-embeddings
+// endpoint (OpenAI). The server type-asserts for it to serve POST /v1/embeddings.
+type EmbeddingProvider interface {
+	LLMProvider
+	Embeddings(ctx context.Context, req *types.EmbeddingRequest) (*types.EmbeddingResponse, error)
+}
