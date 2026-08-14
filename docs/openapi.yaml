@@ -181,6 +181,104 @@ paths:
         '200':
           description: Native Anthropic message object (non-streaming) or SSE stream (streaming)
 
+  /v1/messages/count_tokens:
+    post:
+      summary: Count tokens (Anthropic-compatible)
+      description: >
+        Returns the exact number of input tokens Anthropic would bill for the
+        given system + messages + tools, via the vendor's count_tokens endpoint.
+        Same body as /v1/messages but `max_tokens` is not required. Supports a
+        stock Anthropic SDK's client.messages.count_tokens().
+      tags:
+        - Messages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+      responses:
+        '200':
+          description: Token count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  input_tokens:
+                    type: integer
+                    example: 20
+
+  /v1/responses:
+    post:
+      summary: Create a response (OpenAI Responses API)
+      description: >
+        OpenAI's Responses API — the default surface in the current OpenAI SDK
+        (client.responses.create()). Accepts a string or typed-item `input`,
+        optional `instructions`, `tools`/`tool_choice`, and `max_output_tokens`,
+        and returns a Responses object (`{object:"response", output:[…], usage}`).
+        With `"stream": true` the response is the native Responses SSE event
+        taxonomy (`response.created` / `response.output_text.delta` /
+        `response.completed` / …). Translated at the boundary and run through the
+        same pipeline as chat completions, so it may be cost-routed to any provider.
+      tags:
+        - Responses
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model:
+                  type: string
+                  example: gpt-4o-mini
+                input:
+                  description: A string, or an array of typed input items (message / function_call / function_call_output).
+                instructions:
+                  type: string
+                  description: System-level guidance, prepended as a system message.
+                max_output_tokens:
+                  type: integer
+                temperature:
+                  type: number
+                top_p:
+                  type: number
+                stream:
+                  type: boolean
+                tools:
+                  type: array
+                  items:
+                    type: object
+                    description: Flat Responses tool ({type:"function", name, description, parameters}).
+                tool_choice:
+                  description: '"auto" | "none" | "required" | {type:"function", name}'
+      responses:
+        '200':
+          description: Responses object (non-streaming) or Responses SSE event stream (streaming)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, example: resp_abc123 }
+                  object: { type: string, example: response }
+                  created_at: { type: integer, format: int64 }
+                  status: { type: string, example: completed }
+                  model: { type: string }
+                  output:
+                    type: array
+                    items:
+                      type: object
+                      description: An output item — a message (with output_text content) or a function_call.
+                  usage:
+                    type: object
+                    properties:
+                      input_tokens: { type: integer }
+                      output_tokens: { type: integer }
+                      total_tokens: { type: integer }
+
   /v1/embeddings:
     post:
       summary: Create embeddings (OpenAI-compatible)
@@ -1507,7 +1605,11 @@ tags:
   - name: Text Completions
     description: Legacy text completion endpoints
   - name: Messages
-    description: Anthropic-compatible message endpoints
+    description: Anthropic-compatible message + token-count endpoints
+  - name: Responses
+    description: OpenAI Responses API endpoints
+  - name: Embeddings
+    description: OpenAI-compatible text embedding endpoints
   - name: Management
     description: Provider and router management endpoints
   - name: Health
