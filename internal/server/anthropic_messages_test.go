@@ -21,7 +21,7 @@ func TestParseAnthropicToChatRequest_Basic(t *testing.T) {
 			{"role": "user", "content": "Hello"}
 		]
 	}`)
-	req, err := parseAnthropicToChatRequest(body)
+	req, err := parseAnthropicToChatRequest(body, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,14 +51,14 @@ func TestParseAnthropicToChatRequest_Basic(t *testing.T) {
 
 func TestParseAnthropicToChatRequest_RequiresMaxTokens(t *testing.T) {
 	body := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`)
-	if _, err := parseAnthropicToChatRequest(body); err == nil {
+	if _, err := parseAnthropicToChatRequest(body, true); err == nil {
 		t.Fatal("expected error for missing max_tokens")
 	}
 }
 
 func TestParseAnthropicToChatRequest_RequiresModel(t *testing.T) {
 	body := []byte(`{"max_tokens":10,"messages":[]}`)
-	if _, err := parseAnthropicToChatRequest(body); err == nil {
+	if _, err := parseAnthropicToChatRequest(body, true); err == nil {
 		t.Fatal("expected error for missing model")
 	}
 }
@@ -70,7 +70,7 @@ func TestParseAnthropicToChatRequest_ToolsAndChoice(t *testing.T) {
 		"tools":[{"name":"get_weather","description":"get it","input_schema":{"type":"object"}}],
 		"tool_choice":{"type":"any"}
 	}`)
-	req, err := parseAnthropicToChatRequest(body)
+	req, err := parseAnthropicToChatRequest(body, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -96,11 +96,13 @@ go run cmd/llm-router/main.go --config configs/config.yaml
 - `POST /v1/chat/completions` - Chat completion endpoint (set `"stream": true` for SSE streaming)
 - `POST /v1/completions` - Accepted for compatibility; delegates to chat (expects a `messages[]` body, not the legacy `prompt` shape)
 - `POST /v1/embeddings` - Text embeddings (`client.embeddings.create`); routes to the embeddings-capable provider (OpenAI). Returns float vectors regardless of the requested `encoding_format`.
+- `POST /v1/responses` - OpenAI **Responses API** (`client.responses.create`), the default surface in the current OpenAI SDK. Translated at the boundary (input items/string → messages, `output[]`/`output_text` ← response, typed `response.*` SSE events) and run through the same pipeline, so it can be cost-routed to any provider.
 - `GET /v1/models` - List available models. **SDK-aware:** returns OpenAI `{object:"list", data:[…]}` by default, or Anthropic's `{data:[{type:"model",…}]}` shape (Anthropic-owned models only) when the caller sends `anthropic-version` (the Anthropic SDK).
 - `GET /v1/models/{model}` - Retrieve a single model (also SDK-aware)
 
 ### Anthropic-compatible
 - `POST /v1/messages` - Native Anthropic Messages API (top-level `system`, required `max_tokens`, `content` block arrays, native named-event SSE streaming). Translated at the boundary and run through the same pipeline, so a `/v1/messages` request can still be cost-routed to any provider.
+- `POST /v1/messages/count_tokens` - Anthropic `client.messages.count_tokens()`; returns `{"input_tokens": N}` from the vendor's exact count endpoint (Anthropic provider). `max_tokens` not required.
 
 > Note: there are **no** `/v1/openai/*` or `/v1/anthropic/*` raw passthrough routes — requests are parsed, scanned, routed, and re-serialized, never reverse-proxied verbatim.
 

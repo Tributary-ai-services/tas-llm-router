@@ -53,3 +53,11 @@ type EmbeddingProvider interface {
 	LLMProvider
 	Embeddings(ctx context.Context, req *types.EmbeddingRequest) (*types.EmbeddingResponse, error)
 }
+
+// TokenCounter is implemented by providers that expose an exact token-count
+// endpoint (Anthropic). The server type-asserts for it to serve
+// POST /v1/messages/count_tokens.
+type TokenCounter interface {
+	LLMProvider
+	CountTokens(ctx context.Context, req *types.ChatRequest) (int, error)
+}
