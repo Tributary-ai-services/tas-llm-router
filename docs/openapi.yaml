@@ -158,8 +158,17 @@ paths:
 
   /v1/messages:
     post:
-      summary: Create Anthropic-compatible message
-      description: Creates a message response compatible with Anthropic's API format.
+      summary: Create Anthropic-compatible message (native Messages API)
+      description: >
+        Native Anthropic Messages API. Accepts the Anthropic wire shape
+        (top-level `system`, required `max_tokens`, `content` block arrays,
+        Anthropic-shaped `tools`/`tool_choice`) and returns a native Anthropic
+        message object (`{type:"message", content:[…], stop_reason, usage:{input_tokens,output_tokens}}`).
+        With `"stream": true` the response is Anthropic's named-event SSE stream
+        (`message_start` / `content_block_delta` / `message_delta` / `message_stop`).
+        The request is translated at the boundary and run through the same
+        pipeline as chat completions, so it may still be cost-routed to any
+        provider. Point a stock Anthropic SDK's `base_url` here.
       tags:
         - Messages
       requestBody:
@@ -170,11 +179,54 @@ paths:
               $ref: '#/components/schemas/MessageRequest'
       responses:
         '200':
-          description: Successful message completion
+          description: Native Anthropic message object (non-streaming) or SSE stream (streaming)
+
+  /v1/models:
+    get:
+      summary: List models (OpenAI-compatible)
+      description: >
+        Lists every model declared by every configured provider, in OpenAI's
+        `{object:"list", data:[{id,object,created,owned_by}]}` shape. Supports a
+        stock OpenAI SDK's `client.models.list()`.
+      tags:
+        - Management
+      responses:
+        '200':
+          description: List of models
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ChatCompletionResponse'
+                type: object
+                properties:
+                  object:
+                    type: string
+                    example: list
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Model'
+
+  /v1/models/{model}:
+    get:
+      summary: Retrieve a model (OpenAI-compatible)
+      description: Returns a single model object, or 404 if no provider offers it.
+      tags:
+        - Management
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Model object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '404':
+          description: Model not found
 
   /v1/providers:
     get:
@@ -963,6 +1015,28 @@ components:
           type: number
           minimum: 0
           maximum: 1
+
+    Model:
+      type: object
+      description: OpenAI-compatible model object returned by /v1/models.
+      required:
+        - id
+        - object
+        - owned_by
+      properties:
+        id:
+          type: string
+          example: gpt-4
+        object:
+          type: string
+          example: model
+        created:
+          type: integer
+          format: int64
+          description: Creation epoch; 0 when unknown.
+        owned_by:
+          type: string
+          example: openai
 
     ProvidersResponse:
       type: object

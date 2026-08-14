@@ -135,6 +135,38 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	tasAuth := r.Header.Get("TAS-Auth")
 	customerAuth := r.Header.Get("Authorization")
 
+	// Native-SDK auth (Design 1): a stock OpenAI/Anthropic SDK can only
+	// populate its provider's native credential slot — Authorization: Bearer
+	// (OpenAI SDK) or x-api-key (Anthropic SDK) — and has no way to set the
+	// custom TAS-Auth header. When TAS-Auth is absent but one of those slots
+	// carries OUR gateway token (the distinctive `tas_qg_live_` prefix), lift
+	// it into TAS-Auth so the rest of the Path A chain resolves it exactly as
+	// if the customer had sent TAS-Auth. The prefix gate is what keeps this
+	// unambiguous: a real BYOK vendor key (sk-…, sk-ant-…) never matches, so
+	// it falls through untouched. This is what makes
+	//   OpenAI(api_key="tas_qg_live_…", base_url="<gw>/v1")
+	//   Anthropic(api_key="tas_qg_live_…", base_url="<gw>")
+	// work with no custom headers. Power users who instead put a real vendor
+	// key in the native slot set TAS-Auth explicitly (Design 2) and never hit
+	// this path.
+	if tasAuth == "" {
+		if tok, from := recoverGatewayToken(r); tok != "" {
+			r.Header.Set("TAS-Auth", tok)
+			tasAuth = tok
+			// The native slot held only our gateway token (Design 1), not an
+			// upstream vendor key — clear it so the tas_qg_live_ secret is
+			// never forwarded to the vendor. The effective upstream key is
+			// selected later by applyBYOKKey (stored credential → shared key).
+			switch from {
+			case tokenFromAuthorization:
+				r.Header.Del("Authorization")
+				customerAuth = ""
+			case tokenFromXAPIKey:
+				r.Header.Del("X-Api-Key")
+			}
+		}
+	}
+
 	// Case 1: no TAS-Auth. Either reject (strict ingress) or pass
 	// through untouched (internal ingress; preserves existing behavior).
 	if tasAuth == "" {
@@ -342,6 +374,46 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	defer instrumentation.StampComplete(ctx)
 
 	next.ServeHTTP(sw, r.WithContext(ctx))
+}
+
+// tokenSource names which native SDK credential slot a recovered gateway
+// token came from, so handleAIQG can clear exactly that slot.
+type tokenSource int
+
+const (
+	tokenFromNone          tokenSource = iota
+	tokenFromAuthorization             // OpenAI SDK: Authorization: Bearer <token>
+	tokenFromXAPIKey                   // Anthropic SDK: x-api-key: <token>
+)
+
+// recoverGatewayToken looks for the gateway token (`tas_qg_live_*`) in a stock
+// SDK's native credential slot — `Authorization: Bearer <token>` (OpenAI SDK)
+// or `x-api-key: <token>` (Anthropic SDK) — and reports which slot it came
+// from. Returns ("", tokenFromNone) when neither slot carries our prefix.
+//
+// The prefix gate is load-bearing: a real vendor key in these slots (sk-…,
+// sk-ant-…) does NOT start with `tas_qg_live_`, so it is not mistaken for our
+// token and is left in place for downstream (BYOK) handling. Authorization is
+// checked before x-api-key; a request that (unusually) carries our token in
+// both resolves from Authorization.
+func recoverGatewayToken(r *http.Request) (string, tokenSource) {
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); auth != "" {
+		tok := auth
+		// Strip an optional "Bearer " scheme (what the OpenAI SDK sends);
+		// also accept a bare token for hand-rolled clients.
+		if len(auth) >= 7 && strings.EqualFold(auth[:7], "Bearer ") {
+			tok = strings.TrimSpace(auth[7:])
+		}
+		if strings.HasPrefix(tok, authTokenPrefix) {
+			return tok, tokenFromAuthorization
+		}
+	}
+	if xk := strings.TrimSpace(r.Header.Get("X-Api-Key")); xk != "" {
+		if strings.HasPrefix(xk, authTokenPrefix) {
+			return xk, tokenFromXAPIKey
+		}
+	}
+	return "", tokenFromNone
 }
 
 // probePromptCache measures vendor prompt-cache opportunity for one request

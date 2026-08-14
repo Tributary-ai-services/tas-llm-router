@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -647,6 +648,11 @@ func (s *Server) setupRoutes() *mux.Router {
 	// Anthropic compatible endpoints
 	api.Handle("/messages", wrapAIQG(s.handleMessages)).Methods("POST")
 
+	// OpenAI-compatible model discovery (client.models.list()/retrieve()).
+	// Unwrapped, like /providers — provider metadata, no TAS-* auth needed.
+	api.HandleFunc("/models", s.handleListModels).Methods("GET")
+	api.HandleFunc("/models/{model}", s.handleGetModel).Methods("GET")
+
 	// Router management endpoints
 	api.HandleFunc("/providers", s.handleListProviders).Methods("GET")
 	api.HandleFunc("/providers/{name}", s.handleGetProvider).Methods("GET")
@@ -702,7 +708,15 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+		// Include the AIQG gateway auth header (TAS-Auth) and Anthropic's
+		// native headers (x-api-key, anthropic-version) so a browser-side
+		// OpenAI/Anthropic SDK pointed at the gateway can preflight-clear its
+		// credentials. TAS-* control headers are allowed for power users who
+		// set them via default_headers.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, TAS-Auth, anthropic-version, TAS-Upstream-Authorization, TAS-Source-App")
+		// Let browser clients read the routing-decision headers (moved off
+		// the SSE stream) and the AIQG response-event id.
+		w.Header().Set("Access-Control-Expose-Headers", "X-TAS-Router-Provider, X-TAS-Router-Model, X-TAS-Router-Request-Id, X-TAS-Router-Attempt-Count, X-TAS-Router-Fallback-Used, X-TAS-Router-Estimated-Cost, TAS-Response-Event-Id")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -821,13 +835,13 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.logger.WithError(err).WithField("request_id", req.ID).Error("Inbound scan failed")
 			if !s.gatekeeperConfig.FailOpen {
-				s.writeErrorResponse(w, http.StatusInternalServerError, "content scan failed")
+				s.writeErrorCtx(w, r, http.StatusInternalServerError, "content scan failed")
 				return
 			}
 		} else if s.gatekeeper.ShouldBlock(result, "inbound") {
 			msg := gatekeeper.FormatBlockMessage(result, "Inbound")
 			s.logger.WithField("request_id", req.ID).Warn(msg)
-			s.writeErrorResponse(w, http.StatusForbidden, "request blocked by content policy")
+			s.writeErrorCtx(w, r, http.StatusForbidden, "request blocked by content policy")
 			return
 		}
 
@@ -946,7 +960,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// Route the request
 	metadata, provider, err := s.router.Route(r.Context(), &req)
 	if err != nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, fmt.Sprintf("Routing failed: %v", err))
+		s.writeErrorCtx(w, r, http.StatusServiceUnavailable, fmt.Sprintf("Routing failed: %v", err))
 		return
 	}
 
@@ -1039,7 +1053,7 @@ func (s *Server) applyBYOKKey(w http.ResponseWriter, r *http.Request, vendor str
 		middleware.StampCredentialSource(ctx, "tas_shared", "")
 		return r
 	}
-	s.writeErrorResponse(w, http.StatusPaymentRequired,
+	s.writeErrorCtx(w, r, http.StatusPaymentRequired,
 		fmt.Sprintf("provider_key_required: no stored %s credential for this account and shared-key fallback is disabled", vendor))
 	return nil
 }
@@ -1101,7 +1115,7 @@ func (s *Server) maybeServeFromCache(w http.ResponseWriter, r *http.Request, req
 		} else if ok {
 			// Stamp before writing: writeCachedResponse calls WriteHeader, which
 			// flushes headers, so X-TAS-Cache must be set inside it (before the flush).
-			if s.writeCachedResponse(w, entry) {
+			if s.writeCachedResponse(w, r, entry) {
 				middleware.StampCacheState(r.Context(), "hit")
 				// C2: record the avoided cost — what the vendor call would have billed,
 				// priced from the cached entry's token counts (docs/AIQG-CACHING.md §6).
@@ -1208,8 +1222,8 @@ func (s *Server) storeSemantic(r *http.Request, resp *types.ChatResponse) {
 // to a live vendor call. A hit deliberately does NOT stamp vendor token usage:
 // the vendor wasn't called, so cost/latency accounting stays ~0 (§6), and the
 // cache_state=hit split lets dashboards surface the saving explicitly.
-func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *responsecache.Entry) bool {
-	_, ok := writeRawCachedResponse(w, entry.Response, "hit")
+func (s *Server) writeCachedResponse(w http.ResponseWriter, r *http.Request, entry *responsecache.Entry) bool {
+	_, ok := writeRawCachedResponse(w, r, entry.Response, "hit")
 	return ok
 }
 
@@ -1218,7 +1232,7 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *responsecache
 // — the header must precede WriteHeader, which flushes headers). It returns the
 // decoded response (so the caller can read Usage for savings) and false when the
 // body can't be decoded, so the caller falls through to a live vendor call.
-func writeRawCachedResponse(w http.ResponseWriter, body []byte, cacheHeader string) (*types.ChatResponse, bool) {
+func writeRawCachedResponse(w http.ResponseWriter, r *http.Request, body []byte, cacheHeader string) (*types.ChatResponse, bool) {
 	var resp types.ChatResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, false
@@ -1226,7 +1240,13 @@ func writeRawCachedResponse(w http.ResponseWriter, body []byte, cacheHeader stri
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-TAS-Cache", cacheHeader)
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(&resp)
+	// Render in the request's wire shape — a /v1/messages hit must serve a
+	// native Anthropic message, not the stored OpenAI-shaped body.
+	if r != nil && responseFormatFromContext(r.Context()) == responseFormatAnthropic {
+		_ = json.NewEncoder(w).Encode(chatResponseToAnthropic(&resp))
+	} else {
+		_ = json.NewEncoder(w).Encode(&resp)
+	}
 	return &resp, true
 }
 
@@ -1259,7 +1279,7 @@ func (s *Server) maybeServeSemantic(w http.ResponseWriter, r *http.Request, req 
 		s.enqueueForJudge(scope, prompt, out, cc)
 		return false
 	}
-	resp, ok := writeRawCachedResponse(w, out.Entry.Response, semcache.StateSemanticHit)
+	resp, ok := writeRawCachedResponse(w, r, out.Entry.Response, semcache.StateSemanticHit)
 	if !ok {
 		return false // corrupt entry → fall through to a live call
 	}
@@ -1306,19 +1326,16 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	s.handleChatCompletion(w, r)
 }
 
-// handleMessages handles Anthropic-compatible message requests
-func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
-	// For now, treat as chat completion
-	// In production, you'd implement Anthropic-specific handling
-	s.handleChatCompletion(w, r)
-}
+// handleMessages (Anthropic Messages API) is implemented in
+// anthropic_messages.go — it translates the native Anthropic request/response
+// wire shapes at the boundary and reuses the shared completion pipeline.
 
 // handleNonStreamingCompletion handles non-streaming chat completions
 func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, provider providers.LLMProvider, metadata *types.RouterMetadata) {
 	resp, err := provider.ChatCompletion(r.Context(), req)
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("Chat completion failed")
-		s.writeErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
+		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
 		return
 	}
 
@@ -1348,9 +1365,37 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 		resp.RouterMetadata = metadata
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	s.writeChatResponse(w, r, resp)
+}
+
+// setRouterMetadataHeaders publishes the router's routing decision as
+// X-TAS-Router-* response headers. This replaces the historical practice of
+// injecting a synthetic first SSE chunk carrying router_metadata, which broke
+// strict OpenAI SDK stream parsers: that chunk serialized "choices":null plus
+// an unexpected router_metadata field. Any TAS client that wants the routing
+// decision reads these headers; a stock OpenAI/Anthropic SDK ignores them and
+// sees a clean, spec-faithful stream. Must be called before WriteHeader.
+func setRouterMetadataHeaders(w http.ResponseWriter, metadata *types.RouterMetadata) {
+	if metadata == nil {
+		return
+	}
+	h := w.Header()
+	if metadata.Provider != "" {
+		h.Set("X-TAS-Router-Provider", metadata.Provider)
+	}
+	if metadata.Model != "" {
+		h.Set("X-TAS-Router-Model", metadata.Model)
+	}
+	if metadata.RequestID != "" {
+		h.Set("X-TAS-Router-Request-Id", metadata.RequestID)
+	}
+	h.Set("X-TAS-Router-Attempt-Count", strconv.Itoa(metadata.AttemptCount))
+	if metadata.FallbackUsed {
+		h.Set("X-TAS-Router-Fallback-Used", "true")
+	}
+	if metadata.EstimatedCost > 0 {
+		h.Set("X-TAS-Router-Estimated-Cost", strconv.FormatFloat(metadata.EstimatedCost, 'f', -1, 64))
+	}
 }
 
 // handleStreamingCompletion handles streaming chat completions
@@ -1363,12 +1408,6 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Set up SSE headers
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
 	// AIQG: stamp the routing-layer retry metadata (drives the MVP
 	// Reliability score). For streaming the metadata is fixed at this
 	// point — the retry chain ran fully before StreamCompletion was
@@ -1377,27 +1416,23 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
 	}
 
-	// Send routing metadata as first chunk
-	metadataChunk := &types.ChatChunk{
-		ID:             req.ID,
-		Object:         "chat.completion.chunk",
-		Created:        time.Now().Unix(),
-		Model:          req.Model,
-		RouterMetadata: metadata,
-	}
+	// Publish the routing decision as X-TAS-Router-* response headers instead
+	// of a synthetic first SSE chunk (which broke strict OpenAI SDK stream
+	// parsers). Must be set before WriteHeader.
+	setRouterMetadataHeaders(w, metadata)
 
-	data, _ := json.Marshal(metadataChunk)
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	w.(http.Flusher).Flush()
+	// Set up SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
 
-	// Stream chunks
+	// Stream chunks through the wire-format encoder selected by the request
+	// context (OpenAI `data:`/[DONE] SSE by default, native Anthropic
+	// named-event SSE for /v1/messages). Token-usage + finish_reason stamping
+	// stays here so both formats feed the AIQG event pipeline identically.
+	enc := s.newStreamEncoder(w, r, req)
 	for chunk := range chunks {
-		// AIQG: stamp vendor token usage + finish_reason from the
-		// final chunk. OpenAI emits Usage on the last chunk when
-		// stream_options.include_usage is set; Anthropic carries it
-		// in message_delta. FinishReason lives on the per-choice
-		// delta typically on the second-to-last chunk. Both stampers
-		// are first-write-wins so safe to call on every chunk.
 		if chunk.Usage != nil {
 			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
 		}
@@ -1407,20 +1442,9 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 				break
 			}
 		}
-
-		data, err := json.Marshal(chunk)
-		if err != nil {
-			s.logger.WithError(err).Error("Failed to marshal chunk")
-			continue
-		}
-
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		w.(http.Flusher).Flush()
+		enc.writeChunk(chunk)
 	}
-
-	// Send final chunk
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.(http.Flusher).Flush()
+	enc.done()
 }
 
 // handleNonStreamingCompletionWithRetry handles non-streaming completions with retry/fallback
@@ -1432,7 +1456,7 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	resp, err = s.attemptCompletionWithRetryAndFallback(r.Context(), req, initialProvider, metadata)
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("All completion attempts failed")
-		s.writeErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
+		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
 		return
 	}
 
@@ -1451,13 +1475,13 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 			if scanErr != nil {
 				s.logger.WithError(scanErr).WithField("request_id", req.ID).Error("Outbound scan failed")
 				if !s.gatekeeperConfig.FailOpen {
-					s.writeErrorResponse(w, http.StatusInternalServerError, "response content scan failed")
+					s.writeErrorCtx(w, r, http.StatusInternalServerError, "response content scan failed")
 					return
 				}
 			} else if s.gatekeeper.ShouldBlock(result, "outbound") {
 				msg := gatekeeper.FormatBlockMessage(result, "Outbound")
 				s.logger.WithField("request_id", req.ID).Warn(msg)
-				s.writeErrorResponse(w, http.StatusForbidden, "response blocked by content policy")
+				s.writeErrorCtx(w, r, http.StatusForbidden, "response blocked by content policy")
 				return
 			}
 
@@ -1520,9 +1544,7 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	// Add routing metadata to response
 	resp.RouterMetadata = metadata
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	s.writeChatResponse(w, r, resp)
 }
 
 // maybeStoreInCache persists a produced response under the key stamped at lookup
@@ -1954,15 +1976,9 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 	chunks, err = s.attemptStreamingWithFallback(r.Context(), req, initialProvider, metadata)
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("All streaming attempts failed")
-		s.writeErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Streaming failed: %v", err))
+		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Streaming failed: %v", err))
 		return
 	}
-
-	// Set up SSE headers
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
 
 	// AIQG: stamp the routing-layer retry metadata (drives the MVP
 	// Reliability score). For streaming the metadata is fixed at this
@@ -1972,27 +1988,23 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 		middleware.StampRetryMetadata(r.Context(), metadata.AttemptCount, metadata.FallbackUsed)
 	}
 
-	// Send routing metadata as first chunk
-	metadataChunk := &types.ChatChunk{
-		ID:             req.ID,
-		Object:         "chat.completion.chunk",
-		Created:        time.Now().Unix(),
-		Model:          req.Model,
-		RouterMetadata: metadata,
-	}
+	// Publish the routing decision as X-TAS-Router-* response headers instead
+	// of a synthetic first SSE chunk (which broke strict OpenAI SDK stream
+	// parsers). Must be set before WriteHeader.
+	setRouterMetadataHeaders(w, metadata)
 
-	data, _ := json.Marshal(metadataChunk)
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	w.(http.Flusher).Flush()
+	// Set up SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
 
-	// Stream chunks
+	// Stream chunks through the wire-format encoder selected by the request
+	// context (OpenAI `data:`/[DONE] SSE by default, native Anthropic
+	// named-event SSE for /v1/messages). Token-usage + finish_reason stamping
+	// stays here so both formats feed the AIQG event pipeline identically.
+	enc := s.newStreamEncoder(w, r, req)
 	for chunk := range chunks {
-		// AIQG: stamp vendor token usage + finish_reason from the
-		// final chunk. OpenAI emits Usage on the last chunk when
-		// stream_options.include_usage is set; Anthropic carries it
-		// in message_delta. FinishReason lives on the per-choice
-		// delta typically on the second-to-last chunk. Both stampers
-		// are first-write-wins so safe to call on every chunk.
 		if chunk.Usage != nil {
 			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
 		}
@@ -2002,20 +2014,9 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 				break
 			}
 		}
-
-		data, err := json.Marshal(chunk)
-		if err != nil {
-			s.logger.WithError(err).Error("Failed to marshal chunk")
-			continue
-		}
-
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		w.(http.Flusher).Flush()
+		enc.writeChunk(chunk)
 	}
-
-	// Send final chunk
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.(http.Flusher).Flush()
+	enc.done()
 }
 
 // attemptCompletionWithRetryAndFallback performs completion with retry and fallback logic
@@ -2250,6 +2251,72 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleListModels implements the OpenAI-compatible GET /v1/models endpoint so
+// a stock OpenAI SDK's client.models.list() works against the gateway. It
+// enumerates every model declared by every configured provider's capabilities,
+// dedupes by id, and returns them in OpenAI's {object:"list", data:[…]} shape.
+// Not wrapped in AIQG middleware — it's provider metadata, like /v1/providers.
+func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	caps := s.router.GetCapabilities()
+
+	// Stable, deterministic output: sort providers, then models, dedupe by id.
+	provNames := make([]string, 0, len(caps))
+	for name := range caps {
+		provNames = append(provNames, name)
+	}
+	sort.Strings(provNames)
+
+	seen := make(map[string]struct{})
+	list := types.OpenAIModelList{Object: "list", Data: []types.OpenAIModel{}}
+	for _, pName := range provNames {
+		pc := caps[pName]
+		owner := pc.ProviderName
+		if owner == "" {
+			owner = pName
+		}
+		models := append([]types.ModelInfo(nil), pc.SupportedModels...)
+		sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
+		for _, m := range models {
+			if m.Name == "" {
+				continue
+			}
+			if _, dup := seen[m.Name]; dup {
+				continue
+			}
+			seen[m.Name] = struct{}{}
+			list.Data = append(list.Data, types.OpenAIModel{
+				ID:      m.Name,
+				Object:  "model",
+				OwnedBy: owner,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+// handleGetModel implements the OpenAI-compatible GET /v1/models/{model}
+// retrieve endpoint. Returns the first provider that declares the model, in
+// OpenAI's model object shape; 404 when no provider offers it.
+func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["model"]
+	for pName, pc := range s.router.GetCapabilities() {
+		owner := pc.ProviderName
+		if owner == "" {
+			owner = pName
+		}
+		for _, m := range pc.SupportedModels {
+			if m.Name == id {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(types.OpenAIModel{ID: m.Name, Object: "model", OwnedBy: owner})
+				return
+			}
+		}
+	}
+	s.writeErrorResponse(w, http.StatusNotFound, fmt.Sprintf("Model %s not found", id))
 }
 
 // handleGetProvider gets information about a specific provider

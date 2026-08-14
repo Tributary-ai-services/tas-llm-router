@@ -198,6 +198,24 @@ curl -X POST http://localhost:8080/v1/messages \
 - `claude-3-haiku-20240307` - Claude 3 Haiku
 - `claude-instant-1.2` - Claude Instant
 
+## Authentication (AIQG gateway)
+
+The customer-facing gateway authenticates on your **gateway token** (`tas_qg_live_…`),
+issued in the AIQG dashboard. There are two ways to pass it from a stock SDK:
+
+- **Default — token as `api_key`, provider key in the vault.** Store your provider
+  (BYOK) key once in the encrypted vault, then use the gateway token as your SDK
+  `api_key`. The gateway recognizes it by the `tas_qg_live_` prefix (in
+  `Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic), resolves your
+  account, and injects your stored provider key upstream (falling back to the
+  shared key only if your account allows it). This is the zero-extra-headers path
+  used in the examples below.
+- **Power users — real vendor key as `api_key`, token in a header.** Send your real
+  provider key as `api_key` and set `default_headers={"TAS-Auth": "tas_qg_live_…"}`.
+
+Replace `"your-api-key"` in the examples with your `tas_qg_live_…` token (default)
+or your real provider key + `TAS-Auth` header (power-user).
+
 ## Examples
 
 ### Using with OpenAI SDK (Python)
