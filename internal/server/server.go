@@ -246,18 +246,25 @@ type AIQGResponseCacheConfig struct {
 // AIQGSemCacheConfig configures the C4 semantic cache. Runs on the C1 exact-miss
 // path (L0→L1). Mirrors config.AIQGSemCacheConfig.
 type AIQGSemCacheConfig struct {
-	Enabled         bool          `yaml:"enabled"`
-	Shadow          bool          `yaml:"shadow"`         // log would-hit, serve nothing (S1)
-	MinSimilarity   float64       `yaml:"min_similarity"` // L1 candidate floor (cosine)
-	TTL             time.Duration `yaml:"ttl"`
-	RedisURL        string        `yaml:"redis_url"`         // redis-semcache (redis-stack)
-	OllamaURL       string        `yaml:"ollama_url"`        // embeddings server
-	EmbedModel      string        `yaml:"embed_model"`       // all-minilm
-	Dim             int           `yaml:"dim"`               // 384
-	JudgeDailyUSD   float64       `yaml:"judge_daily_usd"`   // L3 judge daily $ cap (§14.1); 0 = unlimited
-	JudgeEnabled    bool          `yaml:"judge_enabled"`     // L3 async judge on (opt-in opex)
-	JudgeModel      string        `yaml:"judge_model"`       // grader model; empty → AIQG JudgeModel
-	JudgeSampleRate float64       `yaml:"judge_sample_rate"` // fraction of eligible lookups graded
+	Enabled       bool          `yaml:"enabled"`
+	Shadow        bool          `yaml:"shadow"`         // log would-hit, serve nothing (S1)
+	MinSimilarity float64       `yaml:"min_similarity"` // L1 candidate floor (cosine)
+	TTL           time.Duration `yaml:"ttl"`
+	RedisURL      string        `yaml:"redis_url"`   // redis-semcache (redis-stack)
+	OllamaURL     string        `yaml:"ollama_url"`  // embeddings server
+	EmbedModel    string        `yaml:"embed_model"` // all-minilm
+	Dim           int           `yaml:"dim"`         // 384
+	// EmbedProvider selects the L1 backend: "ollama" (default) or "tei". TEI
+	// serves langcache-embed-v3-small (§6), which Ollama cannot serve at all.
+	// ⚠️ Both are 384-dim, so switching does NOT invalidate stored vectors and
+	// the store will silently compare across models — flush aiqg:scache:* on
+	// cutover (neither the key nor Scope identifies the embedder).
+	EmbedProvider   string  `yaml:"embed_provider"`
+	TEIURL          string  `yaml:"tei_url"`           // TEI base URL when EmbedProvider="tei"
+	JudgeDailyUSD   float64 `yaml:"judge_daily_usd"`   // L3 judge daily $ cap (§14.1); 0 = unlimited
+	JudgeEnabled    bool    `yaml:"judge_enabled"`     // L3 async judge on (opt-in opex)
+	JudgeModel      string  `yaml:"judge_model"`       // grader model; empty → AIQG JudgeModel
+	JudgeSampleRate float64 `yaml:"judge_sample_rate"` // fraction of eligible lookups graded
 }
 
 // AIQGKafkaConfig configures the Kafka emitter. Brokers + topic are
@@ -445,7 +452,23 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				if ierr := store.EnsureIndex(context.Background()); ierr != nil {
 					logger.WithError(ierr).Warn("AIQG semantic cache: FT.CREATE failed; semantic cache disabled")
 				} else {
-					embed := semcache.NewOllamaEmbedder(config.AIQG.SemCache.OllamaURL, config.AIQG.SemCache.EmbedModel, dim)
+					// L1 embedding backend. Default stays Ollama so this is a
+					// no-op upgrade; "tei" selects the TEI path that serves
+					// langcache-embed-v3-small (§6 — the model chosen for cache
+					// matching, which Ollama cannot serve).
+					var embed semcache.Embedder
+					if strings.EqualFold(config.AIQG.SemCache.EmbedProvider, "tei") {
+						teiURL := config.AIQG.SemCache.TEIURL
+						if teiURL == "" {
+							logger.Warn("AIQG semantic cache: embed_provider=tei but tei_url is empty; falling back to Ollama")
+							embed = semcache.NewOllamaEmbedder(config.AIQG.SemCache.OllamaURL, config.AIQG.SemCache.EmbedModel, dim)
+						} else {
+							logger.WithField("tei_url", teiURL).Info("AIQG semantic cache: using TEI embedder")
+							embed = semcache.NewTEIEmbedder(teiURL, dim)
+						}
+					} else {
+						embed = semcache.NewOllamaEmbedder(config.AIQG.SemCache.OllamaURL, config.AIQG.SemCache.EmbedModel, dim)
+					}
 					server.semCache = semcache.New(semcache.Config{
 						Enabled:       true,
 						Shadow:        config.AIQG.SemCache.Shadow,

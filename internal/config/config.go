@@ -115,6 +115,20 @@ type AIQGSemCacheConfig struct {
 	OllamaURL     string        `yaml:"ollama_url"`
 	EmbedModel    string        `yaml:"embed_model"`
 	Dim           int           `yaml:"dim"`
+	// EmbedProvider selects the L1 embedding backend: "ollama" (default,
+	// backwards-compatible) or "tei". TEI serves redis/langcache-embed-v3-small,
+	// which is purpose-trained for cache matching and is the model chosen in
+	// docs/AIQG-SEMANTIC-CACHING.md §6; Ollama cannot serve it at all (not
+	// GGUF/llama.cpp-compatible). Env AIQG_SEMCACHE_EMBED_PROVIDER.
+	//
+	// ⚠️ Switching providers does NOT invalidate stored vectors. langcache is
+	// also 384-dim, so the index accepts both and will silently compare
+	// all-minilm vectors against langcache vectors — neither the cache key nor
+	// Scope identifies the embedder. Flush aiqg:scache:* on cutover.
+	EmbedProvider string `yaml:"embed_provider"`
+	// TEIURL is the TEI base URL (e.g. http://tei.tas-shared:8080). Only used
+	// when EmbedProvider is "tei". Env AIQG_SEMCACHE_TEI_URL.
+	TEIURL string `yaml:"tei_url"`
 	// JudgeDailyUSD caps the L3 async judge's spend per UTC day (§14.1 — judge
 	// tokens are recurring opex). Default 0.50; 0 (or negative) means unlimited.
 	// When the day's cap is reached the judge stops grading until UTC midnight.
@@ -670,6 +684,12 @@ func (c *Config) loadFromEnv() {
 	if v := os.Getenv("AIQG_SEMCACHE_EMBED_MODEL"); v != "" {
 		c.AIQG.SemCache.EmbedModel = v
 	}
+	if v := os.Getenv("AIQG_SEMCACHE_EMBED_PROVIDER"); v != "" {
+		c.AIQG.SemCache.EmbedProvider = v
+	}
+	if v := os.Getenv("AIQG_SEMCACHE_TEI_URL"); v != "" {
+		c.AIQG.SemCache.TEIURL = v
+	}
 	if v := os.Getenv("AIQG_SEMCACHE_DIM"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.AIQG.SemCache.Dim = n
@@ -901,14 +921,16 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			InExperiments:         c.AIQG.ResponseCache.InExperiments,
 		},
 		SemCache: server.AIQGSemCacheConfig{
-			Enabled:       c.AIQG.SemCache.Enabled,
-			Shadow:        c.AIQG.SemCache.Shadow,
-			MinSimilarity: c.AIQG.SemCache.MinSimilarity,
-			TTL:           c.AIQG.SemCache.TTL,
-			RedisURL:      c.AIQG.SemCache.RedisURL,
-			OllamaURL:     c.AIQG.SemCache.OllamaURL,
+			Enabled:         c.AIQG.SemCache.Enabled,
+			Shadow:          c.AIQG.SemCache.Shadow,
+			MinSimilarity:   c.AIQG.SemCache.MinSimilarity,
+			TTL:             c.AIQG.SemCache.TTL,
+			RedisURL:        c.AIQG.SemCache.RedisURL,
+			OllamaURL:       c.AIQG.SemCache.OllamaURL,
 			EmbedModel:      c.AIQG.SemCache.EmbedModel,
 			Dim:             c.AIQG.SemCache.Dim,
+			EmbedProvider:   c.AIQG.SemCache.EmbedProvider,
+			TEIURL:          c.AIQG.SemCache.TEIURL,
 			JudgeDailyUSD:   c.AIQG.SemCache.JudgeDailyUSD,
 			JudgeEnabled:    c.AIQG.SemCache.JudgeEnabled,
 			JudgeModel:      c.AIQG.SemCache.JudgeModel,
