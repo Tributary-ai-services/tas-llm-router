@@ -110,7 +110,14 @@ var flowCatalog = []demoFlow{
 			{stepParaphrase, "What's the process for resetting my VPN cert?", "Same intent, different wording: C4 semantic hit."},
 			{stepParaphrase, "How can I reset the VPN certificate on my laptop?", "Still the same answer: C4 semantic hit."},
 			{stepProbe, "How do I reset my VPN certificate under the 2024 access policy?", "Near-miss with a date. MUST miss — L2 entity_number_date guard."},
-			{stepProbe, "How do I avoid resetting my VPN certificate?", "Negated intent. MUST miss — L2 negation-parity guard."},
+			// Uses the literal word "not": negationParity counts only
+			// not/no/never/without/cannot/none/nor/neither/nothing and "n't".
+			// Lexical negations like "avoid"/"prevent"/"disable"/"skip" are NOT
+			// covered, so a probe phrased that way would clear both L2 guards
+			// (same discriminative token set — VPN — in each) and fall through
+			// to raw similarity. Keep this probe on a word the guard actually
+			// knows, so the assertion tests the mechanism it names.
+			{stepProbe, "How do I make sure I do not reset my VPN certificate?", "Negated intent. MUST miss — L2 negation-parity guard."},
 		},
 	},
 
