@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,7 +123,16 @@ func TestLiveThresholdCalibration(t *testing.T) {
 	// on both sides rather than a query/document split.
 	prefix := os.Getenv("AIQG_CALIBRATION_EMBED_PREFIX")
 
-	emb := NewOllamaEmbedder(base, model, dim)
+	// Provider switch mirrors the gateway's AIQG_SEMCACHE_EMBED_PROVIDER, so the
+	// sweep measures the same code path production would run. TEI pins its model
+	// via --model-id, so AIQG_CALIBRATION_EMBED_MODEL is ignored there.
+	var emb Embedder
+	if strings.EqualFold(os.Getenv("AIQG_CALIBRATION_EMBED_PROVIDER"), "tei") {
+		emb = NewTEIEmbedder(base, dim)
+		model = "(tei: " + model + ")"
+	} else {
+		emb = NewOllamaEmbedder(base, model, dim)
+	}
 
 	// Embed every unique text once.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
