@@ -53,23 +53,60 @@ type chatRequest struct {
 	Model     string        `json:"model"`
 	Messages  []chatMessage `json:"messages"`
 	MaxTokens int           `json:"max_tokens"`
+	// Temperature and Seed are pointers so that temperature=0 is actually
+	// transmitted instead of being dropped by omitempty. This matters more
+	// than it looks: responsecache.Decide treats a request with neither an
+	// explicit seed nor temperature==0 as nondeterministic and refuses to
+	// cache it, so before these fields existed NONE of this generator's
+	// traffic was ever eligible for C1 or C4.
+	Temperature *float64 `json:"temperature,omitempty"`
+	Seed        *int     `json:"seed,omitempty"`
+}
+
+// sendOpts is one outbound chat completion.
+type sendOpts struct {
+	Headers     map[string]string
+	Model       string
+	Prompt      string
+	MaxTokens   int
+	Temperature *float64
+	Seed        *int
+}
+
+// sendResult carries what the demo flows need to observe: the status and the
+// gateway's cache verdict (X-TAS-Cache: hit | semantic_hit | bypass; absent
+// on a miss).
+type sendResult struct {
+	Status     int
+	CacheState string
 }
 
 // send posts one chat completion with the given attribution headers and
 // returns the HTTP status code (0 on transport error). The response body
 // is drained and discarded — we only care that the gateway emitted an event.
 func (c *gatewayClient) send(ctx context.Context, headers map[string]string, model, prompt string, maxTokens int) (int, error) {
+	res, err := c.do(ctx, sendOpts{Headers: headers, Model: model, Prompt: prompt, MaxTokens: maxTokens})
+	return res.Status, err
+}
+
+// do posts one chat completion and returns the status plus the gateway's
+// cache verdict. The response body is drained and discarded — we only care
+// that the gateway emitted an event, and (for the demo flows) whether it
+// answered from cache.
+func (c *gatewayClient) do(ctx context.Context, o sendOpts) (sendResult, error) {
 	body, err := json.Marshal(chatRequest{
-		Model:     model,
-		Messages:  []chatMessage{{Role: "user", Content: prompt}},
-		MaxTokens: maxTokens,
+		Model:       o.Model,
+		Messages:    []chatMessage{{Role: "user", Content: o.Prompt}},
+		MaxTokens:   o.MaxTokens,
+		Temperature: o.Temperature,
+		Seed:        o.Seed,
 	})
 	if err != nil {
-		return 0, err
+		return sendResult{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return 0, err
+		return sendResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("TAS-Auth", c.Token)
@@ -81,18 +118,18 @@ func (c *gatewayClient) send(ctx context.Context, headers map[string]string, mod
 	// vendor key — a bogus "demo-traffic" value there yields a 401 from the
 	// vendor. Omitting it lets the gateway fall through to the TAS shared key.
 	req.Header.Set("Authorization", "Bearer demo-traffic")
-	for k, v := range headers {
+	for k, v := range o.Headers {
 		if v != "" {
 			req.Header.Set(k, v)
 		}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, err
+		return sendResult{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, nil
+	return sendResult{Status: resp.StatusCode, CacheState: resp.Header.Get("X-TAS-Cache")}, nil
 }
 
 // scenario is one of the 7 Quickstart test scenarios (mirrors the SCENARIOS

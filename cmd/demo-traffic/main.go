@@ -58,7 +58,10 @@ func main() {
 		spreadSec  = flag.Int("spread", 90, "seconds to spread a pass's events over, ending at now")
 		insecure   = flag.Bool("insecure", true, "skip TLS verification (TAS Loki uses the internal tas-ca-issuer CA)")
 
-		target     = flag.String("target", "loki", "loki | gateway | fingerprint-eval (untagged distinct-toolset personas → measure inferred attribution accuracy)")
+		target     = flag.String("target", "loki", "loki | gateway | flows (enterprise reduction/caching demo flows) | fingerprint-eval (untagged distinct-toolset personas → measure inferred attribution accuracy)")
+		flowIDs    = flag.String("flow", "", "comma-separated demo flow ids for --target=flows (default: all six). See --print-catalog")
+		printCat   = flag.Bool("print-catalog", false, "print the demo flow catalog as JSON and exit")
+		cacheBust  = flag.Bool("cache-bust", false, "append a per-run nonce to every prompt so --target=flows starts from a cold cache (otherwise a re-run inside the C1 TTL hits on everything, including the seed)")
 		gatewayURL = flag.String("gateway-url", "http://localhost:8086", "gateway base URL for --target=gateway (chat at /v1/chat/completions)")
 		token      = flag.String("token", os.Getenv("AIQG_TAS_AUTH_TOKEN"), "TAS-Auth gateway token for --target=gateway (or env AIQG_TAS_AUTH_TOKEN)")
 		model      = flag.String("model", "claude-haiku-4-5-20251001", "model for --target=gateway requests")
@@ -71,6 +74,11 @@ func main() {
 		errorRate      = flag.Float64("error-rate", 0.02, "fraction of events that failed upstream (vendor_error)")
 	)
 	flag.Parse()
+
+	if *printCat {
+		printCatalog()
+		return
+	}
 
 	s := *seed
 	if s == 0 {
@@ -105,6 +113,21 @@ func main() {
 		}
 		gc := newGatewayClient(*gatewayURL, *token, *model, *maxTokens, *insecure)
 		runGatewayTarget(ctx, g, r, gc, splitUsers(*usersCSV), *flowsPer, *interval, *dryRun)
+		return
+	}
+
+	// flows: the enterprise reduction/semantic-caching demo flows (Plan #16).
+	// Unlike --target=gateway, which round-robins one-shot scenarios for
+	// attribution coverage, these run ordered multi-step sequences where the
+	// sequence IS the demonstration (seed → paraphrase hits → near-miss
+	// probes that must be rejected).
+	if *target == "flows" {
+		if strings.TrimSpace(*token) == "" && !*dryRun {
+			fmt.Fprintln(os.Stderr, "error: --target=flows needs --token or AIQG_TAS_AUTH_TOKEN (set --dry-run to preview without a token)")
+			os.Exit(2)
+		}
+		gc := newGatewayClient(*gatewayURL, *token, *model, *maxTokens, *insecure)
+		runFlowsTarget(ctx, g, gc, splitFlowIDs(*flowIDs), splitUsers(*usersCSV), *interval, *cacheBust, *dryRun)
 		return
 	}
 
