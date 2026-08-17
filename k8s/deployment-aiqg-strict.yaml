@@ -97,6 +97,78 @@ spec:
           value: all-minilm
         - name: AIQG_EXTRACTION_MIN_CONTENT_SIZE
           value: "2000"
+        # SLM condensation step for the extractor. Routed at the vendor
+        # (claude-haiku) rather than a local GPU, so unlike the comment
+        # above this one IS enabled here.
+        - name: AIQG_EXTRACTION_SLM_ENABLED
+          value: "true"
+        - name: AIQG_EXTRACTION_SLM_PROVIDER
+          value: anthropic
+        - name: AIQG_EXTRACTION_SLM_MODEL
+          value: claude-haiku-4-5-20251001
+        - name: AIQG_EXTRACTION_SLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-router-secret
+              key: ANTHROPIC_API_KEY
+
+        # Gatekeeper inbound redaction. "replace" is a DETERMINISTIC
+        # strategy, which is what makes the redacted prompt byte-stable
+        # and therefore cache-safe — the C1 key is hashed over
+        # post-redaction messages.
+        - name: GATEKEEPER_REDACT_ENABLED
+          value: "true"
+        - name: GATEKEEPER_REDACT_STRATEGY
+          value: replace
+
+        # Flow/step linkage store.
+        - name: AIQG_LINKAGE_REDIS_URL
+          value: redis://redis-shared.tas-shared.svc.cluster.local:6379
+
+        # C1 exact-match response cache. Only caches deterministic,
+        # non-streaming, tool-free requests (responsecache.Decide).
+        - name: AIQG_RESPONSE_CACHE_ENABLED
+          value: "true"
+        - name: AIQG_RESPONSE_CACHE_TTL
+          value: 10m
+        - name: AIQG_RESPONSE_CACHE_IN_EXPERIMENTS
+          value: "true"
+
+        # C4 semantic response cache. SHADOW=true is the global default:
+        # candidates are logged but never served. Serving is a per-tenant
+        # opt-in via the aiqg.cache_config row (semantic.shadow=false),
+        # because a semantic hit is probabilistic and a wrong one is a
+        # correctness bug, not a slower response.
+        - name: AIQG_SEMCACHE_ENABLED
+          value: "true"
+        - name: AIQG_SEMCACHE_SHADOW
+          value: "true"
+        - name: AIQG_SEMCACHE_REDIS_URL
+          value: redis://redis-semcache.tas-shared.svc.cluster.local:6379
+        - name: AIQG_SEMCACHE_OLLAMA_URL
+          value: http://ollama.tas-shared:11434
+        - name: AIQG_SEMCACHE_EMBED_MODEL
+          value: all-minilm
+        - name: AIQG_SEMCACHE_DIM
+          value: "384"
+        # Raised 0.85 -> 0.87 on 2026-08-16. Calibration against this
+        # embedder (pkg/aiqg/semcache/calibrate_live_test.go) measured
+        # FPR 11.1% at 0.85: nuance-only near-misses such as
+        #   "renew my VPN certificate"   vs "reset my VPN certificate"   0.8695
+        #   "encrypt employee data at rest" vs "…customer data at rest"  0.8655
+        # carry no entity/number/date/negation difference, so every L2
+        # guard passes and this threshold is the ONLY defence. FPR
+        # reaches 0% at 0.87. Per-tenant cache_config may only TIGHTEN
+        # this, never loosen it. Re-calibrate before changing, and note
+        # all-minilm separates these classes poorly (separation -0.33) —
+        # a better embedder, not a lower threshold, is the way to raise
+        # hit rate.
+        - name: AIQG_SEMCACHE_MIN_SIMILARITY
+          value: "0.87"
+        - name: AIQG_SEMCACHE_TTL
+          value: 30m
+        - name: AIQG_SEMCACHE_JUDGE_ENABLED
+          value: "true"
 
         # tcpSocket (not httpGet /health) matches the live internal
         # Deployment pattern. The /health endpoint legitimately returns
