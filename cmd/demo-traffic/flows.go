@@ -154,11 +154,16 @@ var flowCatalog = []demoFlow{
 
 	// F4 — cache-only. Proves caching is not reduction in disguise.
 	//
-	// MEASURED 0% semantic hits against a modeled 65% (live run 2026-08-16).
-	// That gap is a real product finding, not a broken flow, and the prompts
-	// are deliberately left as-is rather than tuned to make the demo look
-	// better. Two independent L2 guards over-reject here, both confirmed
-	// directly against pkg/aiqg/semcache:
+	// This flow is what surfaced the L2 over-rejection bugs: it MEASURED 0%
+	// semantic hits against a modeled 65% (live run 2026-08-16). The prompts
+	// were deliberately left untuned rather than lowercased to make the demo
+	// look better, and the two guards were fixed instead — after which the
+	// same flow measures 67% against the same gateway.
+	//
+	// Keeping the history here because the prompts are shaped to exercise
+	// exactly those two guards, so this flow doubles as their regression test:
+	// if it drops back toward 0%, one of them has regressed. Both causes were
+	// confirmed directly against pkg/aiqg/semcache:
 	//
 	//  1. discriminativeTokens() only exempts a capital at index 0 of the
 	//     whole prompt, so a word that merely OPENS A QUOTED STRING is read as
@@ -169,14 +174,15 @@ var flowCatalog = []demoFlow{
 	//  2. negationParity() counts "can't" but not "unable", so two phrasings
 	//     with identical meaning get parity 1 vs 0 and are rejected.
 	//
-	// Both fail in the SAFE direction (no wrong answers), but they zero out
-	// the hit rate on quoted user content — ticket text, email subjects, log
-	// lines — which is exactly the classification workload semantic caching
-	// is supposed to be strongest on.
+	// Both failed in the SAFE direction (no wrong answers), but between them
+	// they zeroed the hit rate on quoted user content — ticket text, email
+	// subjects, log lines — which is exactly the classification workload
+	// semantic caching is supposed to be strongest on. Fixed in
+	// pkg/aiqg/semcache/verify.go (positionalCapitalSites + isNegationWord).
 	{
 		ID:          "ticket-triage",
 		Label:       "Ticket triage / routing",
-		WhatItShows: "Caching ONLY. Inputs are short so there is essentially nothing to reduce, but they are near-duplicates of each other — the classic high-hit-rate, tight-threshold classification case. Currently measures 0% live: two L2 guards over-reject on capitalized words inside quoted ticket text.",
+		WhatItShows: "Caching ONLY. Inputs are short so there is essentially nothing to reduce, but they are near-duplicates of each other — the classic high-hit-rate, tight-threshold classification case.",
 		Model:       "claude-haiku-4-5-20251001", MaxTokens: 64, Temperature: zeroTemp,
 		ExpectedReductionPct: 2, ExpectedCacheHitPct: 65,
 		Steps: []flowStep{
