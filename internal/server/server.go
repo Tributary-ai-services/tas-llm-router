@@ -561,8 +561,17 @@ func (s *Server) Start() error {
 	r := s.setupRoutes()
 
 	s.httpServer = &http.Server{
-		Addr:           ":" + s.config.Port,
-		Handler:        r,
+		Addr: ":" + s.config.Port,
+		// CORS wraps the ROUTER, not individual routes. gorilla/mux's r.Use()
+		// only runs middleware on MATCHED routes, and the completion routes are
+		// registered POST-only — so a browser's OPTIONS preflight fell through
+		// to the 404 handler with no CORS headers at all, and every
+		// cross-origin request from a browser was blocked before it was ever
+		// sent. (Verified against production: OPTIONS /v1/chat/completions
+		// returned 404 with no Access-Control-* headers, and the aiqg gateway
+		// ingress carries no CORS annotations either.) Wrapping here means
+		// preflight is answered for every path, matched or not.
+		Handler:        s.corsMiddleware(r),
 		ReadTimeout:    s.config.ReadTimeout,
 		WriteTimeout:   s.config.WriteTimeout,
 		MaxHeaderBytes: s.config.MaxHeaderBytes,
@@ -624,7 +633,9 @@ func (s *Server) setupRoutes() *mux.Router {
 
 	// Add other middleware
 	r.Use(s.loggingMiddleware)
-	r.Use(s.corsMiddleware)
+	// NOTE: corsMiddleware is applied in Start() around the whole router, not
+	// here — r.Use only fires on matched routes, which silently broke preflight.
+	// Kept off the mux deliberately; do not re-add it as route middleware.
 	r.Use(s.contentTypeMiddleware)
 
 	// API routes
@@ -722,10 +733,18 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		// OpenAI/Anthropic SDK pointed at the gateway can preflight-clear its
 		// credentials. TAS-* control headers are allowed for power users who
 		// set them via default_headers.
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, TAS-Auth, anthropic-version, TAS-Upstream-Authorization, TAS-Source-App")
+		// TAS-Agent-*/TAS-Flow-Id/TAS-Conversation-Id/baggage are the agent-flow
+		// attribution headers. Without them in this list a browser client can
+		// send traffic but not attribute it, so its own requests show up
+		// unattributed in Traffic Explorer — which is where the UI displays them.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, TAS-Auth, anthropic-version, TAS-Upstream-Authorization, TAS-Source-App, TAS-Agent-Id, TAS-Agent-Name, TAS-Agent-Version, TAS-Flow-Id, TAS-Conversation-Id, TAS-Cache, baggage")
 		// Let browser clients read the routing-decision headers (moved off
-		// the SSE stream) and the AIQG response-event id.
-		w.Header().Set("Access-Control-Expose-Headers", "X-TAS-Router-Provider, X-TAS-Router-Model, X-TAS-Router-Request-Id, X-TAS-Router-Attempt-Count, X-TAS-Router-Fallback-Used, X-TAS-Router-Estimated-Cost, TAS-Response-Event-Id")
+		// the SSE stream), the AIQG response-event id, and the cache verdict.
+		// X-TAS-Cache (hit | semantic_hit | bypass; absent on a miss) is the
+		// only signal a browser has for whether a response came from cache —
+		// the cache fields are not promoted into Loki labels either, so
+		// without exposing it a client cannot tell a hit from a miss at all.
+		w.Header().Set("Access-Control-Expose-Headers", "X-TAS-Router-Provider, X-TAS-Router-Model, X-TAS-Router-Request-Id, X-TAS-Router-Attempt-Count, X-TAS-Router-Fallback-Used, X-TAS-Router-Estimated-Cost, TAS-Response-Event-Id, X-TAS-Cache")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
