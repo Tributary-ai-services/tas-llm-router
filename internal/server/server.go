@@ -561,8 +561,17 @@ func (s *Server) Start() error {
 	r := s.setupRoutes()
 
 	s.httpServer = &http.Server{
-		Addr:           ":" + s.config.Port,
-		Handler:        r,
+		Addr: ":" + s.config.Port,
+		// CORS wraps the ROUTER, not individual routes. gorilla/mux's r.Use()
+		// only runs middleware on MATCHED routes, and the completion routes are
+		// registered POST-only — so a browser's OPTIONS preflight fell through
+		// to the 404 handler with no CORS headers at all, and every
+		// cross-origin request from a browser was blocked before it was ever
+		// sent. (Verified against production: OPTIONS /v1/chat/completions
+		// returned 404 with no Access-Control-* headers, and the aiqg gateway
+		// ingress carries no CORS annotations either.) Wrapping here means
+		// preflight is answered for every path, matched or not.
+		Handler:        s.corsMiddleware(r),
 		ReadTimeout:    s.config.ReadTimeout,
 		WriteTimeout:   s.config.WriteTimeout,
 		MaxHeaderBytes: s.config.MaxHeaderBytes,
@@ -624,7 +633,9 @@ func (s *Server) setupRoutes() *mux.Router {
 
 	// Add other middleware
 	r.Use(s.loggingMiddleware)
-	r.Use(s.corsMiddleware)
+	// NOTE: corsMiddleware is applied in Start() around the whole router, not
+	// here — r.Use only fires on matched routes, which silently broke preflight.
+	// Kept off the mux deliberately; do not re-add it as route middleware.
 	r.Use(s.contentTypeMiddleware)
 
 	// API routes
