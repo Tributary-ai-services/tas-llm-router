@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -105,6 +106,22 @@ func TestLiveThresholdCalibration(t *testing.T) {
 		model = "all-minilm"
 	}
 	dim := 384
+	if s := os.Getenv("AIQG_CALIBRATION_EMBED_DIM"); s != "" {
+		v, err := strconv.Atoi(s)
+		if err != nil {
+			t.Fatalf("bad AIQG_CALIBRATION_EMBED_DIM %q: %v", s, err)
+		}
+		dim = v
+	}
+	// Some encoders (nomic-embed-text, bge-*) are trained with a task prefix
+	// and degrade materially without it. OllamaEmbedder sends RAW text, so
+	// measuring such a model unprefixed understates it — test both before
+	// concluding a model is unsuitable, because "add prefix support to the
+	// embedder" and "this model is no good" are very different conclusions.
+	// Cache matching is prompt-vs-prompt (symmetric), so the SAME prefix goes
+	// on both sides rather than a query/document split.
+	prefix := os.Getenv("AIQG_CALIBRATION_EMBED_PREFIX")
+
 	emb := NewOllamaEmbedder(base, model, dim)
 
 	// Embed every unique text once.
@@ -116,14 +133,17 @@ func TestLiveThresholdCalibration(t *testing.T) {
 			if _, ok := vecs[s]; ok {
 				continue
 			}
-			v, err := emb.Embed(ctx, s)
+			v, err := emb.Embed(ctx, prefix+s)
 			if err != nil {
 				t.Fatalf("embed %q: %v", truncateForLog(s), err)
+			}
+			if len(v) != dim {
+				t.Fatalf("embed %q: got dim %d, want %d — set AIQG_CALIBRATION_EMBED_DIM", truncateForLog(s), len(v), dim)
 			}
 			vecs[s] = v
 		}
 	}
-	t.Logf("model=%s dim=%d unique_texts=%d pairs=%d", model, dim, len(vecs), len(livePairs))
+	t.Logf("model=%s dim=%d prefix=%q unique_texts=%d pairs=%d", model, dim, prefix, len(vecs), len(livePairs))
 
 	// Per-pair similarity, sorted — the separation picture.
 	type row struct {
