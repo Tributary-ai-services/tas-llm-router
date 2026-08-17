@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // VerifyResult is the L2 outcome for one candidate.
@@ -56,9 +57,119 @@ var (
 )
 
 // negationWords are the polarity markers. n't is handled by contraction below.
+//
+// Two classes live here, both of which flip what is being asked:
+//
+//   - grammatical negators (not/no/never/…) and the suppletive forms of
+//     "cannot" — "unable" is exactly "cannot" with different morphology, and
+//     omitting it meant "I can't log in" (parity 1) and "Unable to log in"
+//     (parity 0) were treated as opposite polarity despite being synonyms.
+//     That alone zeroed the hit rate on ticket-triage traffic.
+//   - action-negating verbs (avoid/prevent/disable/exclude), which negate the
+//     *action* rather than the clause. These matter because the dangerous
+//     pairs are lexically close enough to clear any workable similarity
+//     threshold: "How do I disable MFA?" vs "How do I enable MFA?" sit around
+//     cosine 0.95, so without a polarity signal the cache would serve the
+//     exact opposite instruction.
+//
+// The trade is deliberate and asymmetric: an extra word here costs a cache
+// miss ("turn off MFA" no longer matches "disable MFA"), while a missing one
+// costs a wrong answer. Misses are recoverable; wrong answers are not.
+// Deliberately NOT included: stop / skip / block / halt — too polysemous in
+// ops questions ("how do I stop nginx") to be read as polarity, and their
+// opposites are not dangerous in the way enable/disable is.
 var negationWords = map[string]bool{
 	"not": true, "no": true, "never": true, "without": true, "cannot": true,
 	"none": true, "nor": true, "neither": true, "nothing": true,
+	"unable": true,
+}
+
+// actionNegators are the action-negating verbs, matched on their stem so every
+// inflection counts (avoid/avoids/avoided/avoiding, disable/disabled/…).
+// Listing surface forms instead would silently miss "excluded" while catching
+// "exclude", which is how this gap first showed up.
+var actionNegators = map[string]bool{
+	"avoid": true, "prevent": true, "disable": true, "exclude": true,
+}
+
+// verbStems returns the candidate stems of w for actionNegators lookup. Cheap
+// suffix stripping is enough here: the set is four known verbs, so the risk is
+// a missed inflection (a cache miss), not a wrong stem matching something else.
+func verbStems(w string) [5]string {
+	return [5]string{
+		strings.TrimSuffix(w, "s"),
+		strings.TrimSuffix(w, "d"),
+		strings.TrimSuffix(w, "ed"),
+		strings.TrimSuffix(w, "ing"),
+		strings.TrimSuffix(w, "ing") + "e", // disabling → disabl → disable
+	}
+}
+
+// isNegationWord reports whether w flips polarity, covering both the
+// grammatical negators and any inflection of an action-negating verb.
+func isNegationWord(w string) bool {
+	if negationWords[w] {
+		return true
+	}
+	if actionNegators[w] {
+		return true
+	}
+	for _, stem := range verbStems(w) {
+		if actionNegators[stem] {
+			return true
+		}
+	}
+	return false
+}
+
+// positionalCapBoundaries are characters after which a capital letter is
+// explained by POSITION rather than by the word being a proper noun: sentence
+// enders, clause introducers, and quote/bracket openers all force a capital on
+// whatever follows.
+const positionalCapBoundaries = ".!?:;\"'`([{\n\r“‘"
+
+// positionalCapitalSites returns the byte offsets of runes that sit at a
+// position where a capital is positionally forced.
+//
+// This exists because the entity guard previously exempted a capital only at
+// index 0 of the whole prompt. Any other capital was read as a proper noun —
+// including a word that merely OPENS A QUOTED STRING, which is constant in
+// real traffic (ticket text, email subjects, log lines). The seed
+//
+//	Classify this ticket: "I can't log in to my account"
+//
+// yielded no entity tokens, while the paraphrase
+//
+//	Classify this ticket: "Unable to log in to my account"
+//
+// yielded {@unable} — so the token sets differed and every such pair was
+// rejected, silently zeroing the hit rate on exactly the classification
+// workload semantic caching is best at.
+//
+// Known trade: a genuine proper noun that opens a quote is now also skipped
+// (`Summarize: "Acme filed…"` vs `"Beta filed…"`), leaving those pairs to the
+// similarity threshold. Acronyms and anything numeric/date-like are still
+// always kept, and those carry most of the discriminative signal.
+func positionalCapitalSites(s string) map[int]bool {
+	sites := map[int]bool{}
+	atBoundary := true // start of string counts
+	for i, r := range s {
+		// A line break is itself a boundary, so it must be handled before the
+		// whitespace skip — otherwise it is swallowed as plain spacing and the
+		// first word of the next line is read as a proper noun.
+		if r == '\n' || r == '\r' {
+			atBoundary = true
+			continue
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if atBoundary {
+			sites[i] = true
+		}
+		atBoundary = strings.ContainsRune(positionalCapBoundaries, r)
+	}
+	return sites
 }
 
 // negationParity returns count(negations) % 2, so a double negative ("not
@@ -68,7 +179,7 @@ func negationParity(s string) int {
 	l := strings.ToLower(s)
 	n := strings.Count(l, "n't") // isn't/don't/can't/won't/…
 	for _, w := range reWord.FindAllString(l, -1) {
-		if negationWords[w] {
+		if isNegationWord(w) {
 			n++
 		}
 	}
@@ -85,16 +196,18 @@ func discriminativeTokens(s string) map[string]struct{} {
 	for _, m := range reNumberish.FindAllString(s, -1) {
 		out["#"+strings.ToLower(m)] = struct{}{}
 	}
+	sites := positionalCapitalSites(s)
 	words := reWord.FindAllStringIndex(s, -1)
-	for i, idx := range words {
+	for _, idx := range words {
 		w := s[idx[0]:idx[1]]
 		isCap := w[0] >= 'A' && w[0] <= 'Z'
 		if !isCap {
 			continue
 		}
-		// Skip a capital only because it opens the prompt (sentence-start), unless
-		// it's an all-caps acronym (those are always meaningful).
-		if i == 0 && !reAcronym.MatchString(w) {
+		// Skip a capital that is explained by position — the start of the prompt,
+		// or immediately after a sentence/clause boundary such as an opening
+		// quote. All-caps acronyms are always meaningful and are never skipped.
+		if sites[idx[0]] && !reAcronym.MatchString(w) {
 			continue
 		}
 		if _, stop := entityStopwords[strings.ToLower(w)]; stop {
