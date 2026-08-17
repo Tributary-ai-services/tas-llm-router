@@ -232,7 +232,11 @@ func TestStepOutcomeClassification(t *testing.T) {
 		out           stepOutcome
 		hit, falseHit bool
 	}{
-		{"probe served from exact cache is a false hit", stepOutcome{Step: probe, CacheState: "hit"}, true, true},
+		// An exact hit on a probe means the identical prompt was seen before —
+		// on a re-run inside the C1 TTL that is the probe matching ITSELF,
+		// which is correct. Only a semantic hit means it was matched to a
+		// different question, which is the actual correctness failure.
+		{"probe served from exact cache matched itself, not a false hit", stepOutcome{Step: probe, CacheState: "hit"}, true, false},
 		{"probe served from semantic cache is a false hit", stepOutcome{Step: probe, CacheState: "semantic_hit"}, true, true},
 		{"probe that missed is correct", stepOutcome{Step: probe, CacheState: "miss"}, false, false},
 		{"paraphrase hit is a win, not a false hit", stepOutcome{Step: para, CacheState: "semantic_hit"}, true, false},

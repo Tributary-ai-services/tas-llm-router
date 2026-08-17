@@ -153,10 +153,30 @@ var flowCatalog = []demoFlow{
 	},
 
 	// F4 — cache-only. Proves caching is not reduction in disguise.
+	//
+	// MEASURED 0% semantic hits against a modeled 65% (live run 2026-08-16).
+	// That gap is a real product finding, not a broken flow, and the prompts
+	// are deliberately left as-is rather than tuned to make the demo look
+	// better. Two independent L2 guards over-reject here, both confirmed
+	// directly against pkg/aiqg/semcache:
+	//
+	//  1. discriminativeTokens() only exempts a capital at index 0 of the
+	//     whole prompt, so a word that merely OPENS A QUOTED STRING is read as
+	//     a proper-noun entity. The seed yields {}, "Unable to log in…" yields
+	//     {@unable}, "Login is not working…" yields {@login} — token sets
+	//     differ, so discriminativeTokensMatch fails. Lowercasing the same
+	//     text makes all three match.
+	//  2. negationParity() counts "can't" but not "unable", so two phrasings
+	//     with identical meaning get parity 1 vs 0 and are rejected.
+	//
+	// Both fail in the SAFE direction (no wrong answers), but they zero out
+	// the hit rate on quoted user content — ticket text, email subjects, log
+	// lines — which is exactly the classification workload semantic caching
+	// is supposed to be strongest on.
 	{
 		ID:          "ticket-triage",
 		Label:       "Ticket triage / routing",
-		WhatItShows: "Caching ONLY. Inputs are short so there is essentially nothing to reduce, but they are near-duplicates of each other — the classic high-hit-rate, tight-threshold classification case.",
+		WhatItShows: "Caching ONLY. Inputs are short so there is essentially nothing to reduce, but they are near-duplicates of each other — the classic high-hit-rate, tight-threshold classification case. Currently measures 0% live: two L2 guards over-reject on capitalized words inside quoted ticket text.",
 		Model:       "claude-haiku-4-5-20251001", MaxTokens: 64, Temperature: zeroTemp,
 		ExpectedReductionPct: 2, ExpectedCacheHitPct: 65,
 		Steps: []flowStep{
@@ -275,12 +295,35 @@ func (o stepOutcome) hit() bool {
 }
 
 // falseHit is the one outcome that matters more than any savings number: a
-// probe designed to be semantically close but factually different came back
-// from cache. That is a correctness failure.
-func (o stepOutcome) falseHit() bool { return o.Step.Kind == stepProbe && o.hit() }
+// probe designed to be semantically close but factually different was matched
+// to a DIFFERENT question and served that answer.
+//
+// Only semantic_hit counts. A probe returning "hit" is a C1 exact match,
+// which means the identical prompt was asked before — on a re-run inside the
+// C1 TTL that is the probe matching *itself*, which is correct behaviour, not
+// a false positive. Conflating the two made a clean run report two spurious
+// correctness failures. Use --cache-bust for a cold run.
+func (o stepOutcome) falseHit() bool {
+	return o.Step.Kind == stepProbe && o.CacheState == "semantic_hit"
+}
+
+// exactHit / semanticHit split the two caches apart, because they mean very
+// different things in a demo: C1 proves nothing about semantic matching.
+func (o stepOutcome) exactHit() bool    { return o.CacheState == "hit" }
+func (o stepOutcome) semanticHit() bool { return o.CacheState == "semantic_hit" }
+
+// cacheBustSuffix returns a per-RUN marker appended to every prompt in the
+// run. It makes a re-run start from a cold cache — without it, a second run
+// inside the C1 TTL sees even the seed step come back as an exact hit, which
+// is correct but tells you nothing.
+//
+// One shared nonce for the whole run (not per step) is the point: prompts stay
+// distinct from previous runs while the within-run seed→paraphrase→probe
+// relationships that the demo depends on are preserved.
+func cacheBustSuffix(g rng) string { return " (ref: " + g.hex(4) + ")" }
 
 // runFlow executes one flow's steps in order against the gateway.
-func runFlow(ctx context.Context, g rng, c *gatewayClient, f demoFlow, users []string, dryRun bool) []stepOutcome {
+func runFlow(ctx context.Context, g rng, c *gatewayClient, f demoFlow, users []string, nonce string, dryRun bool) []stepOutcome {
 	flowID := g.uuid()
 	user := users[g.r.Intn(len(users))]
 	headers := map[string]string{
@@ -300,8 +343,10 @@ func runFlow(ctx context.Context, g rng, c *gatewayClient, f demoFlow, users []s
 		default:
 		}
 
+		prompt := s.Prompt + nonce
+
 		if dryRun {
-			fmt.Printf("  %2d. %-10s %s\n", i+1, s.Kind, truncate(s.Prompt, 80))
+			fmt.Printf("  %2d. %-10s %s\n", i+1, s.Kind, truncate(prompt, 80))
 			outcomes = append(outcomes, stepOutcome{Step: s, CacheState: "(dry-run)"})
 			continue
 		}
@@ -310,7 +355,7 @@ func runFlow(ctx context.Context, g rng, c *gatewayClient, f demoFlow, users []s
 		res, err := c.do(ctx, sendOpts{
 			Headers:     headers,
 			Model:       f.Model,
-			Prompt:      s.Prompt,
+			Prompt:      prompt,
 			MaxTokens:   f.MaxTokens,
 			Temperature: f.Temperature,
 		})
@@ -330,7 +375,7 @@ func runFlow(ctx context.Context, g rng, c *gatewayClient, f demoFlow, users []s
 }
 
 // runFlowsTarget is the --target=flows entry point.
-func runFlowsTarget(ctx context.Context, g rng, c *gatewayClient, ids []string, users []string, interval time.Duration, dryRun bool) {
+func runFlowsTarget(ctx context.Context, g rng, c *gatewayClient, ids []string, users []string, interval time.Duration, cacheBust, dryRun bool) {
 	selected := flowCatalog
 	if len(ids) > 0 {
 		selected = nil
@@ -345,10 +390,15 @@ func runFlowsTarget(ctx context.Context, g rng, c *gatewayClient, ids []string, 
 	}
 
 	pass := func() {
+		nonce := ""
+		if cacheBust {
+			nonce = cacheBustSuffix(g)
+			fmt.Printf("cold-start: appending %q to every prompt this run\n", nonce)
+		}
 		all := map[string][]stepOutcome{}
 		for _, f := range selected {
 			fmt.Printf("\n▶ %s — %s\n", f.Label, f.ID)
-			all[f.ID] = runFlow(ctx, g, c, f, users, dryRun)
+			all[f.ID] = runFlow(ctx, g, c, f, users, nonce, dryRun)
 		}
 		if !dryRun {
 			printFlowSummary(selected, all)
@@ -377,11 +427,16 @@ func runFlowsTarget(ctx context.Context, g rng, c *gatewayClient, ids []string, 
 // win, it is a wrong answer served to a user, so it never nets off against
 // the savings.
 func printFlowSummary(flows []demoFlow, all map[string][]stepOutcome) {
-	fmt.Printf("\n%-28s %7s %7s %9s %9s %s\n", "flow", "steps", "hits", "hit rate", "modeled", "probes")
+	// Exact and semantic hits are reported separately on purpose: C1 only ever
+	// proves the identical bytes were seen before, so folding it into one
+	// number would let a re-run inside the C1 TTL masquerade as semantic
+	// matching working.
+	fmt.Printf("\n%-28s %6s %6s %6s %9s %9s %s\n",
+		"flow", "steps", "exact", "seman", "sem rate", "modeled", "probes")
 	falseHits := 0
 	for _, f := range flows {
 		outs := all[f.ID]
-		hits, probes, probesOK := 0, 0, 0
+		exact, semantic, probes, probesOK := 0, 0, 0, 0
 		for _, o := range outs {
 			if o.Step.Kind == stepProbe {
 				probes++
@@ -392,21 +447,24 @@ func printFlowSummary(flows []demoFlow, all map[string][]stepOutcome) {
 				}
 				continue // probes are correctness checks, not cache-rate samples
 			}
-			if o.hit() {
-				hits++
+			switch {
+			case o.exactHit():
+				exact++
+			case o.semanticHit():
+				semantic++
 			}
 		}
 		cacheable := len(outs) - probes
 		rate := 0.0
 		if cacheable > 0 {
-			rate = float64(hits) / float64(cacheable) * 100
+			rate = float64(exact+semantic) / float64(cacheable) * 100
 		}
-		fmt.Printf("%-28s %7d %7d %8.0f%% %8.0f%% %d/%d rejected\n",
-			f.ID, len(outs), hits, rate, f.ExpectedCacheHitPct, probesOK, probes)
+		fmt.Printf("%-28s %6d %6d %6d %8.0f%% %8.0f%% %d/%d rejected\n",
+			f.ID, len(outs), exact, semantic, rate, f.ExpectedCacheHitPct, probesOK, probes)
 	}
 
 	if falseHits > 0 {
-		fmt.Printf("\n!! %d FALSE HIT(S): a near-miss probe was served from cache.\n", falseHits)
+		fmt.Printf("\n!! %d FALSE HIT(S): a near-miss probe was semantically matched to a DIFFERENT question.\n", falseHits)
 		fmt.Println("   This is a correctness failure, not a savings result — tighten")
 		fmt.Println("   semantic.min_similarity for this tenant and re-run.")
 		return

@@ -61,6 +61,7 @@ func main() {
 		target     = flag.String("target", "loki", "loki | gateway | flows (enterprise reduction/caching demo flows) | fingerprint-eval (untagged distinct-toolset personas → measure inferred attribution accuracy)")
 		flowIDs    = flag.String("flow", "", "comma-separated demo flow ids for --target=flows (default: all six). See --print-catalog")
 		printCat   = flag.Bool("print-catalog", false, "print the demo flow catalog as JSON and exit")
+		cacheBust  = flag.Bool("cache-bust", false, "append a per-run nonce to every prompt so --target=flows starts from a cold cache (otherwise a re-run inside the C1 TTL hits on everything, including the seed)")
 		gatewayURL = flag.String("gateway-url", "http://localhost:8086", "gateway base URL for --target=gateway (chat at /v1/chat/completions)")
 		token      = flag.String("token", os.Getenv("AIQG_TAS_AUTH_TOKEN"), "TAS-Auth gateway token for --target=gateway (or env AIQG_TAS_AUTH_TOKEN)")
 		model      = flag.String("model", "claude-haiku-4-5-20251001", "model for --target=gateway requests")
@@ -126,7 +127,7 @@ func main() {
 			os.Exit(2)
 		}
 		gc := newGatewayClient(*gatewayURL, *token, *model, *maxTokens, *insecure)
-		runFlowsTarget(ctx, g, gc, splitFlowIDs(*flowIDs), splitUsers(*usersCSV), *interval, *dryRun)
+		runFlowsTarget(ctx, g, gc, splitFlowIDs(*flowIDs), splitUsers(*usersCSV), *interval, *cacheBust, *dryRun)
 		return
 	}
 
