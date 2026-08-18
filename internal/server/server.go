@@ -257,8 +257,10 @@ type AIQGSemCacheConfig struct {
 	// EmbedProvider selects the L1 backend: "ollama" (default) or "tei". TEI
 	// serves langcache-embed-v3-small (§6), which Ollama cannot serve at all.
 	// ⚠️ Both are 384-dim, so switching does NOT invalidate stored vectors and
-	// the store will silently compare across models — flush aiqg:scache:* on
-	// cutover (neither the key nor Scope identifies the embedder).
+	// the store will silently compare across models — flush the ENTRY keys on
+	// cutover, i.e. aiqg:scache:{tenant}:* and NOT aiqg:scache:*. The wildcard
+	// also matches the judge's labeled-pair corpus, which is the training data
+	// for threshold calibration and must survive a cutover.
 	EmbedProvider   string  `yaml:"embed_provider"`
 	TEIURL          string  `yaml:"tei_url"`           // TEI base URL when EmbedProvider="tei"
 	JudgeDailyUSD   float64 `yaml:"judge_daily_usd"`   // L3 judge daily $ cap (§14.1); 0 = unlimited

@@ -15,6 +15,13 @@ import (
 // aiqg:scache:{tenant}:*.
 const keyPrefix = "aiqg:scache"
 
+// LabeledPairsKey holds the L3 judge's graded pairs. It deliberately sits
+// OUTSIDE keyPrefix: an embedder cutover must flush the cached vectors
+// (aiqg:scache:{tenant}:*) but must NOT flush this corpus, which is the
+// training data for SimCalibrator and is far more expensive to rebuild than a
+// cache — every entry cost a judge LLM call.
+const LabeledPairsKey = "aiqg:sclabels:pairs"
+
 // DefaultIndex is the RediSearch index name.
 const DefaultIndex = "aiqg_scache_idx"
 

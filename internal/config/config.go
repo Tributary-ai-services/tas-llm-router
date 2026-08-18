@@ -124,7 +124,9 @@ type AIQGSemCacheConfig struct {
 	// ⚠️ Switching providers does NOT invalidate stored vectors. langcache is
 	// also 384-dim, so the index accepts both and will silently compare
 	// all-minilm vectors against langcache vectors — neither the cache key nor
-	// Scope identifies the embedder. Flush aiqg:scache:* on cutover.
+	// Scope identifies the embedder. Flush the ENTRY keys on cutover
+	// (aiqg:scache:{tenant}:*), NOT aiqg:scache:* — the latter also matches the
+	// judge's labeled-pair corpus, which must survive.
 	EmbedProvider string `yaml:"embed_provider"`
 	// TEIURL is the TEI base URL (e.g. http://tei.tas-shared:8080). Only used
 	// when EmbedProvider is "tei". Env AIQG_SEMCACHE_TEI_URL.
