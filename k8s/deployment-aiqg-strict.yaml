@@ -147,8 +147,17 @@ spec:
           value: redis://redis-semcache.tas-shared.svc.cluster.local:6379
         - name: AIQG_SEMCACHE_OLLAMA_URL
           value: http://ollama.tas-shared:11434
+        # Embedder: TEI serving redis/langcache-embed-v3-small, which is
+        # purpose-trained for CACHE MATCHING (negation in its eval set) rather
+        # than retrieval. EMBED_MODEL is unused on the TEI path — TEI pins its
+        # model with --model-id — but is kept so a rollback to ollama is a
+        # one-line change.
         - name: AIQG_SEMCACHE_EMBED_MODEL
           value: all-minilm
+        - name: AIQG_SEMCACHE_EMBED_PROVIDER
+          value: tei
+        - name: AIQG_SEMCACHE_TEI_URL
+          value: http://tei.tas-shared:8080
         - name: AIQG_SEMCACHE_DIM
           value: "384"
         # Raised 0.85 -> 0.87 on 2026-08-16. Calibration against this
@@ -163,8 +172,12 @@ spec:
         # all-minilm separates these classes poorly (separation -0.33) —
         # a better embedder, not a lower threshold, is the way to raise
         # hit rate.
+        # 0.93 is langcache-embed-v3-small's calibrated FPR=0 point, NOT 0.87
+        # (that was all-minilm's). Cutting the embedder without moving the
+        # threshold would knowingly ship a config measured to produce false
+        # hits, since the two models score the same pair differently.
         - name: AIQG_SEMCACHE_MIN_SIMILARITY
-          value: "0.87"
+          value: "0.93"
         - name: AIQG_SEMCACHE_TTL
           value: 30m
         - name: AIQG_SEMCACHE_JUDGE_ENABLED
