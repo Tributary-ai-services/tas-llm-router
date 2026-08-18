@@ -61,6 +61,33 @@ type flowStep struct {
 	Note string `json:"note"`
 }
 
+// retrievalSpec turns a flow into the two-stage RAG shape that is the ONLY way
+// to demonstrate APPLIED payload reduction.
+//
+// Reduction is applied at the MCP proxy on tool results (tas-mcp
+// reducing_processor, gated on FederatedMCPServer spec.reduce), never at the
+// LLM gateway — applyReductionInline was retired there for busting the vendor
+// prompt cache. So a flow that only calls /v1/chat/completions can be *measured*
+// for reduction headroom but can never *apply* any: there is no tool result to
+// reduce. Verified live: one paper-search call through the proxy returned 5,131
+// bytes with `_meta.reduced_bytes_saved: 9682` — ~65% stripped before the
+// content could enter a context window.
+//
+// Stage 1 retrieves through the proxy (content comes back already reduced);
+// stage 2 sends a tools-free completion with that content inline, which keeps
+// it cache-eligible — responsecache.Decide refuses to cache any request
+// carrying tools.
+type retrievalSpec struct {
+	// Server is the FederatedMCPServer name. It MUST have spec.reduce: true or
+	// the proxy passes the tool result through untouched.
+	Server string `json:"server"`
+	Tool   string `json:"tool"`
+	// QueryArg names the tool argument that receives the step's prompt.
+	QueryArg string `json:"query_arg"`
+	// Args are static arguments merged with QueryArg.
+	Args map[string]any `json:"args,omitempty"`
+}
+
 // demoFlow is one enterprise workload shape.
 //
 // JSON tags are deliberate: the catalog is currently defined in Go but is
@@ -85,6 +112,12 @@ type demoFlow struct {
 	// aiqg-analysis/workload_savings.py.
 	ExpectedReductionPct float64 `json:"expected_reduction_pct"`
 	ExpectedCacheHitPct  float64 `json:"expected_cache_hit_pct"`
+
+	// Retrieval, when set, makes every step retrieve through the MCP proxy
+	// before completing — the only shape that produces APPLIED reduction.
+	// Runners that do not implement it (the CLI --target=flows path) simply
+	// skip stage 1 and still exercise caching correctly.
+	Retrieval *retrievalSpec `json:"retrieval,omitempty"`
 
 	Steps []flowStep `json:"steps"`
 }
@@ -202,6 +235,39 @@ var flowCatalog = []demoFlow{
 		Model:       "claude-haiku-4-5-20251001", MaxTokens: 256, Temperature: zeroTemp,
 		ExpectedReductionPct: 32, ExpectedCacheHitPct: 85,
 		Steps: burstSteps(),
+	},
+
+	// F7 — the only flow that demonstrates APPLIED reduction, because it is the
+	// only one that routes through the MCP proxy.
+	//
+	// It is a deliberately separate flow rather than retrieval bolted onto
+	// helpdesk or RFP: the corpus available in-cluster is academic papers
+	// (paper-search-mcp, one of the servers already carrying spec.reduce:true),
+	// so a research question is what it can honestly answer. Asking it about VPN
+	// certificates would retrieve irrelevant papers and misrepresent both the
+	// retrieval and the reduction.
+	//
+	// Everything else here is unchanged: the paraphrases still exercise C4 and
+	// the probe still must not hit. The difference is that each step's context
+	// arrives already reduced, with the byte count reported.
+	{
+		ID:          "research-rag",
+		Label:       "Research RAG (applied reduction)",
+		WhatItShows: "The only flow with APPLIED reduction, not just measured. Each step retrieves through the MCP proxy, which strips irrelevant content from the tool result before it can enter the context window — the byte count is reported per step. Corpus is academic papers, so the questions are research questions.",
+		Model:       "claude-haiku-4-5-20251001", MaxTokens: 384, Temperature: zeroTemp,
+		ExpectedReductionPct: 40, ExpectedCacheHitPct: 50,
+		Retrieval: &retrievalSpec{
+			Server:   "paper-search-mcp",
+			Tool:     "search_papers",
+			QueryArg: "query",
+			Args:     map[string]any{"maxResults": 8},
+		},
+		Steps: []flowStep{
+			{stepSeed, "What are the main approaches to semantic caching for large language models?", "Cold: retrieves + reduces, then answers."},
+			{stepParaphrase, "Summarise the leading techniques for caching LLM responses by meaning.", "Same question reworded: C4 semantic hit, retrieval still reduced."},
+			{stepParaphrase, "How is semantic similarity used to cache large language model answers?", "Third phrasing: C4 semantic hit."},
+			{stepProbe, "What are the main approaches to semantic caching for large language models in 2019?", "Year added. MUST miss — L2 entity_number_date."},
+		},
 	},
 
 	// F6 — the honesty exhibit. Modeled ~0.2% / 0%.
