@@ -69,9 +69,16 @@ type flowStep struct {
 // LLM gateway — applyReductionInline was retired there for busting the vendor
 // prompt cache. So a flow that only calls /v1/chat/completions can be *measured*
 // for reduction headroom but can never *apply* any: there is no tool result to
-// reduce. Verified live: one paper-search call through the proxy returned 5,131
-// bytes with `_meta.reduced_bytes_saved: 9682` — ~65% stripped before the
-// content could enter a context window.
+// reduce.
+//
+// How much it actually strips is CONTENT-DEPENDENT and frequently zero. The
+// reducer scores chunk relevance against the tool call's own query argument, so
+// a search tool — which already ranked its results by that same query — leaves
+// little to judge irrelevant. Measured on paper-search: 0 bytes stripped across
+// repeated calls at 11-13KB. (A one-off 9,682-byte / 65% result came from a
+// retrieval that happened to carry off-topic chunks; it does not generalize.)
+// Reduction pays on tools returning bulk that is NOT query-shaped: documentation
+// pages, file reads, query dumps, where only part answers the question.
 //
 // Stage 1 retrieves through the proxy (content comes back already reduced);
 // stage 2 sends a tools-free completion with that content inline, which keeps
@@ -237,8 +244,24 @@ var flowCatalog = []demoFlow{
 		Steps: burstSteps(),
 	},
 
-	// F7 — the only flow that demonstrates APPLIED reduction, because it is the
-	// only one that routes through the MCP proxy.
+	// F7 — the only flow that ROUTES THROUGH the MCP proxy, and so the only one
+	// that can apply reduction at all.
+	//
+	// MEASURED 2026-08-17: it strips ZERO on this corpus, and the label says so.
+	// Two reasons, both structural rather than broken:
+	//   1. REDUCTION_MIN_CONTENT_SIZE=4096 skips small results, and these
+	//      retrievals come back 2.5-4.4KB.
+	//   2. More fundamentally, the reducer scores chunk relevance against the
+	//      TOOL CALL'"'"'S QUERY ARGUMENT (federation toolCallQuery prefers
+	//      query/question/q/...). A search tool has already optimized its results
+	//      for similarity to that same query, so there is little left to judge
+	//      irrelevant. Raising maxResults to 20-25 (11-13KB) still stripped 0
+	//      across four identical calls.
+	// An earlier one-off measurement of 9,682 bytes / 65% came from a retrieval
+	// that happened to contain off-topic chunks; it does not generalize.
+	//
+	// The fix is a corpus whose results are NOT query-shaped — documentation
+	// pages, file reads, query dumps — where only part answers the question.
 	//
 	// It is a deliberately separate flow rather than retrieval bolted onto
 	// helpdesk or RFP: the corpus available in-cluster is academic papers
@@ -252,8 +275,8 @@ var flowCatalog = []demoFlow{
 	// arrives already reduced, with the byte count reported.
 	{
 		ID:          "research-rag",
-		Label:       "Research RAG (applied reduction)",
-		WhatItShows: "The only flow with APPLIED reduction, not just measured. Each step retrieves through the MCP proxy, which strips irrelevant content from the tool result before it can enter the context window — the byte count is reported per step. Corpus is academic papers, so the questions are research questions.",
+		Label:       "Research RAG (MCP retrieval)",
+		WhatItShows: "Exercises the applied-reduction path: each step retrieves through the MCP proxy, which may strip irrelevant content from the tool result before it enters the context window. Reports whatever it actually strips — often ZERO here, because relevance is scored against the search query and a search tool already returns query-shaped results. Reduction pays on tools that return bulk that is not query-shaped (documents, file reads, query dumps).",
 		Model:       "claude-haiku-4-5-20251001", MaxTokens: 384, Temperature: zeroTemp,
 		ExpectedReductionPct: 40, ExpectedCacheHitPct: 50,
 		Retrieval: &retrievalSpec{
