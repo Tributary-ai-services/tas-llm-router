@@ -250,3 +250,36 @@ func TestStepOutcomeClassification(t *testing.T) {
 		}
 	}
 }
+
+// The retrieval flow is the ONLY one that can demonstrate applied reduction,
+// so its wiring is worth pinning: reduction happens at the MCP proxy on tool
+// results, which means a flow with no retrieval spec can never apply any.
+func TestRetrievalFlowIsWiredForAppliedReduction(t *testing.T) {
+	f, ok := flowByID("research-rag")
+	if !ok {
+		t.Fatal("research-rag flow missing — it is the only applied-reduction demo")
+	}
+	if f.Retrieval == nil {
+		t.Fatal("research-rag has no retrieval spec, so it cannot apply reduction")
+	}
+	if f.Retrieval.Server == "" || f.Retrieval.Tool == "" || f.Retrieval.QueryArg == "" {
+		t.Errorf("retrieval spec incomplete: %+v", *f.Retrieval)
+	}
+	// spec.reduce is per FederatedMCPServer; naming a server without it would
+	// silently pass tool results through unreduced.
+	if f.Retrieval.Server != "paper-search-mcp" {
+		t.Errorf("retrieval server = %q; confirm spec.reduce:true on it before changing", f.Retrieval.Server)
+	}
+}
+
+// Every other flow must NOT claim retrieval it does not do.
+func TestOnlyRetrievalFlowsDeclareRetrieval(t *testing.T) {
+	for _, f := range flowCatalog {
+		if f.ID == "research-rag" {
+			continue
+		}
+		if f.Retrieval != nil {
+			t.Errorf("flow %q declares retrieval but is not a retrieval flow", f.ID)
+		}
+	}
+}
