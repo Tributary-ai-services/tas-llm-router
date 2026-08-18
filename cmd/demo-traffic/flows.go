@@ -245,38 +245,23 @@ var flowCatalog = []demoFlow{
 	},
 
 	// F7 — the only flow that ROUTES THROUGH the MCP proxy, and so the only one
-	// that can apply reduction at all.
+	// that applies reduction rather than merely measuring headroom.
 	//
-	// MEASURED 2026-08-17: it strips ZERO on this corpus, and the label says so.
-	// Two reasons, both structural rather than broken:
-	//   1. REDUCTION_MIN_CONTENT_SIZE=4096 skips small results, and these
-	//      retrievals come back 2.5-4.4KB.
-	//   2. More fundamentally, the reducer scores chunk relevance against the
-	//      TOOL CALL'"'"'S QUERY ARGUMENT (federation toolCallQuery prefers
-	//      query/question/q/...). A search tool has already optimized its results
-	//      for similarity to that same query, so there is little left to judge
-	//      irrelevant. Raising maxResults to 20-25 (11-13KB) still stripped 0
-	//      across four identical calls.
-	// An earlier one-off measurement of 9,682 bytes / 65% came from a retrieval
-	// that happened to contain off-topic chunks; it does not generalize.
+	// CONFIRMED 2026-08-18: ~70% of retrieved content is stripped before it can
+	// enter the context window (34,344B in / 23,206B saved on one call, per the
+	// proxy's own logs).
 	//
-	// The fix is a corpus whose results are NOT query-shaped — documentation
-	// pages, file reads, query dumps — where only part answers the question.
-	//
-	// It is a deliberately separate flow rather than retrieval bolted onto
-	// helpdesk or RFP: the corpus available in-cluster is academic papers
-	// (paper-search-mcp, one of the servers already carrying spec.reduce:true),
-	// so a research question is what it can honestly answer. Asking it about VPN
-	// certificates would retrieve irrelevant papers and misrepresent both the
-	// retrieval and the reduction.
-	//
-	// Everything else here is unchanged: the paraphrases still exercise C4 and
-	// the probe still must not hit. The difference is that each step's context
-	// arrives already reduced, with the byte count reported.
+	// It was briefly labelled as stripping "often ZERO". That was wrong, and the
+	// cause is worth recording: reduction metadata is TOP-LEVEL "meta" on the
+	// federation response, not result._meta, so the runner's parser read zero on
+	// every call while the proxy was visibly shrinking payloads ~3x. The
+	// symptom looked exactly like a reduction that never fired, and was
+	// misdiagnosed as one for some time. Instrumenting the reducer
+	// (tas-mcp #28) is what surfaced the truth in a single log line.
 	{
 		ID:          "research-rag",
-		Label:       "Research RAG (MCP retrieval)",
-		WhatItShows: "Exercises the applied-reduction path: each step retrieves through the MCP proxy, which may strip irrelevant content from the tool result before it enters the context window. Reports whatever it actually strips — often ZERO here, because relevance is scored against the search query and a search tool already returns query-shaped results. Reduction pays on tools that return bulk that is not query-shaped (documents, file reads, query dumps).",
+		Label:       "Research RAG (applied reduction)",
+		WhatItShows: "APPLIED reduction, measured per step. Each step retrieves through the MCP proxy, which strips irrelevant chunks from the tool result before it can enter the context window — measured at ~70% on this corpus (e.g. 34KB retrieved, 23KB stripped). Unlike the other flows, this is content actually removed, not an estimate of what could be.",
 		Model:       "claude-haiku-4-5-20251001", MaxTokens: 384, Temperature: zeroTemp,
 		ExpectedReductionPct: 40, ExpectedCacheHitPct: 50,
 		Retrieval: &retrievalSpec{
