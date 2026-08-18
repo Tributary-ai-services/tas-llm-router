@@ -283,3 +283,23 @@ func TestOnlyRetrievalFlowsDeclareRetrieval(t *testing.T) {
 		}
 	}
 }
+
+// research-rag expects ZERO cache hits, and that is a measured structural fact,
+// not pessimism: C4 embeds lastUserText, which in this flow carries the
+// retrieved context, so no two requests can match. If someone "fixes" this to a
+// flattering number without moving the context out of the user turn, the flow
+// starts overclaiming again — the failure this whole flow exists to avoid.
+func TestRetrievalFlowExpectsNoCacheHits(t *testing.T) {
+	f, ok := flowByID("research-rag")
+	if !ok {
+		t.Fatal("research-rag flow missing")
+	}
+	if f.ExpectedCacheHitPct != 0 {
+		t.Errorf("ExpectedCacheHitPct = %v, want 0 — the retrieved context is inside the embedded prompt, so semantic caching cannot fire", f.ExpectedCacheHitPct)
+	}
+	// The reduction claim, by contrast, IS met (~69% measured), so it must stay
+	// non-trivial or the flow stops demonstrating the thing it exists for.
+	if f.ExpectedReductionPct < 20 {
+		t.Errorf("ExpectedReductionPct = %v, want >=20 — applied reduction measures ~69 percent here", f.ExpectedReductionPct)
+	}
+}

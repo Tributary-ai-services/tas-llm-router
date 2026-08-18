@@ -261,9 +261,23 @@ var flowCatalog = []demoFlow{
 	{
 		ID:          "research-rag",
 		Label:       "Research RAG (applied reduction)",
-		WhatItShows: "APPLIED reduction, measured per step. Each step retrieves through the MCP proxy, which strips irrelevant chunks from the tool result before it can enter the context window — measured at ~70% on this corpus (e.g. 34KB retrieved, 23KB stripped). Unlike the other flows, this is content actually removed, not an estimate of what could be.",
+		WhatItShows: "APPLIED reduction — content actually removed, not an estimate. Each step retrieves through the MCP proxy, which strips irrelevant chunks before they can enter the context window: measured ~69% here (31KB stripped of 45KB retrieved). Cache hits are ZERO by design, and that is the second lesson: the retrieved context sits inside the prompt, so every request is unique and semantic caching cannot fire. Reduction and naive RAG caching do not compose.",
 		Model:       "claude-haiku-4-5-20251001", MaxTokens: 384, Temperature: zeroTemp,
-		ExpectedReductionPct: 40, ExpectedCacheHitPct: 50,
+		// Cache expectation is 0, not optimistic-but-unmet. C4 embeds
+		// lastUserText (server.go) — the last role:"user" message — and in this
+		// flow that message carries the retrieved context, which differs on every
+		// step. So no two requests can ever match. Verified with a control:
+		// identical question + deliberately different context still missed.
+		//
+		// It is achievable — putting the context in a "system" message and
+		// leaving the question as the "user" turn keys C4 on the question alone,
+		// and the same control then returned semantic_hit with NO gateway change.
+		// Deliberately NOT done: that serves an answer grounded in one retrieval
+		// to a request that retrieved something else. The L2 guards cannot catch
+		// it (identical question ⇒ negation/entity checks pass trivially); only
+		// the TTL bounds it. Safe for a stable corpus, wrong for time-varying
+		// data — an opt-in decision, not a default.
+		ExpectedReductionPct: 40, ExpectedCacheHitPct: 0,
 		Retrieval: &retrievalSpec{
 			Server:   "paper-search-mcp",
 			Tool:     "search_papers",
