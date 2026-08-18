@@ -43,6 +43,26 @@ func Verify(incoming string, cand *Entry, scope Scope, now time.Time, ttl time.D
 	if !discriminativeTokensMatch(incoming, cand.Prompt) {
 		return VerifyResult{Reason: "entity_number_date"}
 	}
+	// a2. Environment/tier guard — deployment environments must agree.
+	//
+	// Same shape as the entity guard, but lowercase: "production" and "staging"
+	// are ordinary common nouns, so nothing above this line sees them. They are
+	// nonetheless the most answer-changing word in the sentence.
+	//
+	// This exists because no similarity threshold can catch it. Measured against
+	// "What is our policy for rotating production database credentials?":
+	//
+	//	                                        all-minilm  langcache
+	//	"...rotating STAGING database creds?"      0.8904     0.8971   <- WRONG answer
+	//	"How often do we rotate production DB?"    0.8684     0.7590   <- right answer
+	//
+	// The near-miss scores ABOVE the genuine paraphrase on both embedders: a
+	// one-word swap preserves the sentence, while a real paraphrase restructures
+	// it. Any threshold loose enough to serve the paraphrase also serves the
+	// staging answer, so this has to be a guard, not a number.
+	if !environmentsMatch(incoming, cand.Prompt) {
+		return VerifyResult{Reason: "environment"}
+	}
 	return VerifyResult{Pass: true}
 }
 
@@ -236,6 +256,111 @@ func discriminativeTokensMatch(a, b string) bool {
 	}
 	for k := range ta {
 		if _, ok := tb[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// environmentAliases maps every spelling of a deployment environment onto one
+// canonical name. Canonicalisation is the load-bearing half: "prod" and
+// "production" MUST collapse, or the guard rejects
+// "rotation policy for prod database passwords?" against a "production" entry —
+// turning a guard that prevents a wrong answer into one that suppresses a right
+// one. Over-rejection is cheap (a miss) but not free, and this class of
+// paraphrase is common.
+// Membership is limited to tokens whose dominant sense in a question IS the
+// environment. This guard fires whenever the two sides differ, so a polysemous
+// word turns ordinary prose into a mismatch and costs hits on traffic that has
+// nothing to do with environments. The same reasoning keeps stop/skip/block out
+// of negationWords.
+//
+// Deliberately EXCLUDED, with the prose sense that disqualifies them:
+//
+//	live        "live stream", "where do you live"
+//	test        "how do I test this" — far more often a verb than an environment
+//	qa          overlaps QA-the-team and question-answering; capitalised "QA"
+//	            is already an acronym entity
+//	local       "local file", "local time"
+//	demo        "can you demo this", "demo account"
+//	dr          reads as the honorific far more often than disaster recovery
+//	int         "int vs long" in any coding question
+//
+// Each would prevent a real cache hit far more often than it would prevent a
+// wrong answer, which is the wrong side of the trade for a word that is only
+// occasionally an environment.
+var environmentAliases = map[string]string{
+	"prod": "production", "production": "production", "prd": "production",
+
+	"stage": "staging", "staging": "staging", "stg": "staging",
+
+	"dev": "development", "development": "development", "devel": "development",
+
+	"uat":     "uat",
+	"sandbox": "sandbox", "sbx": "sandbox",
+	"canary":        "canary",
+	"preprod":       "preproduction",
+	"preproduction": "preproduction",
+	"nonprod":       "nonproduction",
+	"nonproduction": "nonproduction",
+	"integration":   "integration",
+}
+
+// environmentsOf returns the canonical environments named in s.
+//
+// Token equality, never substring: "production" is a substring of
+// "reproduction" and "prod" of "product"/"produce", so substring matching would
+// invent an environment out of ordinary prose and reject unrelated paraphrases.
+//
+// Hyphens are normalised to spaces so "pre-prod" tokenises, and the two-word
+// forms ("pre prod", "non prod") are folded before the single-token pass —
+// otherwise "pre-prod" would read as bare "prod" and canonicalise to
+// production, i.e. the exact confusion the guard exists to prevent.
+func environmentsOf(s string) map[string]struct{} {
+	lower := strings.ToLower(s)
+	lower = strings.ReplaceAll(lower, "-", " ")
+	lower = strings.ReplaceAll(lower, "_", " ")
+	toks := reWord.FindAllString(lower, -1)
+
+	out := map[string]struct{}{}
+	for i := 0; i < len(toks); i++ {
+		// Two-word qualifiers first; they change which environment is meant.
+		if i+1 < len(toks) {
+			switch toks[i] {
+			case "pre":
+				if canon, ok := environmentAliases[toks[i+1]]; ok && canon == "production" {
+					out["preproduction"] = struct{}{}
+					i++
+					continue
+				}
+			case "non", "no":
+				if canon, ok := environmentAliases[toks[i+1]]; ok && canon == "production" {
+					out["nonproduction"] = struct{}{}
+					i++
+					continue
+				}
+			}
+		}
+		if canon, ok := environmentAliases[toks[i]]; ok {
+			out[canon] = struct{}{}
+		}
+	}
+	return out
+}
+
+// environmentsMatch is true iff both prompts name the SAME set of environments.
+//
+// An environment named in one and absent from the other counts as a mismatch:
+// "rotate credentials" against "rotate staging credentials" are different
+// questions, and the unqualified one usually means production. Treating absence
+// as a wildcard would let the general question serve the staging answer.
+func environmentsMatch(a, b string) bool {
+	ea, eb := environmentsOf(a), environmentsOf(b)
+	if len(ea) != len(eb) {
+		return false
+	}
+	for k := range ea {
+		if _, ok := eb[k]; !ok {
 			return false
 		}
 	}
