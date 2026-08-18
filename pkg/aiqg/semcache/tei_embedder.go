@@ -32,7 +32,9 @@ import (
 // ⚠️ Dimensionality is 384 — the same as all-minilm — which makes this a
 // drop-in for the RediSearch FLAT index but ALSO means the store will silently
 // compare vectors from the two models if entries outlive a switch. The cache
-// key and Scope do not identify the embedder. Flush aiqg:scache:* on cutover.
+// key and Scope do not identify the embedder. Flush the ENTRY keys on cutover
+// (aiqg:scache:{tenant}:*) — never aiqg:scache:*, which also holds the judge's
+// labeled pairs.
 type TEIEmbedder struct {
 	baseURL string
 	dim     int

@@ -58,7 +58,13 @@ func buildSemJudge(cfg AIQGSemCacheConfig, fallbackModel string, router *routing
 	}
 
 	grader := semcache.NewPromptGrader((&semJudgeGrader{router: router, model: model}).chat)
-	sink := &redisPairSink{rdb: scRedis, key: "aiqg:scache:labeled_pairs", max: 50000}
+	// NOT under aiqg:scache: — that prefix holds the cached vectors, and an
+	// embedder cutover REQUIRES flushing them (all-minilm and langcache are both
+	// 384-dim, so the store cannot tell their vectors apart). The judged pairs are
+	// the training corpus for SimCalibrator and must SURVIVE that flush; sharing
+	// the prefix meant a documented, necessary `flush aiqg:scache:*` silently
+	// destroyed weeks of labels. Observed for real on 2026-08-17.
+	sink := &redisPairSink{rdb: scRedis, key: semcache.LabeledPairsKey, max: 50000}
 	budget := semcache.NewDailyBudget(cfg.JudgeDailyUSD)
 	loop := semcache.NewLoop(grader, sink, semcache.NewSimCalibrator(0.5, 20), budget, semJudgeQueue)
 
