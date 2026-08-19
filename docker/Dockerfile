@@ -21,6 +21,9 @@ WORKDIR /build
 # exist under the build context.
 COPY Gatekeeper/ /build/Gatekeeper/
 COPY aether-shared/go-events/ /build/aether-shared/go-events/
+# Shared traffic matcher (route rules + experiment cohorts). Same sibling-replace
+# pattern; must land before `go mod download` so the replace target resolves.
+COPY aether-shared/go-aiqg-matcher/ /build/aether-shared/go-aiqg-matcher/
 
 WORKDIR /build/app
 

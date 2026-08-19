@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	matcher "github.com/Tributary-ai-services/aether-shared/go-aiqg-matcher"
 	"hash/crc32"
 	"io"
 	"net/http"
@@ -38,12 +39,18 @@ type Variant struct {
 
 // Cohort is the eligibility matcher. Empty fields match anything; non-empty
 // lists are OR-within / AND-across (a request must satisfy every set field).
-type Cohort struct {
-	URLPath      string   `json:"url_path,omitempty"`
-	SourceApp    []string `json:"source_app,omitempty"`
-	Model        []string `json:"model,omitempty"`
-	WorkflowType []string `json:"workflow_type,omitempty"`
-}
+// Cohort is the shared traffic matcher. It was a separate implementation whose
+// url_path was a SUBSTRING match while the route-rule matcher of the same name
+// was an RE2 regex — so the same matcher text selected different traffic on the
+// two surfaces. The alias makes divergence impossible rather than unlikely.
+//
+// The stored JSON shape is unchanged (url_path, source_app, model,
+// workflow_type); the shared type additionally accepts vendor and
+// customer_header_match, which the experiment loader simply never populates.
+//
+// url_path is now RE2. Stored cohorts were migrated with QuoteMeta so their
+// previous substring behaviour is preserved exactly.
+type Cohort = matcher.Matcher
 
 // Assignment controls the sticky key + decorrelation salt.
 type Assignment struct {
@@ -91,6 +98,20 @@ type ReqAttrs struct {
 	Path         string
 }
 
+// toMatcherAttrs adapts the gateway's request attributes to the shared
+// evaluator. Vendor and Headers are deliberately left empty: the experiment
+// resolver does not receive them, and matcher.GatewayResolve records that so a
+// cohort constraining them is rejected at write time rather than failing
+// silently here.
+func (a ReqAttrs) toMatcherAttrs() matcher.Attrs {
+	return matcher.Attrs{
+		SourceApp:    a.SourceApp,
+		Model:        a.Model,
+		WorkflowType: a.WorkflowType,
+		Path:         a.Path,
+	}
+}
+
 // Decision is the assignment outcome. Apply is true only for running
 // experiments (dry_run assigns + stamps but the router ignores Override).
 type Decision struct {
@@ -130,33 +151,9 @@ func bucket(expID, salt, key string) int {
 	return int(h % 10000)
 }
 
-func containsFold(list []string, v string) bool {
-	for _, x := range list {
-		if strings.EqualFold(x, v) {
-			return true
-		}
-	}
-	return false
-}
-
 // matches reports cohort eligibility. URLPath uses substring containment (a
 // conservative stand-in for the route-rule regex; over-matches rather than
 // under-matches, consistent with the collision-detection bias).
-func (c Cohort) matches(a ReqAttrs) bool {
-	if len(c.SourceApp) > 0 && !containsFold(c.SourceApp, a.SourceApp) {
-		return false
-	}
-	if len(c.Model) > 0 && !containsFold(c.Model, a.Model) {
-		return false
-	}
-	if len(c.WorkflowType) > 0 && !containsFold(c.WorkflowType, a.WorkflowType) {
-		return false
-	}
-	if c.URLPath != "" && !strings.Contains(a.Path, c.URLPath) {
-		return false
-	}
-	return true
-}
 
 // withinSchedule reports whether now is inside [StartsAt, EndsAt] (open ends
 // when unset).
@@ -276,7 +273,7 @@ func (r *Resolver) Resolve(ctx context.Context, tenantID string, id Identity, at
 		if !e.withinSchedule(now) {
 			continue
 		}
-		if !e.Cohort.matches(attrs) {
+		if !e.Cohort.Matches(attrs.toMatcherAttrs()) {
 			continue
 		}
 		// Cohort matched — this experiment claims the request.

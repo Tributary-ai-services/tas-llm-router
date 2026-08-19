@@ -3,6 +3,7 @@ package experiments
 import (
 	"context"
 	"encoding/json"
+	matcher "github.com/Tributary-ai-services/aether-shared/go-aiqg-matcher"
 	"testing"
 	"time"
 )
@@ -98,18 +99,51 @@ func TestAssignmentKey_LadderFallback(t *testing.T) {
 
 func TestCohortMatches(t *testing.T) {
 	c := Cohort{SourceApp: []string{"checkout"}, WorkflowType: []string{"rag"}}
-	if !c.matches(ReqAttrs{SourceApp: "checkout", WorkflowType: "rag"}) {
+	if !c.Matches(ReqAttrs{SourceApp: "checkout", WorkflowType: "rag"}.toMatcherAttrs()) {
 		t.Error("should match")
 	}
-	if c.matches(ReqAttrs{SourceApp: "other", WorkflowType: "rag"}) {
+	if c.Matches(ReqAttrs{SourceApp: "other", WorkflowType: "rag"}.toMatcherAttrs()) {
 		t.Error("source_app mismatch should fail")
 	}
-	if c.matches(ReqAttrs{SourceApp: "checkout", WorkflowType: "code_generation"}) {
+	if c.Matches(ReqAttrs{SourceApp: "checkout", WorkflowType: "code_generation"}.toMatcherAttrs()) {
 		t.Error("workflow mismatch should fail")
 	}
 	// Empty cohort matches anything.
-	if !(Cohort{}).matches(ReqAttrs{SourceApp: "anything"}) {
+	if !(Cohort{}).Matches(ReqAttrs{SourceApp: "anything"}.toMatcherAttrs()) {
 		t.Error("empty cohort must match all")
+	}
+}
+
+// url_path changed meaning when cohorts adopted the shared matcher: it was a
+// SUBSTRING match and is now an RE2 regex. The old behaviour was untested, so
+// these lock in both the new semantics and the migration that preserves the old
+// ones.
+func TestCohortURLPathIsRegexAfterSharedMatcher(t *testing.T) {
+	// Anchoring is now expressible — it was not under substring matching.
+	anchored := Cohort{URLPath: "^/v1/chat$"}
+	if anchored.Matches(ReqAttrs{Path: "/v1/chat_admin"}.toMatcherAttrs()) {
+		t.Error("anchored pattern must not match /v1/chat_admin")
+	}
+	if !anchored.Matches(ReqAttrs{Path: "/v1/chat"}.toMatcherAttrs()) {
+		t.Error("anchored pattern must match its exact path")
+	}
+
+	// An unanchored pattern still behaves like the old substring match, which is
+	// why the vast majority of stored cohorts are unaffected by the change.
+	loose := Cohort{URLPath: "/v1/chat"}
+	if !loose.Matches(ReqAttrs{Path: "/api/v1/chat/completions"}.toMatcherAttrs()) {
+		t.Error("unanchored pattern should still match anywhere in the path")
+	}
+
+	// A stored substring containing regex metacharacters is migrated with
+	// QuoteMeta, so it keeps meaning the literal text rather than becoming a
+	// wildcard. This is the case the migration exists for.
+	migrated := Cohort{URLPath: matcher.SubstringToRegex("v1.chat")}
+	if migrated.Matches(ReqAttrs{Path: "v1Xchat"}.toMatcherAttrs()) {
+		t.Error("migrated substring must keep '.' literal, not match any character")
+	}
+	if !migrated.Matches(ReqAttrs{Path: "/api/v1.chat"}.toMatcherAttrs()) {
+		t.Error("migrated substring must still match the literal text")
 	}
 }
 
