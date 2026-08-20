@@ -1026,16 +1026,30 @@ func (r *Router) getProviderHealthStatuses() map[string]string {
 // explains itself rather than silently routing elsewhere.
 func (r *Router) routeWithPin(ctx context.Context, req *types.ChatRequest, strategy RoutingStrategy) (*RoutingDecision, providers.LLMProvider, error) {
 	pin := PinnedProviderFrom(ctx)
+	chain := ChainFrom(ctx)
+
 	if pin == "" {
-		return r.routeByStrategy(ctx, req, strategy)
+		return r.constrainedStrategy(ctx, req, strategy, chain)
+	}
+
+	// A tenant's declared constraints bind at RUN time, not only at write
+	// time. Constraints are validated when a rule is saved, but they can be
+	// tightened afterwards — and the moment a tenant declares a vendor
+	// forbidden, traffic must stop reaching it, including through rules
+	// written before the declaration. Enforcing only at write time would leave
+	// every pre-existing rule as a standing exception, which is precisely the
+	// gap a compliance control cannot have.
+	if !chain.AllowedTarget(pin) {
+		return r.escapePin(ctx, req, strategy, chain,
+			"pinned provider "+pin+" is denied by tenant constraints")
 	}
 
 	prov, ok := r.providers[pin]
 	if !ok {
-		return r.routeByStrategyNoting(ctx, req, strategy, "pinned provider "+pin+" is not configured; used "+string(strategy))
+		return r.escapePin(ctx, req, strategy, chain, "pinned provider "+pin+" is not configured")
 	}
 	if !r.isProviderHealthy(pin) {
-		return r.routeByStrategyNoting(ctx, req, strategy, "pinned provider "+pin+" unhealthy; used "+string(strategy))
+		return r.escapePin(ctx, req, strategy, chain, "pinned provider "+pin+" unhealthy")
 	}
 
 	costEst, err := prov.EstimateCost(req)
@@ -1105,6 +1119,66 @@ func (r *Router) admitOrReselect(ctx context.Context, req *types.ChatRequest, de
 	decision.Reasoning = append(decision.Reasoning,
 		"breaker ejected "+decision.SelectedProvider+" but no alternative was available; proceeded anyway")
 	return decision, provider
+}
+
+// escapePin handles a pin that cannot be honoured.
+//
+// This is the resolution of routing-decision.md open question 2 — is
+// provider_override a hard pin or a preference? The answer is now: a pin,
+// whose ONLY sanctioned escape is the fallback chain.
+//
+// When a chain exists, an unusable pin starts at tier 1. That is a real pin:
+// the request goes where the operator said it may go, in the order they chose,
+// and nowhere else.
+//
+// When NO chain exists the request still falls through to the configured
+// strategy, and that residue is deliberate rather than an oversight. Failing
+// outright would turn a momentary provider blip into a tenant outage for every
+// rule that has not yet configured failover — punishing operators for not
+// having adopted a feature that shipped minutes ago. The escape is recorded on
+// the decision either way, so a pin that was not honoured is always visible on
+// the event rather than inferred. As chains become the norm this branch should
+// narrow to nothing, and can then be made an error.
+func (r *Router) escapePin(ctx context.Context, req *types.ChatRequest, strategy RoutingStrategy, chain *Chain, why string) (*RoutingDecision, providers.LLMProvider, error) {
+	if chain.Configured() {
+		if prov, tier, ok := r.Tier(chain, 1); ok {
+			r.logger.WithFields(logrus.Fields{"reason": why, "tier": tier.Provider + "/" + tier.Model}).
+				Warn("Pin not honoured; entering the fallback chain")
+			return &RoutingDecision{
+				SelectedProvider: tier.Provider,
+				Reasoning:        []string{why + "; entered fallback chain at tier 1 (" + tier.Provider + "/" + tier.Model + ")"},
+			}, prov, nil
+		}
+	}
+	return r.routeByStrategyNoting(ctx, req, strategy, why+"; no usable fallback chain, so used "+string(strategy))
+}
+
+// constrainedStrategy runs normal selection and then refuses a denied
+// provider, because a tenant's constraints must bind however the provider was
+// chosen — not only when a rule named it explicitly.
+func (r *Router) constrainedStrategy(ctx context.Context, req *types.ChatRequest, strategy RoutingStrategy, chain *Chain) (*RoutingDecision, providers.LLMProvider, error) {
+	dec, prov, err := r.routeByStrategy(ctx, req, strategy)
+	if err != nil || dec == nil || chain.AllowedTarget(dec.SelectedProvider) {
+		return dec, prov, err
+	}
+	denied := dec.SelectedProvider
+	for _, name := range r.providerNames {
+		if name == denied || !chain.AllowedTarget(name) || !r.isProviderHealthy(name) {
+			continue
+		}
+		if alt, ok := r.providers[name]; ok {
+			return &RoutingDecision{
+				SelectedProvider: name,
+				EstimatedCost:    dec.EstimatedCost,
+				Reasoning:        append(dec.Reasoning, "strategy chose "+denied+", which tenant constraints deny; used "+name),
+			}, alt, nil
+		}
+	}
+	// Nothing permitted. Unlike an ejection — where proceeding is better than
+	// refusing, because the target may have recovered — a constraint says this
+	// vendor must never be used. Serving anyway would be the breach the
+	// constraint exists to prevent, so this fails.
+	return nil, nil, fmt.Errorf("no provider satisfies this tenant's routing constraints (strategy selected %s, which is denied)", denied)
 }
 
 // routeByStrategyNoting routes normally but records why the pin was ignored.

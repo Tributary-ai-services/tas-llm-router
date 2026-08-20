@@ -498,3 +498,55 @@ func (b *Breaker) Override(h *resilience.Health, bu *resilience.Budgets) *Breake
 	}
 	return &Breaker{store: b.store, cfg: cfg}
 }
+
+// ---------------------------------------------------------------------------
+// Fallback classification.
+//
+// Deliberately in the same file as ClassifyError so the two-axes distinction
+// is visible at a glance rather than discovered later: whether a failure
+// EJECTS a provider and whether it ADVANCES a fallback chain are different
+// questions with different answers, and reading one function without the other
+// is how they get conflated.
+// ---------------------------------------------------------------------------
+
+// ClassifyFailure maps an error to the fallback taxonomy
+// (go-aiqg-resilience.FailureClass), reporting ok=false when the failure is
+// not one a chain should ever act on.
+//
+// The ok=false case matters as much as the classes. A malformed request, a bad
+// API key, or a request for a model that does not exist will be rejected
+// identically by every provider — so advancing the chain only multiplies one
+// client error across every vendor, spending the whole chain and the latency
+// budget to arrive at the same answer, while making the real cause harder to
+// see.
+func ClassifyFailure(err error) (resilience.FailureClass, bool) {
+	if err == nil {
+		return "", false
+	}
+	s := strings.ToLower(err.Error())
+
+	// Context overflow first: it is a 4xx and would otherwise be swallowed by
+	// the client-error branch below, yet it is precisely the case a chain
+	// exists to solve — a larger-window model serves the same request
+	// unchanged.
+	if containsAny(s,
+		"context length", "context_length_exceeded", "maximum context",
+		"context window", "too many tokens", "prompt is too long", "input is too long") {
+		return resilience.FailureContextOverflow, true
+	}
+	if containsAny(s, "429", "rate limit", "too many requests", "overloaded") {
+		return resilience.FailureRateLimited, true
+	}
+	if containsAny(s, "content_filter", "content policy", "refused", "safety") {
+		return resilience.FailureContentFilter, true
+	}
+	if containsAny(s, "timeout", "timed out", "deadline exceeded", "context canceled") {
+		return resilience.FailureTimeout, true
+	}
+	// Our own error: every provider will say the same thing.
+	if containsAny(s, "400 ", "401 ", "403 ", "404 ", "422 ",
+		"bad request", "unauthorized", "not_found_error", "not found", "invalid_request") {
+		return "", false
+	}
+	return resilience.FailureVendorError, true
+}

@@ -900,6 +900,13 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		reqCtx = routing.WithResilience(reqCtx, h, b)
 		ctxChanged = true
 	}
+	// The failover chain and the tenant's constraints. Attached even when only
+	// constraints are present: they bound routing whether or not a rule
+	// configured failover, including on the default path where no rule matched.
+	if fb, cons := middleware.ResolvedFallback(reqCtx); fb != nil || cons != nil {
+		reqCtx = routing.WithChain(reqCtx, routing.NewChain(fb, cons))
+		ctxChanged = true
+	}
 	if ctxChanged {
 		r = r.WithContext(reqCtx)
 	}
@@ -1472,13 +1479,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 // handleNonStreamingCompletion handles non-streaming chat completions
 func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, provider providers.LLMProvider, metadata *types.RouterMetadata) {
-	resp, err := provider.ChatCompletion(r.Context(), req)
-	// Feed the outcome to passive outlier detection before anything else can
-	// return early. Classification matters as much as recording: a 404 for a
-	// model this provider does not serve is OUR error, and counting it against
-	// the provider would let one bad route rule eject a healthy vendor for
-	// every tenant (tas-llm-router#151).
-	s.router.RecordOutcome(r.Context(), metadata.Provider, req.Model, breaker.ClassifyError(err))
+	resp, err := s.completeWithFallback(r, req, provider, metadata)
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("Chat completion failed")
 		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))

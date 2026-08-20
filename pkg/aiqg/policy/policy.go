@@ -55,6 +55,16 @@ type Resolution struct {
 	// silently reset every other threshold to zero.
 	Health  *resilience.Health
 	Budgets *resilience.Budgets
+
+	// Fallback is the matched rule's ordered failover chain; Constraints are
+	// the tenant's declared compliance limits.
+	//
+	// Constraints arrive on EVERY resolution, including the default rung where
+	// no rule matched, because they bound routing as a whole. A constraint
+	// that only travelled with a matched rule would be unenforced for exactly
+	// the traffic nobody wrote a rule for.
+	Fallback    *resilience.Fallback
+	Constraints *resilience.Constraints
 }
 
 // Target is a resolved routing destination. Model empty means "keep the
@@ -157,8 +167,10 @@ type resolveResponse struct {
 		Model    string `json:"model,omitempty"`
 		Source   string `json:"source,omitempty"`
 	} `json:"target,omitempty"`
-	Health  *resilience.Health  `json:"health,omitempty"`
-	Budgets *resilience.Budgets `json:"budgets,omitempty"`
+	Health      *resilience.Health      `json:"health,omitempty"`
+	Budgets     *resilience.Budgets     `json:"budgets,omitempty"`
+	Fallback    *resilience.Fallback    `json:"fallback,omitempty"`
+	Constraints *resilience.Constraints `json:"constraints,omitempty"`
 }
 
 // ErrResolverBadRequest is returned when the dashboard rejects the
@@ -229,6 +241,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		// Carried through only when the control plane sent them; an absent
 		// block stays nil so the gateway's own defaults apply untouched.
 		res.Health, res.Budgets = v.Health, v.Budgets
+		res.Fallback, res.Constraints = v.Fallback, v.Constraints
 		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log
