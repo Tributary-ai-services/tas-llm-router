@@ -89,7 +89,7 @@ func TestDefaultAuthProvider_GenerateAndValidateJWT(t *testing.T) {
 
 	userID := "test-user"
 	claims := map[string]interface{}{
-		"permissions": []string{"api:access", "admin:read"},
+		"permissions":  []string{"api:access", "admin:read"},
 		"organization": "test-org",
 	}
 

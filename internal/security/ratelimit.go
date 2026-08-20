@@ -48,11 +48,11 @@ type RateLimitConfig struct {
 type InMemoryRateLimiter struct {
 	config *RateLimitConfig
 	logger *logrus.Logger
-	
+
 	// In-memory storage
 	buckets map[string]*tokenBucket
 	mutex   sync.RWMutex
-	
+
 	// Cleanup ticker
 	cleanupTicker *time.Ticker
 	stopCleanup   chan bool
@@ -61,9 +61,9 @@ type InMemoryRateLimiter struct {
 
 // tokenBucket represents a token bucket for rate limiting
 type tokenBucket struct {
-	tokens    int
+	tokens     int
 	lastRefill time.Time
-	mutex     sync.Mutex
+	mutex      sync.Mutex
 }
 
 // NewInMemoryRateLimiter creates a new in-memory rate limiter
@@ -77,17 +77,17 @@ func NewInMemoryRateLimiter(config *RateLimitConfig, logger *logrus.Logger) *InM
 	if config.BurstSize == 0 {
 		config.BurstSize = config.RequestsPerMinute
 	}
-	
+
 	rl := &InMemoryRateLimiter{
 		config:      config,
 		logger:      logger,
 		buckets:     make(map[string]*tokenBucket),
 		stopCleanup: make(chan bool),
 	}
-	
+
 	// Start cleanup goroutine
 	rl.startCleanup()
-	
+
 	return rl
 }
 
@@ -100,13 +100,13 @@ func (rl *InMemoryRateLimiter) Allow(ctx context.Context, key string) (*RateLimi
 			ResetTime: time.Now().Add(rl.config.WindowDuration),
 		}, nil
 	}
-	
+
 	now := time.Now()
 	bucket := rl.getOrCreateBucket(key)
-	
+
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	
+
 	// Refill tokens based on elapsed time
 	elapsed := now.Sub(bucket.lastRefill)
 	if elapsed > 0 {
@@ -114,7 +114,7 @@ func (rl *InMemoryRateLimiter) Allow(ctx context.Context, key string) (*RateLimi
 		bucket.tokens = minInt(bucket.tokens+tokensToAdd, rl.config.BurstSize)
 		bucket.lastRefill = now
 	}
-	
+
 	// Check if request is allowed
 	if bucket.tokens > 0 {
 		bucket.tokens--
@@ -124,15 +124,15 @@ func (rl *InMemoryRateLimiter) Allow(ctx context.Context, key string) (*RateLimi
 			ResetTime: now.Add(rl.config.WindowDuration),
 		}, nil
 	}
-	
+
 	// Request denied
 	retryAfter := time.Duration(float64(time.Minute) / float64(rl.config.RequestsPerMinute))
-	
+
 	rl.logger.WithFields(logrus.Fields{
 		"key":         maskKey(key),
 		"retry_after": retryAfter,
 	}).Warn("Rate limit exceeded")
-	
+
 	return &RateLimitResult{
 		Allowed:    false,
 		Remaining:  0,
@@ -145,9 +145,9 @@ func (rl *InMemoryRateLimiter) Allow(ctx context.Context, key string) (*RateLimi
 func (rl *InMemoryRateLimiter) Reset(ctx context.Context, key string) error {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	
+
 	delete(rl.buckets, key)
-	
+
 	rl.logger.WithField("key", maskKey(key)).Info("Rate limit reset")
 	return nil
 }
@@ -155,17 +155,17 @@ func (rl *InMemoryRateLimiter) Reset(ctx context.Context, key string) error {
 // GetLimits returns current rate limit information for a key
 func (rl *InMemoryRateLimiter) GetLimits(ctx context.Context, key string) (*RateLimitInfo, error) {
 	bucket := rl.getOrCreateBucket(key)
-	
+
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	
+
 	now := time.Now()
-	
+
 	// Calculate current state
 	elapsed := now.Sub(bucket.lastRefill)
 	tokensToAdd := int(elapsed.Minutes() * float64(rl.config.RequestsPerMinute))
 	currentTokens := minInt(bucket.tokens+tokensToAdd, rl.config.BurstSize)
-	
+
 	return &RateLimitInfo{
 		Limit:     rl.config.RequestsPerMinute,
 		Used:      rl.config.BurstSize - currentTokens,
@@ -178,23 +178,23 @@ func (rl *InMemoryRateLimiter) GetLimits(ctx context.Context, key string) (*Rate
 func (rl *InMemoryRateLimiter) getOrCreateBucket(key string) *tokenBucket {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	
+
 	bucket, exists := rl.buckets[key]
 	if !exists {
 		bucket = &tokenBucket{
-			tokens:    rl.config.BurstSize,
+			tokens:     rl.config.BurstSize,
 			lastRefill: time.Now(),
 		}
 		rl.buckets[key] = bucket
 	}
-	
+
 	return bucket
 }
 
 // startCleanup starts the cleanup goroutine to remove old buckets
 func (rl *InMemoryRateLimiter) startCleanup() {
 	rl.cleanupTicker = time.NewTicker(rl.config.CleanupInterval)
-	
+
 	go func() {
 		for {
 			select {
@@ -211,10 +211,10 @@ func (rl *InMemoryRateLimiter) startCleanup() {
 func (rl *InMemoryRateLimiter) cleanup() {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	
+
 	now := time.Now()
 	cutoff := now.Add(-2 * rl.config.WindowDuration)
-	
+
 	removed := 0
 	for key, bucket := range rl.buckets {
 		bucket.mutex.Lock()
@@ -224,7 +224,7 @@ func (rl *InMemoryRateLimiter) cleanup() {
 		}
 		bucket.mutex.Unlock()
 	}
-	
+
 	if removed > 0 {
 		rl.logger.WithField("removed_buckets", removed).Debug("Rate limit cleanup completed")
 	}
@@ -234,11 +234,11 @@ func (rl *InMemoryRateLimiter) cleanup() {
 func (rl *InMemoryRateLimiter) Stop() {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	
+
 	if rl.stopped {
 		return
 	}
-	
+
 	rl.stopped = true
 	if rl.cleanupTicker != nil {
 		rl.cleanupTicker.Stop()
@@ -257,7 +257,7 @@ func RateLimitMiddleware(rateLimiter RateLimiter, keyExtractor func(*http.Reques
 				next.ServeHTTP(w, r)
 				return
 			}
-			
+
 			// Check rate limit
 			result, err := rateLimiter.Allow(r.Context(), key)
 			if err != nil {
@@ -265,17 +265,17 @@ func RateLimitMiddleware(rateLimiter RateLimiter, keyExtractor func(*http.Reques
 				http.Error(w, "Rate limiting error", http.StatusInternalServerError)
 				return
 			}
-			
+
 			// Add rate limit headers
 			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(result.Remaining+1))
 			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(result.Remaining))
 			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(result.ResetTime.Unix(), 10))
-			
+
 			if !result.Allowed {
 				w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
-				
+
 				response := fmt.Sprintf(`{
 					"error": {
 						"message": "Rate limit exceeded",
@@ -285,11 +285,11 @@ func RateLimitMiddleware(rateLimiter RateLimiter, keyExtractor func(*http.Reques
 					},
 					"timestamp": %d
 				}`, int(result.RetryAfter.Seconds()), time.Now().Unix())
-				
+
 				w.Write([]byte(response))
 				return
 			}
-			
+
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -301,7 +301,7 @@ func DefaultKeyExtractor(r *http.Request) string {
 	if authInfo, ok := r.Context().Value("auth_info").(*AuthInfo); ok {
 		return "user:" + authInfo.UserID
 	}
-	
+
 	// Fall back to IP address
 	return "ip:" + getClientIPFromRequest(r)
 }

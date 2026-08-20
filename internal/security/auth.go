@@ -40,12 +40,12 @@ type JWTClaims struct {
 
 // Config holds authentication configuration
 type Config struct {
-	APIKeys          []string      `yaml:"api_keys"`
-	JWTSecret        string        `yaml:"jwt_secret"`
-	JWTExpiry        time.Duration `yaml:"jwt_expiry"`
-	RequireAuth      bool          `yaml:"require_auth"`
-	AllowedOrigins   []string      `yaml:"allowed_origins"`
-	TrustedProxies   []string      `yaml:"trusted_proxies"`
+	APIKeys        []string      `yaml:"api_keys"`
+	JWTSecret      string        `yaml:"jwt_secret"`
+	JWTExpiry      time.Duration `yaml:"jwt_expiry"`
+	RequireAuth    bool          `yaml:"require_auth"`
+	AllowedOrigins []string      `yaml:"allowed_origins"`
+	TrustedProxies []string      `yaml:"trusted_proxies"`
 }
 
 // DefaultAuthProvider implements the AuthProvider interface
@@ -59,7 +59,7 @@ func NewDefaultAuthProvider(config *Config, logger *logrus.Logger) *DefaultAuthP
 	if config.JWTExpiry == 0 {
 		config.JWTExpiry = 24 * time.Hour
 	}
-	
+
 	return &DefaultAuthProvider{
 		config: config,
 		logger: logger,
@@ -72,7 +72,7 @@ func (a *DefaultAuthProvider) Authenticate(ctx context.Context, token string) (*
 	if authInfo, err := a.ValidateAPIKey(ctx, token); err == nil {
 		return authInfo, nil
 	}
-	
+
 	// Try JWT token
 	if claims, err := a.ValidateJWT(token); err == nil {
 		return &AuthInfo{
@@ -82,7 +82,7 @@ func (a *DefaultAuthProvider) Authenticate(ctx context.Context, token string) (*
 			ExpiresAt:   &claims.ExpiresAt.Time,
 		}, nil
 	}
-	
+
 	return nil, errors.New("invalid authentication token")
 }
 
@@ -91,7 +91,7 @@ func (a *DefaultAuthProvider) ValidateAPIKey(ctx context.Context, apiKey string)
 	if apiKey == "" {
 		return nil, errors.New("API key is required")
 	}
-	
+
 	// Use constant-time comparison to prevent timing attacks
 	for i, validKey := range a.config.APIKeys {
 		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(validKey)) == 1 {
@@ -106,21 +106,21 @@ func (a *DefaultAuthProvider) ValidateAPIKey(ctx context.Context, apiKey string)
 			}, nil
 		}
 	}
-	
+
 	a.logger.WithFields(logrus.Fields{
 		"api_key_prefix": maskAPIKey(apiKey),
 		"remote_ip":      getClientIP(ctx),
 	}).Warn("Invalid API key attempted")
-	
+
 	return nil, errors.New("invalid API key")
 }
 
 // GenerateJWT generates a new JWT token
 func (a *DefaultAuthProvider) GenerateJWT(userID string, claims map[string]interface{}) (string, error) {
 	now := time.Now()
-	
+
 	jwtClaims := &JWTClaims{
-		UserID: userID,
+		UserID:   userID,
 		Metadata: make(map[string]string),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "llm-router-waf",
@@ -130,7 +130,7 @@ func (a *DefaultAuthProvider) GenerateJWT(userID string, claims map[string]inter
 			NotBefore: jwt.NewNumericDate(now),
 		},
 	}
-	
+
 	// Add custom claims
 	for key, value := range claims {
 		switch key {
@@ -144,7 +144,7 @@ func (a *DefaultAuthProvider) GenerateJWT(userID string, claims map[string]inter
 			}
 		}
 	}
-	
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtClaims)
 	return token.SignedString([]byte(a.config.JWTSecret))
 }
@@ -157,15 +157,15 @@ func (a *DefaultAuthProvider) ValidateJWT(tokenString string) (*JWTClaims, error
 		}
 		return []byte(a.config.JWTSecret), nil
 	})
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
 		return claims, nil
 	}
-	
+
 	return nil, errors.New("invalid JWT token")
 }
 
@@ -178,48 +178,48 @@ func (a *DefaultAuthProvider) AuthMiddleware() func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			
+
 			// Skip auth if not required
 			if !a.config.RequireAuth {
 				next.ServeHTTP(w, r)
 				return
 			}
-			
+
 			// Extract token from Authorization header or API-Key header
 			token := extractToken(r)
 			if token == "" {
 				a.writeUnauthorized(w, "Missing authentication token")
 				return
 			}
-			
+
 			// Authenticate token
 			ctx := context.WithValue(r.Context(), "client_ip", getClientIPFromRequest(r))
 			authInfo, err := a.Authenticate(ctx, token)
 			if err != nil {
 				a.logger.WithFields(logrus.Fields{
-					"error":     err.Error(),
-					"path":      r.URL.Path,
-					"method":    r.Method,
-					"remote_ip": getClientIPFromRequest(r),
+					"error":      err.Error(),
+					"path":       r.URL.Path,
+					"method":     r.Method,
+					"remote_ip":  getClientIPFromRequest(r),
 					"user_agent": r.UserAgent(),
 				}).Warn("Authentication failed")
-				
+
 				a.writeUnauthorized(w, "Invalid authentication token")
 				return
 			}
-			
+
 			// Add auth info to request context
 			ctx = context.WithValue(r.Context(), "auth_info", authInfo)
-			
+
 			// Log successful authentication
 			a.logger.WithFields(logrus.Fields{
-				"user_id":    authInfo.UserID,
-				"auth_type":  authInfo.Metadata["auth_type"],
-				"path":       r.URL.Path,
-				"method":     r.Method,
-				"remote_ip":  getClientIPFromRequest(r),
+				"user_id":   authInfo.UserID,
+				"auth_type": authInfo.Metadata["auth_type"],
+				"path":      r.URL.Path,
+				"method":    r.Method,
+				"remote_ip": getClientIPFromRequest(r),
 			}).Debug("Authentication successful")
-			
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -233,17 +233,17 @@ func extractToken(r *http.Request) string {
 	if strings.HasPrefix(authHeader, "Bearer ") {
 		return strings.TrimPrefix(authHeader, "Bearer ")
 	}
-	
+
 	// Try API-Key header
 	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
 		return apiKey
 	}
-	
+
 	// Try API-Key header (alternative)
 	if apiKey := r.Header.Get("API-Key"); apiKey != "" {
 		return apiKey
 	}
-	
+
 	return ""
 }
 
@@ -275,25 +275,25 @@ func getClientIPFromRequest(r *http.Request) string {
 		ips := strings.Split(xff, ",")
 		return strings.TrimSpace(ips[0])
 	}
-	
+
 	// Check X-Real-IP header
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return xri
 	}
-	
+
 	// Fall back to RemoteAddr
 	ip := r.RemoteAddr
 	if colonIndex := strings.LastIndex(ip, ":"); colonIndex != -1 {
 		ip = ip[:colonIndex]
 	}
-	
+
 	return ip
 }
 
 func (a *DefaultAuthProvider) writeUnauthorized(w http.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	
+
 	// Simple JSON response without using the json package to keep it lightweight
 	timestamp := time.Now().Unix()
 	response := fmt.Sprintf(`{"error":{"message":"%s","type":"authentication_error","code":401},"timestamp":%d}`, message, timestamp)

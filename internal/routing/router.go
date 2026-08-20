@@ -241,7 +241,7 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 		// every in-flight request retries at once and the retries become the
 		// load that keeps it down.
 		if attempt > 1 && r.breaker != nil && r.breaker.Enabled() {
-			if !r.breaker.AllowRetry(ctx, breaker.Target(decision.SelectedProvider, req.Model)) {
+			if !r.breakerFor(ctx).AllowRetry(ctx, breaker.Target(decision.SelectedProvider, req.Model)) {
 				lastError = fmt.Errorf("retry budget exhausted for provider %s", decision.SelectedProvider)
 				r.logger.WithField("provider", decision.SelectedProvider).
 					Warn("Retry suppressed: budget exhausted")
@@ -758,10 +758,19 @@ func (r *Router) RecordOutcome(ctx context.Context, provider, model string, outc
 	if r.breaker == nil || !r.breaker.Enabled() {
 		return
 	}
-	r.breaker.Record(ctx, breaker.Target(provider, ""), outcome)
+	br := r.breakerFor(ctx)
+	br.Record(ctx, breaker.Target(provider, ""), outcome)
 	if model != "" {
-		r.breaker.Record(ctx, breaker.Target(provider, model), outcome)
+		br.Record(ctx, breaker.Target(provider, model), outcome)
 	}
+}
+
+// breakerFor returns the breaker to use for this request, applying any
+// resilience overrides a matched route rule resolved. Falls back to the
+// gateway-wide breaker when no rule set any.
+func (r *Router) breakerFor(ctx context.Context) *breaker.Breaker {
+	h, b := ResilienceFrom(ctx)
+	return r.breaker.Override(h, b)
 }
 
 // filterByFeatures filters providers based on required features
@@ -1054,8 +1063,11 @@ func (r *Router) admitOrReselect(ctx context.Context, req *types.ChatRequest, de
 	if r.breaker == nil || !r.breaker.Enabled() || decision == nil {
 		return decision, provider
 	}
+	// A matched route rule may tighten or loosen the thresholds for THIS
+	// request. The counters stay shared — see Breaker.Override.
+	br := r.breakerFor(ctx)
 	target := breaker.Target(decision.SelectedProvider, req.Model)
-	ok, state := r.breaker.Admit(ctx, target)
+	ok, state := br.Admit(ctx, target)
 	if ok {
 		if state == breaker.HalfOpen {
 			decision.Reasoning = append(decision.Reasoning,
@@ -1073,7 +1085,7 @@ func (r *Router) admitOrReselect(ctx context.Context, req *types.ChatRequest, de
 		if !exists {
 			continue
 		}
-		if admitted, _ := r.breaker.Admit(ctx, breaker.Target(name, req.Model)); !admitted {
+		if admitted, _ := br.Admit(ctx, breaker.Target(name, req.Model)); !admitted {
 			continue
 		}
 		r.logger.WithFields(logrus.Fields{

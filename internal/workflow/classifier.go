@@ -14,13 +14,13 @@
 //     already-decoded ChatRequest.
 //
 // Heuristic priority (first match wins):
-//   1. tools / functions present → agentic
-//   2. ANY message looks like a summarization prompt → summarization
-//   3. ANY message looks like a code-generation prompt → code_generation
-//   4. ANY message looks like classification / extraction → classification_extraction
-//   5. prompt contains >=3 RAG-style separators → rag
-//   6. exactly one user message under 500 chars → single_turn_qa
-//   7. otherwise → "" (unknown, falls through to default SLA)
+//  1. tools / functions present → agentic
+//  2. ANY message looks like a summarization prompt → summarization
+//  3. ANY message looks like a code-generation prompt → code_generation
+//  4. ANY message looks like classification / extraction → classification_extraction
+//  5. prompt contains >=3 RAG-style separators → rag
+//  6. exactly one user message under 500 chars → single_turn_qa
+//  7. otherwise → "" (unknown, falls through to default SLA)
 package workflow
 
 import (
@@ -36,12 +36,12 @@ import (
 // than re-importing to avoid a middleware → workflow → middleware
 // import cycle.
 const (
-	WorkflowSingleTurnQA            = "single_turn_qa"
-	WorkflowRAG                     = "rag"
-	WorkflowAgentic                 = "agentic"
-	WorkflowSummarization           = "summarization"
-	WorkflowCodeGeneration          = "code_generation"
-	WorkflowClassificationExtract   = "classification_extraction"
+	WorkflowSingleTurnQA          = "single_turn_qa"
+	WorkflowRAG                   = "rag"
+	WorkflowAgentic               = "agentic"
+	WorkflowSummarization         = "summarization"
+	WorkflowCodeGeneration        = "code_generation"
+	WorkflowClassificationExtract = "classification_extraction"
 
 	// Single-turn QA upper bound on user-message length. Anything
 	// longer than this is "not a quick question" and falls through to

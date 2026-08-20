@@ -885,11 +885,22 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// it over the configured strategy; the pin is not honoured when the
 	// provider is unconfigured or unhealthy, and the router records why.
 	reqCtx := r.Context()
+	ctxChanged := false
 	if tgt := middleware.ResolvedTarget(reqCtx); tgt != nil && tgt.Provider != "" {
 		reqCtx = routing.WithPinnedProvider(reqCtx, tgt.Provider)
 		if tgt.Model != "" {
 			req.Model = tgt.Model
 		}
+		ctxChanged = true
+	}
+	// A matched rule may also tighten or loosen this request's resilience
+	// thresholds. Carried on the context for the same reason as the pin: it is
+	// routing metadata that must never reach a vendor payload.
+	if h, b := middleware.ResolvedResilience(reqCtx); h != nil || b != nil {
+		reqCtx = routing.WithResilience(reqCtx, h, b)
+		ctxChanged = true
+	}
+	if ctxChanged {
 		r = r.WithContext(reqCtx)
 	}
 	// AIQG experiments (Phase D): resolve the variant claiming this request on

@@ -26,12 +26,12 @@ func TestRouterIntegration(t *testing.T) {
 		APIKey: "test-api-key", // This won't actually be used in this test
 		Models: []types.ModelInfo{
 			{
-				Name:              "gpt-3.5-turbo",
-				ProviderModelID:   "gpt-3.5-turbo",
-				InputCostPer1K:    0.0015,
-				OutputCostPer1K:   0.002,
-				MaxContextWindow:  16385,
-				MaxOutputTokens:   4096,
+				Name:             "gpt-3.5-turbo",
+				ProviderModelID:  "gpt-3.5-turbo",
+				InputCostPer1K:   0.0015,
+				OutputCostPer1K:  0.002,
+				MaxContextWindow: 16385,
+				MaxOutputTokens:  4096,
 			},
 		},
 		Timeout: 30 * time.Second,
@@ -109,7 +109,7 @@ func TestConfigurationLoading(t *testing.T) {
 	// Test loading configuration with mock API keys set
 	t.Setenv("OPENAI_API_KEY", "test-openai-key")
 	t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-	
+
 	// Test loading configuration with defaults (no file)
 	cfg, err := config.LoadConfig("")
 	if err != nil {
@@ -152,12 +152,12 @@ func TestCostEstimation(t *testing.T) {
 		APIKey: "test-key",
 		Models: []types.ModelInfo{
 			{
-				Name:              "gpt-3.5-turbo",
-				ProviderModelID:   "gpt-3.5-turbo",
-				InputCostPer1K:    0.0015,
-				OutputCostPer1K:   0.002,
-				MaxContextWindow:  16385,
-				MaxOutputTokens:   4096,
+				Name:             "gpt-3.5-turbo",
+				ProviderModelID:  "gpt-3.5-turbo",
+				InputCostPer1K:   0.0015,
+				OutputCostPer1K:  0.002,
+				MaxContextWindow: 16385,
+				MaxOutputTokens:  4096,
 			},
 		},
 	}
@@ -205,12 +205,12 @@ func BenchmarkRouting(b *testing.B) {
 		APIKey: "test-key",
 		Models: []types.ModelInfo{
 			{
-				Name:              "gpt-3.5-turbo",
-				ProviderModelID:   "gpt-3.5-turbo",
-				InputCostPer1K:    0.0015,
-				OutputCostPer1K:   0.002,
-				MaxContextWindow:  16385,
-				MaxOutputTokens:   4096,
+				Name:             "gpt-3.5-turbo",
+				ProviderModelID:  "gpt-3.5-turbo",
+				InputCostPer1K:   0.0015,
+				OutputCostPer1K:  0.002,
+				MaxContextWindow: 16385,
+				MaxOutputTokens:  4096,
 			},
 		},
 	}

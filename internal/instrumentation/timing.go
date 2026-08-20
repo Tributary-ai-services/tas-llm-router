@@ -43,9 +43,9 @@ type TimingCollector struct {
 	gotConnAt           time.Time
 
 	// Vendor stream events
-	firstByteAt time.Time // TTFB: first response header byte received
+	firstByteAt  time.Time // TTFB: first response header byte received
 	firstTokenAt time.Time // TTFT: first non-empty content delta — distinct from TTFB
-	chunkAt     []time.Time
+	chunkAt      []time.Time
 
 	// Counters useful for the AIQG event payload
 	chunkCount        int
@@ -268,21 +268,21 @@ func (c *TimingCollector) Snapshot() Snapshot {
 	defer c.mu.Unlock()
 
 	s := Snapshot{
-		RequestReceivedAt:  zeroToNilTime(c.requestReceivedAt),
-		RequestForwardedAt: zeroToNilTime(c.requestForwardedAt),
-		LastChunkAt:        zeroToNilTime(c.lastChunkAt),
-		ResponseCompleteAt: zeroToNilTime(c.responseCompleteAt),
-		FirstByteAt:        zeroToNilTime(c.firstByteAt),
-		FirstTokenAt:       zeroToNilTime(c.firstTokenAt),
-		DNSStartAt:         zeroToNilTime(c.dnsStartAt),
-		DNSDoneAt:          zeroToNilTime(c.dnsDoneAt),
-		ConnectStartAt:     zeroToNilTime(c.connectStartAt),
-		ConnectDoneAt:      zeroToNilTime(c.connectDoneAt),
+		RequestReceivedAt:   zeroToNilTime(c.requestReceivedAt),
+		RequestForwardedAt:  zeroToNilTime(c.requestForwardedAt),
+		LastChunkAt:         zeroToNilTime(c.lastChunkAt),
+		ResponseCompleteAt:  zeroToNilTime(c.responseCompleteAt),
+		FirstByteAt:         zeroToNilTime(c.firstByteAt),
+		FirstTokenAt:        zeroToNilTime(c.firstTokenAt),
+		DNSStartAt:          zeroToNilTime(c.dnsStartAt),
+		DNSDoneAt:           zeroToNilTime(c.dnsDoneAt),
+		ConnectStartAt:      zeroToNilTime(c.connectStartAt),
+		ConnectDoneAt:       zeroToNilTime(c.connectDoneAt),
 		TLSHandshakeStartAt: zeroToNilTime(c.tlsHandshakeStartAt),
 		TLSHandshakeDoneAt:  zeroToNilTime(c.tlsHandshakeDoneAt),
-		GotConnAt:          zeroToNilTime(c.gotConnAt),
-		ChunkCount:         c.chunkCount,
-		ContentChunkCount:  c.contentChunkCount,
+		GotConnAt:           zeroToNilTime(c.gotConnAt),
+		ChunkCount:          c.chunkCount,
+		ContentChunkCount:   c.contentChunkCount,
 	}
 
 	// Derived intervals — only computed when both endpoints were stamped.

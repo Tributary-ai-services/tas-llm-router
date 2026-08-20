@@ -178,7 +178,7 @@ func TestAuditLogger_LogSuspiciousActivity(t *testing.T) {
 
 func TestAuditLogger_SanitizeDetails(t *testing.T) {
 	config := &AuditConfig{
-		Enabled: true,
+		Enabled:         true,
 		SensitiveFields: []string{"custom_secret"},
 	}
 	logger := logrus.New()
@@ -280,7 +280,7 @@ func TestAuditLogger_BufferOverflow(t *testing.T) {
 
 	// Should not hang or crash, but some events may be dropped
 	time.Sleep(100 * time.Millisecond)
-	
+
 	// The exact count may vary due to async processing and buffer overflow
 	count := auditor.GetEventCount()
 	assert.LessOrEqual(t, count, int64(5))

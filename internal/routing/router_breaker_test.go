@@ -5,6 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
 
 	"github.com/sirupsen/logrus"
 
@@ -190,4 +193,80 @@ func reasoningMentions(reasons []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Per-request overrides (the seam between a route rule and the breaker).
+// ---------------------------------------------------------------------------
+
+// A rule that sets one threshold must keep the rest. Resetting unset fields to
+// zero would silently disable ejection for every rule carrying one setting.
+func TestOverrideMergesRatherThanReplaces(t *testing.T) {
+	base := breaker.New(breaker.NewMemoryStore(), breaker.Config{ConsecutiveErrors: 5, EjectFor: 30 * time.Second})
+	got := base.Override(&resilience.Health{EjectForSeconds: 90}, nil).Config()
+
+	if got.EjectFor != 90*time.Second {
+		t.Fatalf("eject_for = %v, want the override", got.EjectFor)
+	}
+	if got.ConsecutiveErrors != 5 {
+		t.Fatalf("consecutive_errors = %d, want the base value preserved", got.ConsecutiveErrors)
+	}
+}
+
+// Overrides change the thresholds a decision is judged against, never which
+// counters it reads: two rules disagreeing about eject_for must still observe
+// the same provider, or each would see only its own slice of the traffic and
+// neither would detect an outage.
+//
+// Note which direction this works in. The trip rule is evaluated by whichever
+// config RECORDS an outcome, so a stricter rule ejects on its own traffic and
+// the ejection is then visible to everyone — rather than a lenient rule's
+// records being retroactively re-judged against a stricter threshold.
+func TestOverrideSharesTheSameCounters(t *testing.T) {
+	base := breaker.New(breaker.NewMemoryStore(), breaker.Config{ConsecutiveErrors: 5})
+	strict := base.Override(&resilience.Health{ConsecutiveErrors: 2}, nil)
+	ctx := context.Background()
+
+	// The strict rule trips on its own threshold...
+	strict.Record(ctx, "openai", breaker.ServerError)
+	strict.Record(ctx, "openai", breaker.ServerError)
+
+	// ...and the ejection is fleet-wide, not private to that rule. This is the
+	// property that matters: an ejected provider is ejected for everyone.
+	if ok, _ := base.Admit(ctx, "openai"); ok {
+		t.Fatal("an ejection made through an override was not visible to the base breaker")
+	}
+
+	// Counters are shared too, so the window reflects all traffic rather than
+	// one rule's slice.
+	st, _ := base.Status(ctx, "openai")
+	if st.Total == 0 {
+		t.Fatal("outcomes recorded through the override are missing from the shared window")
+	}
+}
+
+func TestNilOverrideReturnsTheSameBreaker(t *testing.T) {
+	base := breaker.New(breaker.NewMemoryStore(), breaker.Config{})
+	if base.Override(nil, nil) != base {
+		t.Fatal("a no-op override should not allocate a new breaker")
+	}
+}
+
+// The context carrier must survive derivation — resolution and routing are
+// several context wraps apart — and must store nothing when nothing is set.
+func TestResilienceContextRoundTrip(t *testing.T) {
+	ctx := WithResilience(context.Background(), &resilience.Health{EjectForSeconds: 90}, nil)
+	ctx = context.WithValue(ctx, struct{ k string }{"unrelated"}, 1)
+	h, b := ResilienceFrom(ctx)
+	if h == nil || h.EjectForSeconds != 90 {
+		t.Fatalf("health did not survive context derivation: %+v", h)
+	}
+	if b != nil {
+		t.Fatal("budgets should be nil when unset")
+	}
+
+	h2, b2 := ResilienceFrom(WithResilience(context.Background(), nil, nil))
+	if h2 != nil || b2 != nil {
+		t.Fatal("an empty override must store nothing")
+	}
 }

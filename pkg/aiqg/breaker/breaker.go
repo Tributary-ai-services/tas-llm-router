@@ -59,6 +59,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
 )
 
 // Outcome classifies a completed attempt against a target. See the package
@@ -446,4 +448,53 @@ func parseUint(s string) (uint64, error) {
 		}
 	}
 	return n, nil
+}
+
+// Override returns a Breaker sharing this one's store but using cfg overrides
+// merged over the base configuration. Only NON-ZERO override fields apply, so
+// a route rule that sets eject_for alone keeps every other threshold — a rule
+// carrying one setting must not silently reset the rest to zero.
+//
+// The store is shared deliberately. Overrides change the THRESHOLDS a decision
+// is judged against, never which counters it reads: two rules disagreeing about
+// eject_for must still observe the same provider, or each would see only its
+// own slice of the traffic and neither would detect an outage.
+//
+// Note which direction that works in. The trip rule is evaluated by whichever
+// config RECORDS an outcome, so a stricter rule ejects on its own traffic and
+// the resulting ejection is visible to everyone — rather than a lenient rule's
+// past records being retroactively re-judged against a stricter threshold. The
+// alternative would make a target's state depend on which rule happened to ask
+// about it, which is not a state at all.
+func (b *Breaker) Override(h *resilience.Health, bu *resilience.Budgets) *Breaker {
+	if !b.Enabled() || (h == nil && bu == nil) {
+		return b
+	}
+	cfg := b.cfg
+	if h != nil {
+		if h.ConsecutiveErrors > 0 {
+			cfg.ConsecutiveErrors = h.ConsecutiveErrors
+		}
+		if h.ErrorRatePercent > 0 {
+			cfg.ErrorRatePercent = h.ErrorRatePercent
+		}
+		if h.MinRequests > 0 {
+			cfg.MinRequests = h.MinRequests
+		}
+		if h.WindowSeconds > 0 {
+			cfg.Window = time.Duration(h.WindowSeconds) * time.Second
+		}
+		if h.EjectForSeconds > 0 {
+			cfg.EjectFor = time.Duration(h.EjectForSeconds) * time.Second
+		}
+	}
+	if bu != nil {
+		if bu.RetryRatio > 0 {
+			cfg.RetryRatio = bu.RetryRatio
+		}
+		if bu.MinRetries > 0 {
+			cfg.MinRetries = bu.MinRetries
+		}
+	}
+	return &Breaker{store: b.store, cfg: cfg}
 }

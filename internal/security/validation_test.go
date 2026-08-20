@@ -14,12 +14,12 @@ import (
 
 func TestNewRequestValidator(t *testing.T) {
 	config := &ValidationConfig{
-		MaxRequestSize:      1024,
-		AllowedMethods:      []string{"GET", "POST"},
-		BlockedPatterns:     []string{"(?i)script"},
-		MaxJSONDepth:        10,
-		MaxFieldLength:      100,
-		UserAgentPatterns:   []string{"MyApp/.*"},
+		MaxRequestSize:    1024,
+		AllowedMethods:    []string{"GET", "POST"},
+		BlockedPatterns:   []string{"(?i)script"},
+		MaxJSONDepth:      10,
+		MaxFieldLength:    100,
+		UserAgentPatterns: []string{"MyApp/.*"},
 	}
 	logger := logrus.New()
 
@@ -45,11 +45,11 @@ func TestNewRequestValidator_InvalidPattern(t *testing.T) {
 
 func TestRequestValidator_ValidateRequest_ValidRequest(t *testing.T) {
 	config := &ValidationConfig{
-		MaxRequestSize:    1024,
-		AllowedMethods:    []string{"GET", "POST"},
-		ContentTypes:      []string{"application/json"},
-		RequiredHeaders:   []string{"Content-Type"},
-		IPWhitelist:       []string{"192.168.1.0/24"},
+		MaxRequestSize:  1024,
+		AllowedMethods:  []string{"GET", "POST"},
+		ContentTypes:    []string{"application/json"},
+		RequiredHeaders: []string{"Content-Type"},
+		IPWhitelist:     []string{"192.168.1.0/24"},
 	}
 	logger := logrus.New()
 	validator, err := NewRequestValidator(config, logger)
