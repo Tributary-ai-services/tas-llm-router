@@ -819,6 +819,18 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// override), consistent with experiment cohort matching below. No-op
 	// outside AIQG / when an explicit bundle header pinned the choice.
 	middleware.ResolveBundleForRouting(r.Context(), req.Model, wf, r.URL.Path)
+	// A resolved route rule may steer this request to a specific provider
+	// (routing-decision.md §5.2). Pin it on the context so the router prefers
+	// it over the configured strategy; the pin is not honoured when the
+	// provider is unconfigured or unhealthy, and the router records why.
+	reqCtx := r.Context()
+	if tgt := middleware.ResolvedTarget(reqCtx); tgt != nil && tgt.Provider != "" {
+		reqCtx = routing.WithPinnedProvider(reqCtx, tgt.Provider)
+		if tgt.Model != "" {
+			req.Model = tgt.Model
+		}
+		r = r.WithContext(reqCtx)
+	}
 	// AIQG experiments (Phase D): resolve the variant claiming this request on
 	// the REQUESTED model + workflow (the cohort matches what the caller
 	// asked), then — for a running experiment — apply the variant's override

@@ -16,13 +16,13 @@ import (
 
 // Router handles intelligent request routing to LLM providers
 type Router struct {
-	providers         map[string]providers.LLMProvider
-	providerNames     []string // for round-robin
-	roundRobinIndex   int
-	healthStatus      map[string]*types.HealthStatus
-	healthMu          sync.RWMutex // guards healthStatus (background prober writes while routing reads)
-	logger            *logrus.Logger
-	lastHealthCheck   time.Time
+	providers           map[string]providers.LLMProvider
+	providerNames       []string // for round-robin
+	roundRobinIndex     int
+	healthStatus        map[string]*types.HealthStatus
+	healthMu            sync.RWMutex // guards healthStatus (background prober writes while routing reads)
+	logger              *logrus.Logger
+	lastHealthCheck     time.Time
 	healthCheckInterval time.Duration
 }
 
@@ -52,7 +52,7 @@ func NewRouter(logger *logrus.Logger) *Router {
 func (r *Router) RegisterProvider(name string, provider providers.LLMProvider) {
 	r.providers[name] = provider
 	r.providerNames = append(r.providerNames, name)
-	
+
 	// Initialize health status
 	r.healthMu.Lock()
 	r.healthStatus[name] = &types.HealthStatus{
@@ -113,36 +113,41 @@ func (r *Router) ListProviders() []string {
 // Route selects the best provider for a request with retry and fallback support
 func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.RouterMetadata, providers.LLMProvider, error) {
 	start := time.Now()
-	
+
 	// Update health status if needed
 	if time.Since(r.lastHealthCheck) > r.healthCheckInterval {
 		// Use background context for health checks to avoid cancellation when request completes
 		go r.updateHealthStatus(context.Background())
 		r.lastHealthCheck = time.Now()
 	}
-	
+
 	// Determine routing strategy
 	strategy := r.determineStrategy(req)
-	
-	// Route based on strategy to get initial decision
-	decision, provider, err := r.routeByStrategy(ctx, req, strategy)
+
+	// A resolved route rule may PIN a provider (routing-decision.md §5.2). The
+	// pin is preferred over the configured strategy, but is not yet absolute:
+	// until ordered fallback chains exist (step 3), failing a request because
+	// its pinned provider is momentarily unhealthy would turn a provider blip
+	// into a tenant outage. So an unusable pin falls through to normal
+	// selection and is recorded as not honoured, rather than erroring.
+	decision, provider, err := r.routeWithPin(ctx, req, strategy)
 	if err != nil {
 		return nil, nil, err
 	}
-	
+
 	// Initialize metadata tracking
 	metadata := &types.RouterMetadata{
-		Provider:        decision.SelectedProvider,
+		Provider:       decision.SelectedProvider,
 		Model:          req.Model,
-		RoutingReason:   decision.Reasoning,
-		EstimatedCost:   decision.EstimatedCost,
-		ProcessingTime:  time.Since(start),
-		RequestID:       req.ID,
-		AttemptCount:    1,
-		FallbackUsed:    false,
+		RoutingReason:  decision.Reasoning,
+		EstimatedCost:  decision.EstimatedCost,
+		ProcessingTime: time.Since(start),
+		RequestID:      req.ID,
+		AttemptCount:   1,
+		FallbackUsed:   false,
 	}
-	
-	// Check if retry is configured  
+
+	// Check if retry is configured
 	if req.RetryConfig != nil && req.RetryConfig.MaxAttempts > 1 {
 		// Perform routing with retry
 		metadata, provider, err = r.routeWithRetry(ctx, req, decision, metadata)
@@ -150,7 +155,7 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 			return nil, nil, err
 		}
 	}
-	
+
 	// Check if fallback is configured and we have failures
 	if req.FallbackConfig != nil && req.FallbackConfig.Enabled && len(metadata.FailedProviders) > 0 {
 		// Attempt fallback if primary provider failed
@@ -159,19 +164,19 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 			return nil, nil, err
 		}
 	}
-	
+
 	// Update final processing time
 	metadata.ProcessingTime = time.Since(start)
-	
+
 	r.logger.WithFields(logrus.Fields{
-		"provider":       metadata.Provider,
-		"strategy":       strategy,
+		"provider":      metadata.Provider,
+		"strategy":      strategy,
 		"cost":          metadata.EstimatedCost,
 		"attempts":      metadata.AttemptCount,
 		"fallback_used": metadata.FallbackUsed,
 		"duration_ms":   metadata.ProcessingTime.Milliseconds(),
 	}).Info("Request routed")
-	
+
 	return metadata, provider, nil
 }
 
@@ -180,26 +185,26 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 	provider := r.providers[decision.SelectedProvider]
 	maxAttempts := req.RetryConfig.MaxAttempts
 	var lastError error
-	
+
 	// Track retry attempts
 	var retryDelays []int64
 	totalRetryStart := time.Now()
-	
+
 	// Attempt up to maxAttempts times
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		metadata.AttemptCount = attempt
-		
+
 		// For attempts beyond the first, apply backoff delay
 		if attempt > 1 {
 			delay := r.calculateBackoffDelay(req.RetryConfig, attempt-1)
 			retryDelays = append(retryDelays, delay.Milliseconds())
-			
+
 			r.logger.WithFields(logrus.Fields{
 				"provider": decision.SelectedProvider,
 				"attempt":  attempt,
 				"delay_ms": delay.Milliseconds(),
 			}).Debug("Retrying request after backoff delay")
-			
+
 			select {
 			case <-time.After(delay):
 				// Continue with retry
@@ -207,27 +212,27 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 				return nil, nil, fmt.Errorf("request cancelled during retry backoff: %w", ctx.Err())
 			}
 		}
-		
+
 		// Check provider health before retry
 		if !r.isProviderHealthy(decision.SelectedProvider) {
 			lastError = fmt.Errorf("provider %s is not healthy", decision.SelectedProvider)
 			r.logger.WithField("provider", decision.SelectedProvider).Warn("Provider unhealthy during retry")
 			continue
 		}
-		
+
 		// Attempt would succeed - return provider for actual request
 		metadata.RetryDelays = retryDelays
 		metadata.TotalRetryTime = time.Since(totalRetryStart).Milliseconds()
-		
+
 		r.logger.WithFields(logrus.Fields{
 			"provider":     decision.SelectedProvider,
 			"attempt":      attempt,
 			"retry_delays": retryDelays,
 		}).Info("Retry attempt ready")
-		
+
 		return metadata, provider, nil
 	}
-	
+
 	// All retry attempts exhausted
 	metadata.FailedProviders = append(metadata.FailedProviders, decision.SelectedProvider)
 	return metadata, nil, fmt.Errorf("all retry attempts failed for provider %s: %w", decision.SelectedProvider, lastError)
@@ -237,7 +242,7 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 func (r *Router) routeWithFallback(ctx context.Context, req *types.ChatRequest, originalDecision *RoutingDecision, metadata *types.RouterMetadata) (*types.RouterMetadata, providers.LLMProvider, error) {
 	// Build fallback chain based on configuration
 	var fallbackChain []string
-	
+
 	if len(req.FallbackConfig.PreferredChain) > 0 {
 		// Use client-specified fallback chain
 		fallbackChain = req.FallbackConfig.PreferredChain
@@ -245,41 +250,41 @@ func (r *Router) routeWithFallback(ctx context.Context, req *types.ChatRequest, 
 		// Use automatically built fallback chain
 		fallbackChain = originalDecision.FallbackChain
 	}
-	
+
 	// Filter fallback chain based on configuration
 	fallbackChain = r.filterFallbackChain(fallbackChain, req, originalDecision)
-	
+
 	if len(fallbackChain) == 0 {
 		return metadata, nil, fmt.Errorf("no suitable fallback providers available")
 	}
-	
+
 	r.logger.WithFields(logrus.Fields{
 		"original_provider": originalDecision.SelectedProvider,
-		"fallback_chain":   fallbackChain,
+		"fallback_chain":    fallbackChain,
 	}).Info("Attempting fallback routing")
-	
+
 	// Try each fallback provider
 	for _, providerName := range fallbackChain {
 		// Skip if provider already failed
 		if contains(metadata.FailedProviders, providerName) {
 			continue
 		}
-		
+
 		// Check health
 		if !r.isProviderHealthy(providerName) {
 			r.logger.WithField("provider", providerName).Debug("Skipping unhealthy fallback provider")
 			metadata.FailedProviders = append(metadata.FailedProviders, providerName)
 			continue
 		}
-		
+
 		provider := r.providers[providerName]
-		
+
 		// Check feature compatibility
 		if req.FallbackConfig.RequireSameFeatures && !r.supportsRequiredFeatures(provider, req) {
 			r.logger.WithField("provider", providerName).Debug("Fallback provider doesn't support required features")
 			continue
 		}
-		
+
 		// Check cost constraints
 		if req.FallbackConfig.MaxCostIncrease != nil {
 			costEst, err := provider.EstimateCost(req)
@@ -287,38 +292,38 @@ func (r *Router) routeWithFallback(ctx context.Context, req *types.ChatRequest, 
 				costIncrease := (costEst.TotalCost - originalDecision.EstimatedCost) / originalDecision.EstimatedCost
 				if costIncrease > *req.FallbackConfig.MaxCostIncrease {
 					r.logger.WithFields(logrus.Fields{
-						"provider":       providerName,
-						"cost_increase":  costIncrease,
-						"max_allowed":    *req.FallbackConfig.MaxCostIncrease,
+						"provider":      providerName,
+						"cost_increase": costIncrease,
+						"max_allowed":   *req.FallbackConfig.MaxCostIncrease,
 					}).Debug("Fallback provider exceeds cost threshold")
 					continue
 				}
 			}
 		}
-		
+
 		// Fallback provider is suitable
 		metadata.Provider = providerName
 		metadata.FallbackUsed = true
 		metadata.RoutingReason = append(metadata.RoutingReason, fmt.Sprintf("Fallback to %s", providerName))
-		
+
 		r.logger.WithFields(logrus.Fields{
 			"original_provider": originalDecision.SelectedProvider,
 			"fallback_provider": providerName,
 		}).Info("Fallback routing successful")
-		
+
 		return metadata, provider, nil
 	}
-	
+
 	return metadata, nil, fmt.Errorf("all fallback providers failed or unavailable")
 }
 
 // calculateBackoffDelay calculates retry delay based on backoff strategy
 func (r *Router) calculateBackoffDelay(config *types.RetryConfig, attempt int) time.Duration {
 	var delay time.Duration
-	
+
 	switch config.BackoffType {
 	case "exponential":
-		// Exponential backoff: baseDelay * 2^attempt  
+		// Exponential backoff: baseDelay * 2^attempt
 		multiplier := math.Pow(2, float64(attempt))
 		delay = time.Duration(float64(config.BaseDelay) * multiplier)
 	case "linear":
@@ -329,33 +334,33 @@ func (r *Router) calculateBackoffDelay(config *types.RetryConfig, attempt int) t
 		multiplier := math.Pow(2, float64(attempt))
 		delay = time.Duration(float64(config.BaseDelay) * multiplier)
 	}
-	
+
 	// Cap delay at MaxDelay
 	if config.MaxDelay > 0 && delay > config.MaxDelay {
 		delay = config.MaxDelay
 	}
-	
+
 	return delay
 }
 
 // filterFallbackChain filters fallback providers based on configuration
 func (r *Router) filterFallbackChain(chain []string, req *types.ChatRequest, originalDecision *RoutingDecision) []string {
 	var filtered []string
-	
+
 	for _, providerName := range chain {
 		// Skip if provider doesn't exist
 		if _, exists := r.providers[providerName]; !exists {
 			continue
 		}
-		
+
 		// Skip original provider
 		if providerName == originalDecision.SelectedProvider {
 			continue
 		}
-		
+
 		filtered = append(filtered, providerName)
 	}
-	
+
 	return filtered
 }
 
@@ -375,7 +380,7 @@ func (r *Router) determineStrategy(req *types.ChatRequest) RoutingStrategy {
 	if r.isSpecificProviderRequested(req.Model) {
 		return RoutingStrategySpecific
 	}
-	
+
 	// Use optimization preference if specified
 	switch req.OptimizeFor {
 	case types.OptimizeCost:
@@ -437,31 +442,31 @@ func (r *Router) routeToSpecificProvider(ctx context.Context, req *types.ChatReq
 	if !found {
 		return nil, nil, fmt.Errorf("no provider found for model %s", req.Model)
 	}
-	
+
 	provider := r.providers[providerName]
-	
+
 	// Check if provider is healthy
 	if !r.isProviderHealthy(providerName) {
 		return nil, nil, fmt.Errorf("provider %s is not healthy", providerName)
 	}
-	
+
 	// Get cost estimate
 	costEst, err := provider.EstimateCost(req)
 	if err != nil {
 		r.logger.WithError(err).Warnf("Failed to estimate cost for %s", providerName)
 		costEst = &types.CostEstimate{TotalCost: 0}
 	}
-	
+
 	decision := &RoutingDecision{
 		SelectedProvider:     providerName,
-		Reasoning:           []string{fmt.Sprintf("Specific model requested: %s", req.Model)},
-		EstimatedCost:       costEst.TotalCost,
-		EstimatedLatency:    r.estimateLatency(providerName),
+		Reasoning:            []string{fmt.Sprintf("Specific model requested: %s", req.Model)},
+		EstimatedCost:        costEst.TotalCost,
+		EstimatedLatency:     r.estimateLatency(providerName),
 		FeatureCompatibility: r.checkFeatureCompatibility(provider, req),
-		FallbackChain:       r.buildFallbackChain(providerName, req),
-		RoutingContext:      r.buildRoutingContext("specific", req, []string{providerName}),
+		FallbackChain:        r.buildFallbackChain(providerName, req),
+		RoutingContext:       r.buildRoutingContext("specific", req, []string{providerName}),
 	}
-	
+
 	return decision, provider, nil
 }
 
@@ -471,13 +476,13 @@ func (r *Router) routeByCost(ctx context.Context, req *types.ChatRequest) (*Rout
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no healthy providers available")
 	}
-	
+
 	// Filter providers by feature requirements
 	candidates = r.filterByFeatures(candidates, req)
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no providers support required features")
 	}
-	
+
 	// Get cost estimates for all candidates
 	type candidateWithCost struct {
 		name     string
@@ -485,9 +490,9 @@ func (r *Router) routeByCost(ctx context.Context, req *types.ChatRequest) (*Rout
 		cost     float64
 		estimate *types.CostEstimate
 	}
-	
+
 	var costsAndProviders []candidateWithCost
-	
+
 	for _, name := range candidates {
 		provider := r.providers[name]
 		costEst, err := provider.EstimateCost(req)
@@ -495,7 +500,7 @@ func (r *Router) routeByCost(ctx context.Context, req *types.ChatRequest) (*Rout
 			r.logger.WithError(err).Warnf("Failed to estimate cost for %s", name)
 			continue
 		}
-		
+
 		costsAndProviders = append(costsAndProviders, candidateWithCost{
 			name:     name,
 			provider: provider,
@@ -503,47 +508,47 @@ func (r *Router) routeByCost(ctx context.Context, req *types.ChatRequest) (*Rout
 			estimate: costEst,
 		})
 	}
-	
+
 	if len(costsAndProviders) == 0 {
 		return nil, nil, fmt.Errorf("could not estimate costs for any provider")
 	}
-	
+
 	// Sort by cost (ascending)
 	sort.Slice(costsAndProviders, func(i, j int) bool {
 		return costsAndProviders[i].cost < costsAndProviders[j].cost
 	})
-	
+
 	// Select the cheapest
 	selected := costsAndProviders[0]
-	
+
 	// Build reasoning
 	reasoning := []string{
 		fmt.Sprintf("Cost-optimized routing selected %s", selected.name),
 		fmt.Sprintf("Estimated cost: $%.6f", selected.cost),
 	}
-	
+
 	if len(costsAndProviders) > 1 {
 		next := costsAndProviders[1]
 		savings := next.cost - selected.cost
 		reasoning = append(reasoning, fmt.Sprintf("Saves $%.6f vs %s", savings, next.name))
 	}
-	
+
 	// Build cost comparison data
 	costComparison := make(map[string]float64)
 	for _, candidate := range costsAndProviders {
 		costComparison[candidate.name] = candidate.cost
 	}
-	
+
 	decision := &RoutingDecision{
 		SelectedProvider:     selected.name,
-		Reasoning:           reasoning,
-		EstimatedCost:       selected.cost,
-		EstimatedLatency:    r.estimateLatency(selected.name),
+		Reasoning:            reasoning,
+		EstimatedCost:        selected.cost,
+		EstimatedLatency:     r.estimateLatency(selected.name),
 		FeatureCompatibility: r.checkFeatureCompatibility(selected.provider, req),
-		FallbackChain:       r.buildFallbackChain(selected.name, req),
-		RoutingContext:      r.buildRoutingContextWithCosts("cost_optimized", req, candidates, costComparison),
+		FallbackChain:        r.buildFallbackChain(selected.name, req),
+		RoutingContext:       r.buildRoutingContextWithCosts("cost_optimized", req, candidates, costComparison),
 	}
-	
+
 	return decision, selected.provider, nil
 }
 
@@ -553,13 +558,13 @@ func (r *Router) routeByPerformance(ctx context.Context, req *types.ChatRequest)
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no healthy providers available")
 	}
-	
+
 	// Filter providers by feature requirements
 	candidates = r.filterByFeatures(candidates, req)
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no providers support required features")
 	}
-	
+
 	// Select the candidate with the lowest estimated latency
 	selected := candidates[0]
 	bestLatency := r.estimateLatency(selected)
@@ -569,32 +574,32 @@ func (r *Router) routeByPerformance(ctx context.Context, req *types.ChatRequest)
 			selected = name
 		}
 	}
-	
+
 	provider := r.providers[selected]
-	
+
 	// Get cost estimate
 	costEst, err := provider.EstimateCost(req)
 	if err != nil {
 		r.logger.WithError(err).Warnf("Failed to estimate cost for %s", selected)
 		costEst = &types.CostEstimate{TotalCost: 0}
 	}
-	
+
 	// Build performance comparison data
 	performanceComparison := make(map[string]time.Duration)
 	for _, name := range candidates {
 		performanceComparison[name] = r.estimateLatency(name)
 	}
-	
+
 	decision := &RoutingDecision{
 		SelectedProvider:     selected,
-		Reasoning:           []string{fmt.Sprintf("Performance-optimized routing selected %s", selected)},
-		EstimatedCost:       costEst.TotalCost,
-		EstimatedLatency:    r.estimateLatency(selected),
+		Reasoning:            []string{fmt.Sprintf("Performance-optimized routing selected %s", selected)},
+		EstimatedCost:        costEst.TotalCost,
+		EstimatedLatency:     r.estimateLatency(selected),
 		FeatureCompatibility: r.checkFeatureCompatibility(provider, req),
-		FallbackChain:       r.buildFallbackChain(selected, req),
-		RoutingContext:      r.buildRoutingContextWithPerformance("performance", req, candidates, performanceComparison),
+		FallbackChain:        r.buildFallbackChain(selected, req),
+		RoutingContext:       r.buildRoutingContextWithPerformance("performance", req, candidates, performanceComparison),
 	}
-	
+
 	return decision, provider, nil
 }
 
@@ -604,36 +609,36 @@ func (r *Router) routeRoundRobin(ctx context.Context, req *types.ChatRequest) (*
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no healthy providers available")
 	}
-	
+
 	// Filter providers by feature requirements
 	candidates = r.filterByFeatures(candidates, req)
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no providers support required features")
 	}
-	
+
 	// Select next provider in round-robin fashion
 	selected := candidates[r.roundRobinIndex%len(candidates)]
 	r.roundRobinIndex++
-	
+
 	provider := r.providers[selected]
-	
+
 	// Get cost estimate
 	costEst, err := provider.EstimateCost(req)
 	if err != nil {
 		r.logger.WithError(err).Warnf("Failed to estimate cost for %s", selected)
 		costEst = &types.CostEstimate{TotalCost: 0}
 	}
-	
+
 	decision := &RoutingDecision{
 		SelectedProvider:     selected,
-		Reasoning:           []string{fmt.Sprintf("Round-robin routing selected %s", selected)},
-		EstimatedCost:       costEst.TotalCost,
-		EstimatedLatency:    r.estimateLatency(selected),
+		Reasoning:            []string{fmt.Sprintf("Round-robin routing selected %s", selected)},
+		EstimatedCost:        costEst.TotalCost,
+		EstimatedLatency:     r.estimateLatency(selected),
 		FeatureCompatibility: r.checkFeatureCompatibility(provider, req),
-		FallbackChain:       r.buildFallbackChain(selected, req),
-		RoutingContext:      r.buildRoutingContext("round_robin", req, candidates),
+		FallbackChain:        r.buildFallbackChain(selected, req),
+		RoutingContext:       r.buildRoutingContext("round_robin", req, candidates),
 	}
-	
+
 	return decision, provider, nil
 }
 
@@ -656,7 +661,7 @@ func (r *Router) isProviderHealthy(name string) bool {
 	if !exists {
 		return false
 	}
-	
+
 	// Consider provider healthy if status is "healthy" or "unknown" (untested)
 	return status.Status == "healthy" || status.Status == "unknown"
 }
@@ -666,23 +671,23 @@ func (r *Router) filterByFeatures(candidates []string, req *types.ChatRequest) [
 	if len(req.RequiredFeatures) == 0 && len(req.Tools) == 0 && len(req.Functions) == 0 {
 		return candidates // No special features required
 	}
-	
+
 	var compatible []string
-	
+
 	for _, name := range candidates {
 		provider := r.providers[name]
 		if r.supportsRequiredFeatures(provider, req) {
 			compatible = append(compatible, name)
 		}
 	}
-	
+
 	return compatible
 }
 
 // supportsRequiredFeatures checks if a provider supports the required features
 func (r *Router) supportsRequiredFeatures(provider providers.LLMProvider, req *types.ChatRequest) bool {
 	capabilities := provider.GetCapabilities()
-	
+
 	// Check explicit required features
 	for _, feature := range req.RequiredFeatures {
 		switch feature {
@@ -712,14 +717,14 @@ func (r *Router) supportsRequiredFeatures(provider providers.LLMProvider, req *t
 			}
 		}
 	}
-	
+
 	// Check if tools/functions are requested
 	if len(req.Tools) > 0 || len(req.Functions) > 0 {
 		if !capabilities.SupportsFunctions {
 			return false
 		}
 	}
-	
+
 	// Check multimodal content
 	for _, msg := range req.Messages {
 		if parts, ok := msg.Content.([]types.ContentPart); ok {
@@ -732,14 +737,14 @@ func (r *Router) supportsRequiredFeatures(provider providers.LLMProvider, req *t
 			}
 		}
 	}
-	
+
 	return true
 }
 
 // checkFeatureCompatibility returns feature compatibility status
 func (r *Router) checkFeatureCompatibility(provider providers.LLMProvider, req *types.ChatRequest) map[string]bool {
 	capabilities := provider.GetCapabilities()
-	
+
 	compatibility := make(map[string]bool)
 	compatibility["functions"] = capabilities.SupportsFunctions
 	compatibility["vision"] = capabilities.SupportsVision
@@ -747,7 +752,7 @@ func (r *Router) checkFeatureCompatibility(provider providers.LLMProvider, req *
 	compatibility["streaming"] = capabilities.SupportsStreaming
 	compatibility["assistants"] = capabilities.SupportsAssistants
 	compatibility["batch"] = capabilities.SupportsBatch
-	
+
 	return compatibility
 }
 
@@ -755,7 +760,7 @@ func (r *Router) checkFeatureCompatibility(provider providers.LLMProvider, req *
 func (r *Router) buildFallbackChain(primary string, req *types.ChatRequest) []string {
 	candidates := r.getHealthyProviders()
 	var fallbacks []string
-	
+
 	for _, name := range candidates {
 		if name != primary {
 			provider := r.providers[name]
@@ -764,7 +769,7 @@ func (r *Router) buildFallbackChain(primary string, req *types.ChatRequest) []st
 			}
 		}
 	}
-	
+
 	return fallbacks
 }
 
@@ -786,12 +791,12 @@ func (r *Router) updateHealthStatus(ctx context.Context) {
 		start := time.Now()
 		err := provider.HealthCheck(ctx)
 		duration := time.Since(start)
-		
+
 		status := &types.HealthStatus{
 			LastChecked:  time.Now().Unix(),
 			ResponseTime: duration.Milliseconds(),
 		}
-		
+
 		if err != nil {
 			status.Status = "unhealthy"
 			status.ErrorMessage = err.Error()
@@ -816,10 +821,10 @@ func (r *Router) GetHealthStatus() map[string]*types.HealthStatus {
 	for name, health := range r.healthStatus {
 		// Create a copy to avoid external modification
 		status[name] = &types.HealthStatus{
-			Status:        health.Status,
-			ResponseTime:  health.ResponseTime,
-			LastChecked:   health.LastChecked,
-			ErrorMessage:  health.ErrorMessage,
+			Status:       health.Status,
+			ResponseTime: health.ResponseTime,
+			LastChecked:  health.LastChecked,
+			ErrorMessage: health.ErrorMessage,
 		}
 	}
 	return status
@@ -841,7 +846,7 @@ func (r *Router) buildRoutingContext(strategy string, req *types.ChatRequest, ca
 		RequestFeatures:     r.extractRequestFeatures(req),
 		ProviderHealth:      r.getProviderHealthStatuses(),
 		ConsideredProviders: candidates,
-		Timestamp:          time.Now(),
+		Timestamp:           time.Now(),
 	}
 }
 
@@ -862,23 +867,23 @@ func (r *Router) buildRoutingContextWithPerformance(strategy string, req *types.
 // extractRequestFeatures extracts features from the request that influence routing
 func (r *Router) extractRequestFeatures(req *types.ChatRequest) []string {
 	var features []string
-	
+
 	// Add explicit required features
 	features = append(features, req.RequiredFeatures...)
-	
+
 	// Detect implicit features
 	if len(req.Tools) > 0 || len(req.Functions) > 0 {
 		features = append(features, "function_calling")
 	}
-	
+
 	if req.Stream {
 		features = append(features, "streaming")
 	}
-	
+
 	if req.ResponseFormat != nil {
 		features = append(features, "structured_output")
 	}
-	
+
 	// Check for vision requirements in messages
 	for _, msg := range req.Messages {
 		if parts, ok := msg.Content.([]types.ContentPart); ok {
@@ -890,7 +895,7 @@ func (r *Router) extractRequestFeatures(req *types.ChatRequest) []string {
 			}
 		}
 	}
-	
+
 	return features
 }
 
@@ -903,4 +908,44 @@ func (r *Router) getProviderHealthStatuses() map[string]string {
 		healthStatuses[name] = status.Status
 	}
 	return healthStatuses
+}
+
+// routeWithPin honours a context-pinned provider when one is set, usable and
+// healthy; otherwise it falls back to the configured strategy.
+//
+// The fall-through is deliberate and interim — see the call site. When a pin is
+// not honoured the reason is written into the decision's Reasoning so the event
+// explains itself rather than silently routing elsewhere.
+func (r *Router) routeWithPin(ctx context.Context, req *types.ChatRequest, strategy RoutingStrategy) (*RoutingDecision, providers.LLMProvider, error) {
+	pin := PinnedProviderFrom(ctx)
+	if pin == "" {
+		return r.routeByStrategy(ctx, req, strategy)
+	}
+
+	prov, ok := r.providers[pin]
+	if !ok {
+		return r.routeByStrategyNoting(ctx, req, strategy, "pinned provider "+pin+" is not configured; used "+string(strategy))
+	}
+	if !r.isProviderHealthy(pin) {
+		return r.routeByStrategyNoting(ctx, req, strategy, "pinned provider "+pin+" unhealthy; used "+string(strategy))
+	}
+
+	costEst, err := prov.EstimateCost(req)
+	dec := &RoutingDecision{
+		SelectedProvider: pin,
+		Reasoning:        []string{"pinned by route rule: " + pin},
+	}
+	if err == nil && costEst != nil {
+		dec.EstimatedCost = costEst.TotalCost
+	}
+	return dec, prov, nil
+}
+
+// routeByStrategyNoting routes normally but records why the pin was ignored.
+func (r *Router) routeByStrategyNoting(ctx context.Context, req *types.ChatRequest, strategy RoutingStrategy, note string) (*RoutingDecision, providers.LLMProvider, error) {
+	dec, prov, err := r.routeByStrategy(ctx, req, strategy)
+	if err == nil && dec != nil {
+		dec.Reasoning = append(dec.Reasoning, note)
+	}
+	return dec, prov, err
 }

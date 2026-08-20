@@ -1141,3 +1141,17 @@ func writeValidationError(log *logrus.Logger, w http.ResponseWriter, r *http.Req
 	body := fmt.Sprintf(`{"error":{"code":"aiqg_header_invalid","message":%q}}`, err.Error())
 	_, _ = w.Write([]byte(body))
 }
+
+// ResolvedTarget returns the provider/model a route rule steers this request
+// to, or nil when no rule set one. Read at routing time, after
+// ResolveBundleForRouting has refined the resolution with model + workflow.
+//
+// Exported so the completion handler can pin the router without importing the
+// middleware's internal holder type.
+func ResolvedTarget(ctx context.Context) *policy.Target {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return nil
+	}
+	return holder.get().Target
+}

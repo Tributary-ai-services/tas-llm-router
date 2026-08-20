@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,23 @@ type Resolution struct {
 	// Phase 2: the gateway reads this to shadow/apply the Gatekeeper
 	// extract pipeline. Today it's only carried + parsed, not executed.
 	Reduction json.RawMessage
+
+	// Target is the provider/model a route rule steers to, when one does.
+	// Nil means no override and the router selects exactly as it does today,
+	// which is what makes this additive: an older resolver that omits the
+	// field yields nil and nothing changes.
+	Target *Target
+}
+
+// Target is a resolved routing destination. Model empty means "keep the
+// caller's model" — a rule may pin a provider without pinning a model.
+//
+// Source records WHICH RUNG decided, so "why did this request go to
+// Anthropic" is answerable from the event rather than reconstructed.
+type Target struct {
+	Provider string
+	Model    string
+	Source   string
 }
 
 // Default returns the sentinel resolution used when the resolver is
@@ -120,6 +138,11 @@ type resolveResponse struct {
 	BundleName string          `json:"bundle_name"`
 	Source     string          `json:"source"`
 	Reduction  json.RawMessage `json:"reduction,omitempty"`
+	Target     *struct {
+		Provider string `json:"provider,omitempty"`
+		Model    string `json:"model,omitempty"`
+		Source   string `json:"source,omitempty"`
+	} `json:"target,omitempty"`
 }
 
 // ErrResolverBadRequest is returned when the dashboard rejects the
@@ -179,7 +202,15 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
 			return Default(), fmt.Errorf("policy.DashboardResolver: decode 200: %w", err)
 		}
-		return Resolution{BundleID: v.BundleID, BundleName: v.BundleName, Source: v.Source, Reduction: v.Reduction}, nil
+		res := Resolution{BundleID: v.BundleID, BundleName: v.BundleName, Source: v.Source, Reduction: v.Reduction}
+		if v.Target != nil && strings.TrimSpace(v.Target.Provider) != "" {
+			res.Target = &Target{
+				Provider: strings.ToLower(strings.TrimSpace(v.Target.Provider)),
+				Model:    strings.TrimSpace(v.Target.Model),
+				Source:   v.Target.Source,
+			}
+		}
+		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log
 		// distinctly so operators see "your TAS-Policy-Bundle header
