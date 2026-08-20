@@ -823,7 +823,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		// attribution headers. Without them in this list a browser client can
 		// send traffic but not attribute it, so its own requests show up
 		// unattributed in Traffic Explorer — which is where the UI displays them.
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, TAS-Auth, anthropic-version, TAS-Upstream-Authorization, TAS-Source-App, TAS-Agent-Id, TAS-Agent-Name, TAS-Agent-Version, TAS-Flow-Id, TAS-Conversation-Id, TAS-Cache, baggage")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, TAS-Auth, anthropic-version, TAS-Upstream-Authorization, TAS-Source-App, TAS-Agent-Id, TAS-Agent-Name, TAS-Agent-Version, TAS-Flow-Id, TAS-Conversation-Id, TAS-Cache, TAS-Prompt-Cache, TAS-Prompt-Cache-TTL, baggage")
 		// Let browser clients read the routing-decision headers (moved off
 		// the SSE stream), the AIQG response-event id, and the cache verdict.
 		// X-TAS-Cache (hit | semantic_hit | bypass; absent on a miss) is the
@@ -907,6 +907,10 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		reqCtx = routing.WithChain(reqCtx, routing.NewChain(fb, cons))
 		ctxChanged = true
 	}
+	// Prompt-cache control (docs/AIQG-PROMPT-CACHE-CONTROL.md §3). Applied
+	// here — after resolution, before the vendor call — because the mode may
+	// come from the matched route as well as the request header.
+	s.applyPromptCacheMode(r, &req)
 	if ctxChanged {
 		r = r.WithContext(reqCtx)
 	}

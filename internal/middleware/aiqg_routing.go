@@ -42,7 +42,9 @@ type Routing struct {
 	// Vendor finish_reason — "stop" / "length" / "content_filter" /
 	// "tool_calls" / "function_call". Empty string means unset (no
 	// vendor response). First-write-wins like the other stampers.
-	finishReason string
+	promptCacheMode        string
+	promptCacheBreakpoints int
+	finishReason           string
 
 	// BYOK credential attribution (Plan #14): which key served the vendor
 	// call — "upstream_header" | "stored" | "tas_shared" — and the stored
@@ -180,6 +182,11 @@ type RoutingSnapshot struct {
 	// truncation).
 	FinishReason string
 
+	// PromptCacheMode / PromptCacheBreakpoints: what was APPLIED and how many
+	// breakpoints actually reached the vendor.
+	PromptCacheMode        string
+	PromptCacheBreakpoints int
+
 	// BYOK credential attribution (Plan #14). Never the key.
 	CredentialSource string
 	CredentialID     string
@@ -265,6 +272,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		OutboundFindings:           copyCounts(r.outboundFindings),
 		ScanRan:                    r.scanRan,
 		FinishReason:               r.finishReason,
+		PromptCacheMode:            r.promptCacheMode,
+		PromptCacheBreakpoints:     r.promptCacheBreakpoints,
 		CredentialSource:           r.credentialSource,
 		CredentialID:               r.credentialID,
 		AttemptCount:               r.attemptCount,
@@ -643,6 +652,24 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens, cacheC
 // from each chunk's choice.FinishReason (only the last chunk
 // typically populates it), but if a later fallback path tries to
 // stamp again the first authoritative value wins.
+// StampPromptCache records what prompt-cache mode was actually APPLIED and how
+// many breakpoints actually reach the vendor.
+//
+// Outcome, not intent, on purpose. A route whose operator believes caching is
+// on while the request carries zero breakpoints is precisely the silent failure
+// this feature exists to end, and it is only visible if the event reports what
+// happened rather than what was asked for.
+func StampPromptCache(ctx context.Context, mode string, breakpoints int) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.promptCacheMode = mode
+	r.promptCacheBreakpoints = breakpoints
+}
+
 func StampFinishReason(ctx context.Context, reason string) {
 	if reason == "" {
 		return

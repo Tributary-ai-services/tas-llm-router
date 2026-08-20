@@ -50,10 +50,10 @@ func TestCompute_PopulatesReliability(t *testing.T) {
 	}
 	// Verify all five dimensions can co-populate (with the right inputs).
 	full := Compute(Input{
-		EndToEndMs:                ptr64(2500), Workflow: "rag",
-		HTTPStatus:                200,
-		Vendor:                    "openai", Model: "gpt-4o-mini",
-		PromptTokens:              intP(100), CompletionTokens: intP(50),
+		EndToEndMs: ptr64(2500), Workflow: "rag",
+		HTTPStatus: 200,
+		Vendor:     "openai", Model: "gpt-4o-mini",
+		PromptTokens: intP(100), CompletionTokens: intP(50),
 		AssuranceScanRan:          true,
 		InboundFindingsBySeverity: map[string]int{},
 		FinishReason:              "stop",

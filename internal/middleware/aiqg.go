@@ -913,6 +913,8 @@ func routingView(r *Routing) events.RoutingView {
 	}
 	s := r.Snapshot()
 	return events.RoutingView{
+		PromptCacheMode:            s.PromptCacheMode,
+		PromptCacheBreakpoints:     s.PromptCacheBreakpoints,
 		Vendor:                     s.Vendor,
 		Model:                      s.Model,
 		Streaming:                  s.Streaming,

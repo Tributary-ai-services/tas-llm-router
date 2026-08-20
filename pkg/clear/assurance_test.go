@@ -62,10 +62,10 @@ func TestScoreAssurance_TierBoundaries(t *testing.T) {
 		in   map[string]int
 		tier string // "healthy" | "marginal" | "failing"
 	}{
-		{"clean → healthy", nil, "healthy"},                          // 100
-		{"low → healthy", map[string]int{SeverityLow: 1}, "healthy"}, // 95
-		{"medium → marginal", map[string]int{SeverityMedium: 1}, "marginal"}, // 80
-		{"high → failing", map[string]int{SeverityHigh: 1}, "failing"},       // 50
+		{"clean → healthy", nil, "healthy"},                                    // 100
+		{"low → healthy", map[string]int{SeverityLow: 1}, "healthy"},           // 95
+		{"medium → marginal", map[string]int{SeverityMedium: 1}, "marginal"},   // 80
+		{"high → failing", map[string]int{SeverityHigh: 1}, "failing"},         // 50
 		{"critical → failing", map[string]int{SeverityCritical: 1}, "failing"}, // 0
 	}
 	for _, c := range cases {

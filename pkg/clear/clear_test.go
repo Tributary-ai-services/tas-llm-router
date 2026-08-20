@@ -46,13 +46,13 @@ func TestLatencyCurve(t *testing.T) {
 		actualMs  int64
 		wantScore Score
 	}{
-		{"at_target", target, 100},        // 100 - 50*(1-1) = 100
-		{"under_target", 2500, 100},       // clamped to 100
-		{"1.5x_target", 7500, 75},         // 100 - 50*(1.5-1) = 75 (boundary Healthy/Marginal)
-		{"2x_target", 10000, 50},          // 100 - 50*(2-1) = 50 (boundary Marginal/Failing)
-		{"2.5x_target", 12500, 25},        // 100 - 50*(2.5-1) = 25
-		{"3x_target", 15000, 0},           // 100 - 50*(3-1) = 0 (just at the floor)
-		{"way_over_target", 60000, 0},     // clamped to 0
+		{"at_target", target, 100},    // 100 - 50*(1-1) = 100
+		{"under_target", 2500, 100},   // clamped to 100
+		{"1.5x_target", 7500, 75},     // 100 - 50*(1.5-1) = 75 (boundary Healthy/Marginal)
+		{"2x_target", 10000, 50},      // 100 - 50*(2-1) = 50 (boundary Marginal/Failing)
+		{"2.5x_target", 12500, 25},    // 100 - 50*(2.5-1) = 25
+		{"3x_target", 15000, 0},       // 100 - 50*(3-1) = 0 (just at the floor)
+		{"way_over_target", 60000, 0}, // clamped to 0
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
