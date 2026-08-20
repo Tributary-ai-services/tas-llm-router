@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
 )
 
 // clock is a manual time source. Every window here is tens of seconds, so a
@@ -353,5 +355,93 @@ func TestStatusReportsReasonAndWindow(t *testing.T) {
 	}
 	if st.EjectedUntil.IsZero() {
 		t.Fatal("Status carries no ejected_until for an open breaker")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The two axes, asserted side by side. Whether a failure EJECTS a provider and
+// whether it ADVANCES a fallback chain are different questions, and these cases
+// are chosen precisely where the two answers differ.
+// ---------------------------------------------------------------------------
+
+func TestEjectAndFallbackDisagreeWhereTheyShould(t *testing.T) {
+	cases := []struct {
+		name        string
+		err         error
+		wantEject   Outcome
+		wantClass   resilience.FailureClass
+		wantAdvance bool
+	}{
+		{
+			// The vendor is healthy and throttling. Ejecting it would turn a
+			// throttle into an outage — but another vendor has capacity.
+			name:      "rate limit: never ejects, but should fall back",
+			err:       errors.New("429 Too Many Requests"),
+			wantEject: RateLimited, wantClass: resilience.FailureRateLimited, wantAdvance: true,
+		},
+		{
+			// Our request was too big for THIS model. Not the provider's
+			// fault, so no ejection — but a larger-window tier serves it
+			// unchanged, which is the clearest reason chains exist.
+			name:      "context overflow: never ejects, but should fall back",
+			err:       errors.New("400 context_length_exceeded: maximum context length is 8192 tokens"),
+			wantEject: ClientError, wantClass: resilience.FailureContextOverflow, wantAdvance: true,
+		},
+		{
+			// Every provider rejects this identically. Advancing would
+			// multiply one client error across every vendor.
+			name:      "malformed request: neither ejects nor falls back",
+			err:       errors.New("400 Bad Request: invalid_request_error"),
+			wantEject: ClientError, wantAdvance: false,
+		},
+		{
+			// A bad key is ours to fix; serving from another vendor hides it.
+			name:      "auth failure: neither ejects nor falls back",
+			err:       errors.New("401 Unauthorized"),
+			wantEject: ClientError, wantAdvance: false,
+		},
+		{
+			name:      "server error: both",
+			err:       errors.New("503 Service Unavailable"),
+			wantEject: ServerError, wantClass: resilience.FailureVendorError, wantAdvance: true,
+		},
+		{
+			name:      "timeout: both",
+			err:       errors.New("context deadline exceeded"),
+			wantEject: ServerError, wantClass: resilience.FailureTimeout, wantAdvance: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ClassifyError(c.err); got != c.wantEject {
+				t.Errorf("ClassifyError = %v, want %v", got, c.wantEject)
+			}
+			class, ok := ClassifyFailure(c.err)
+			if ok != c.wantAdvance {
+				t.Fatalf("ClassifyFailure eligible = %v, want %v", ok, c.wantAdvance)
+			}
+			if ok && class != c.wantClass {
+				t.Errorf("ClassifyFailure = %v, want %v", class, c.wantClass)
+			}
+		})
+	}
+}
+
+// The #151 error verbatim: a pin to a provider that does not serve the model.
+// It must neither eject the provider nor walk the chain — every other provider
+// would reject the same unknown model too.
+func TestModelNotFoundNeitherEjectsNorFallsBack(t *testing.T) {
+	err := errors.New(`anthropic api call failed: POST "https://api.anthropic.com/v1/messages": 404 Not Found {"type":"not_found_error","message":"model: gpt-4o-mini"}`)
+	if got := ClassifyError(err); got != ClientError {
+		t.Errorf("ClassifyError = %v, want ClientError", got)
+	}
+	if _, ok := ClassifyFailure(err); ok {
+		t.Error("a model-not-found error was treated as fallback-eligible")
+	}
+}
+
+func TestNilErrorIsNotFallbackEligible(t *testing.T) {
+	if _, ok := ClassifyFailure(nil); ok {
+		t.Fatal("nil error reported as fallback-eligible")
 	}
 }

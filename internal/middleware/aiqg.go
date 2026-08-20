@@ -1167,3 +1167,15 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	res := holder.get()
 	return res.Health, res.Budgets
 }
+
+// ResolvedFallback returns the matched rule's failover chain and the tenant's
+// constraints. Constraints may be present with no chain — they bound routing
+// whether or not a rule configured failover.
+func ResolvedFallback(ctx context.Context) (*resilience.Fallback, *resilience.Constraints) {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return nil, nil
+	}
+	res := holder.get()
+	return res.Fallback, res.Constraints
+}
