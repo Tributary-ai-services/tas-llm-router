@@ -229,7 +229,7 @@ type ValidationErrorDetail struct {
 // parseValidationError parses validation errors for better user experience
 func (vm *ValidationMiddleware) parseValidationError(err error) *ValidationErrorDetail {
 	errorStr := err.Error()
-	
+
 	// Try to extract meaningful information from the error
 	detail := &ValidationErrorDetail{
 		Message: "Request validation failed",

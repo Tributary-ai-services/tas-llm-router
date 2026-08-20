@@ -25,6 +25,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
 	"github.com/tributary-ai/llm-router-waf/internal/workflow"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/breaker"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/cacheconfig"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/credentials"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
@@ -229,8 +230,25 @@ type AIQGServerConfig struct {
 	// ResponseCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
 	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
 
+	// Breaker is passive outlier detection + retry budgets
+	// (routing-decision.md step 2).
+	Breaker AIQGBreakerConfig `yaml:"breaker"`
+
 	// SemCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
 	SemCache AIQGSemCacheConfig `yaml:"semantic_cache"`
+}
+
+// AIQGBreakerConfig configures passive outlier detection. Mirrors
+// config.AIQGBreakerConfig (straight field copy in ToServerConfig).
+type AIQGBreakerConfig struct {
+	Enabled           bool          `yaml:"enabled"`
+	ConsecutiveErrors int           `yaml:"consecutive_errors"`
+	ErrorRatePercent  int           `yaml:"error_rate_percent"`
+	MinRequests       int           `yaml:"min_requests"`
+	Window            time.Duration `yaml:"window"`
+	EjectFor          time.Duration `yaml:"eject_for"`
+	RetryRatio        float64       `yaml:"retry_ratio"`
+	MinRetries        int           `yaml:"min_retries"`
 }
 
 // AIQGResponseCacheConfig configures the C1 response cache. Mirrors
@@ -425,6 +443,47 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				"ttl":                   ttl,
 				"require_deterministic": server.respCacheCfg.RequireDeterministic,
 			}).Info("AIQG response cache enabled (C1 exact-match)")
+		}
+
+		// Passive outlier detection + retry budgets (routing-decision.md step
+		// 2). Prefers the shared Redis so breaker state is FLEET-WIDE: with
+		// per-replica state each replica must independently learn a provider
+		// is bad, and a recovering provider would get one half-open probe per
+		// replica instead of one in total. The memory fallback keeps the
+		// gateway working without Redis, and the log line names the downgrade
+		// so the weaker guarantee is never silently in force.
+		{
+			bcfg := breaker.Config{
+				ConsecutiveErrors: config.AIQG.Breaker.ConsecutiveErrors,
+				ErrorRatePercent:  config.AIQG.Breaker.ErrorRatePercent,
+				MinRequests:       config.AIQG.Breaker.MinRequests,
+				Window:            config.AIQG.Breaker.Window,
+				EjectFor:          config.AIQG.Breaker.EjectFor,
+				RetryRatio:        config.AIQG.Breaker.RetryRatio,
+				MinRetries:        config.AIQG.Breaker.MinRetries,
+			}
+			if config.AIQG.Breaker.Enabled {
+				var store breaker.Store
+				backend := "memory (per-replica — breaker state is NOT shared across pods)"
+				if sharedRedis != nil {
+					store = breaker.NewRedisStore(sharedRedis)
+					backend = "redis (fleet-wide)"
+				} else {
+					store = breaker.NewMemoryStore()
+				}
+				b := breaker.New(store, bcfg)
+				router.SetBreaker(b)
+				eff := b.Config()
+				logger.WithFields(logrus.Fields{
+					"backend":            backend,
+					"consecutive_errors": eff.ConsecutiveErrors,
+					"error_rate_percent": eff.ErrorRatePercent,
+					"min_requests":       eff.MinRequests,
+					"window":             eff.Window,
+					"eject_for":          eff.EjectFor,
+					"retry_ratio":        eff.RetryRatio,
+				}).Info("AIQG breaker enabled (passive outlier detection + retry budget)")
+			}
 		}
 
 		// C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md). Runs on the
@@ -704,6 +763,8 @@ func (s *Server) setupRoutes() *mux.Router {
 	api.HandleFunc("/health", s.handleHealthCheck).Methods("GET")
 	api.HandleFunc("/health/{name}", s.handleProviderHealth).Methods("GET")
 	api.HandleFunc("/capabilities", s.handleCapabilities).Methods("GET")
+	// Provider-fleet breaker state, for the operator health panel.
+	api.HandleFunc("/breaker", s.handleBreakerStatus).Methods("GET")
 	api.HandleFunc("/routing/decision", s.handleRoutingDecision).Methods("POST")
 
 	// Bypass token management endpoints
@@ -824,11 +885,22 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// it over the configured strategy; the pin is not honoured when the
 	// provider is unconfigured or unhealthy, and the router records why.
 	reqCtx := r.Context()
+	ctxChanged := false
 	if tgt := middleware.ResolvedTarget(reqCtx); tgt != nil && tgt.Provider != "" {
 		reqCtx = routing.WithPinnedProvider(reqCtx, tgt.Provider)
 		if tgt.Model != "" {
 			req.Model = tgt.Model
 		}
+		ctxChanged = true
+	}
+	// A matched rule may also tighten or loosen this request's resilience
+	// thresholds. Carried on the context for the same reason as the pin: it is
+	// routing metadata that must never reach a vendor payload.
+	if h, b := middleware.ResolvedResilience(reqCtx); h != nil || b != nil {
+		reqCtx = routing.WithResilience(reqCtx, h, b)
+		ctxChanged = true
+	}
+	if ctxChanged {
 		r = r.WithContext(reqCtx)
 	}
 	// AIQG experiments (Phase D): resolve the variant claiming this request on
@@ -1401,6 +1473,12 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 // handleNonStreamingCompletion handles non-streaming chat completions
 func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, provider providers.LLMProvider, metadata *types.RouterMetadata) {
 	resp, err := provider.ChatCompletion(r.Context(), req)
+	// Feed the outcome to passive outlier detection before anything else can
+	// return early. Classification matters as much as recording: a 404 for a
+	// model this provider does not serve is OUR error, and counting it against
+	// the provider would let one bad route rule eject a healthy vendor for
+	// every tenant (tas-llm-router#151).
+	s.router.RecordOutcome(r.Context(), metadata.Provider, req.Model, breaker.ClassifyError(err))
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("Chat completion failed")
 		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
@@ -2157,6 +2235,7 @@ func (s *Server) attemptCompletionWithRetry(ctx context.Context, req *types.Chat
 
 		// Attempt completion
 		resp, err := provider.ChatCompletion(ctx, req)
+		s.router.RecordOutcome(ctx, providerName, req.Model, breaker.ClassifyError(err))
 		if err == nil {
 			return resp, nil
 		}

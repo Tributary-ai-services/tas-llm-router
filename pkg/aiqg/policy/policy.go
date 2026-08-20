@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
 )
 
 // Resolution names the bundle that applies to a request along with
@@ -41,6 +43,18 @@ type Resolution struct {
 	// which is what makes this additive: an older resolver that omits the
 	// field yields nil and nothing changes.
 	Target *Target
+
+	// Health and Budgets are the matched rule's resilience overrides. Kept as
+	// the shared go-aiqg-resilience types rather than raw JSON because, unlike
+	// Reduction, the gateway itself acts on these values — and the shape is
+	// already owned by a module both services import, so there is nothing to
+	// keep opaque.
+	//
+	// Nil means "inherit the gateway defaults", which is deliberately distinct
+	// from a zero-valued struct: a rule that overrides only eject_for must not
+	// silently reset every other threshold to zero.
+	Health  *resilience.Health
+	Budgets *resilience.Budgets
 }
 
 // Target is a resolved routing destination. Model empty means "keep the
@@ -143,6 +157,8 @@ type resolveResponse struct {
 		Model    string `json:"model,omitempty"`
 		Source   string `json:"source,omitempty"`
 	} `json:"target,omitempty"`
+	Health  *resilience.Health  `json:"health,omitempty"`
+	Budgets *resilience.Budgets `json:"budgets,omitempty"`
 }
 
 // ErrResolverBadRequest is returned when the dashboard rejects the
@@ -210,6 +226,9 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 				Source:   v.Target.Source,
 			}
 		}
+		// Carried through only when the control plane sent them; an absent
+		// block stays nil so the gateway's own defaults apply untouched.
+		res.Health, res.Budgets = v.Health, v.Budgets
 		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log

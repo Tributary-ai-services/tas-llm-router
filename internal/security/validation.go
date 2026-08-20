@@ -15,16 +15,16 @@ import (
 
 // ValidationConfig holds request validation configuration
 type ValidationConfig struct {
-	MaxRequestSize    int64             `yaml:"max_request_size"`
-	AllowedMethods    []string          `yaml:"allowed_methods"`
-	RequiredHeaders   []string          `yaml:"required_headers"`
-	BlockedPatterns   []string          `yaml:"blocked_patterns"`
-	ContentTypes      []string          `yaml:"allowed_content_types"`
-	MaxJSONDepth      int               `yaml:"max_json_depth"`
-	MaxFieldLength    int               `yaml:"max_field_length"`
-	IPWhitelist       []string          `yaml:"ip_whitelist"`
-	IPBlacklist       []string          `yaml:"ip_blacklist"`
-	UserAgentPatterns []string          `yaml:"user_agent_patterns"`
+	MaxRequestSize    int64    `yaml:"max_request_size"`
+	AllowedMethods    []string `yaml:"allowed_methods"`
+	RequiredHeaders   []string `yaml:"required_headers"`
+	BlockedPatterns   []string `yaml:"blocked_patterns"`
+	ContentTypes      []string `yaml:"allowed_content_types"`
+	MaxJSONDepth      int      `yaml:"max_json_depth"`
+	MaxFieldLength    int      `yaml:"max_field_length"`
+	IPWhitelist       []string `yaml:"ip_whitelist"`
+	IPBlacklist       []string `yaml:"ip_blacklist"`
+	UserAgentPatterns []string `yaml:"user_agent_patterns"`
 }
 
 // RequestValidator handles request validation and sanitization
@@ -209,7 +209,7 @@ func (v *RequestValidator) ValidateJSON(ctx context.Context, body []byte) (*Vali
 func (v *RequestValidator) SanitizeInput(input string) string {
 	// Remove null bytes
 	input = strings.ReplaceAll(input, "\x00", "")
-	
+
 	// Remove control characters except newline and tab
 	var sanitized strings.Builder
 	for _, r := range input {
@@ -217,7 +217,7 @@ func (v *RequestValidator) SanitizeInput(input string) string {
 			sanitized.WriteRune(r)
 		}
 	}
-	
+
 	return sanitized.String()
 }
 
@@ -235,7 +235,7 @@ func (v *RequestValidator) ValidationMiddleware() func(http.Handler) http.Handle
 			if !result.Valid {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
-				
+
 				response := map[string]interface{}{
 					"error": map[string]interface{}{
 						"message": "Request validation failed",
@@ -245,7 +245,7 @@ func (v *RequestValidator) ValidationMiddleware() func(http.Handler) http.Handle
 					},
 					"timestamp": time.Now().Unix(),
 				}
-				
+
 				json.NewEncoder(w).Encode(response)
 				return
 			}
@@ -266,7 +266,7 @@ func (v *RequestValidator) isAllowedMethod(method string) bool {
 	if len(v.config.AllowedMethods) == 0 {
 		return true // Allow all if none specified
 	}
-	
+
 	for _, allowed := range v.config.AllowedMethods {
 		if strings.EqualFold(method, allowed) {
 			return true
@@ -279,11 +279,11 @@ func (v *RequestValidator) isAllowedContentType(contentType string) bool {
 	if len(v.config.ContentTypes) == 0 {
 		return true // Allow all if none specified
 	}
-	
+
 	// Extract main content type (ignore charset, etc.)
 	mainType := strings.Split(contentType, ";")[0]
 	mainType = strings.TrimSpace(mainType)
-	
+
 	for _, allowed := range v.config.ContentTypes {
 		if strings.EqualFold(mainType, allowed) {
 			return true
@@ -296,7 +296,7 @@ func (v *RequestValidator) isAllowedIP(ip string) bool {
 	if len(v.config.IPWhitelist) == 0 {
 		return true // Allow all if no whitelist
 	}
-	
+
 	for _, allowed := range v.config.IPWhitelist {
 		if v.matchesIPPattern(ip, allowed) {
 			return true
@@ -319,7 +319,7 @@ func (v *RequestValidator) matchesIPPattern(ip, pattern string) bool {
 	if ip == pattern {
 		return true
 	}
-	
+
 	// Check for CIDR notation
 	if strings.Contains(pattern, "/") {
 		// This is a simplified check - use net.ParseCIDR in production
@@ -328,7 +328,7 @@ func (v *RequestValidator) matchesIPPattern(ip, pattern string) bool {
 			return strings.HasPrefix(ip, parts[0][:strings.LastIndex(parts[0], ".")])
 		}
 	}
-	
+
 	return false
 }
 
@@ -336,7 +336,7 @@ func (v *RequestValidator) isValidUserAgent(userAgent string) bool {
 	if len(v.uaRegexes) == 0 {
 		return true // No patterns means all are valid
 	}
-	
+
 	for _, regex := range v.uaRegexes {
 		if regex.MatchString(userAgent) {
 			return true
@@ -357,17 +357,17 @@ func (v *RequestValidator) containsBlockedPattern(text string) bool {
 func (v *RequestValidator) sanitizeURL(url string) string {
 	// Basic URL sanitization
 	url = strings.TrimSpace(url)
-	
+
 	// Remove dangerous URL schemes
 	dangerousSchemes := []string{"javascript:", "data:", "vbscript:", "file:"}
 	lowerURL := strings.ToLower(url)
-	
+
 	for _, scheme := range dangerousSchemes {
 		if strings.HasPrefix(lowerURL, scheme) {
 			return ""
 		}
 	}
-	
+
 	return url
 }
 

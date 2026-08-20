@@ -2,38 +2,38 @@ package types
 
 // Provider capabilities and configuration
 type ProviderCapabilities struct {
-	ProviderName              string                     `json:"provider_name"`
-	SupportedModels           []ModelInfo                `json:"supported_models"`
-	SupportsFunctions         bool                       `json:"supports_functions"`
-	SupportsParallelFunctions bool                       `json:"supports_parallel_functions"`
-	SupportsVision            bool                       `json:"supports_vision"`
-	SupportsStructuredOutput  bool                       `json:"supports_structured_output"`
-	SupportsStreaming         bool                       `json:"supports_streaming"`
-	SupportsAssistants        bool                       `json:"supports_assistants"`
-	SupportsBatch             bool                       `json:"supports_batch"`
-	MaxContextWindow          int                        `json:"max_context_window"`
-	SupportedImageFormats     []string                   `json:"supported_image_formats"`
-	CostPer1KTokens           CostStructure              `json:"cost_per_1k_tokens"`
-	
+	ProviderName              string        `json:"provider_name"`
+	SupportedModels           []ModelInfo   `json:"supported_models"`
+	SupportsFunctions         bool          `json:"supports_functions"`
+	SupportsParallelFunctions bool          `json:"supports_parallel_functions"`
+	SupportsVision            bool          `json:"supports_vision"`
+	SupportsStructuredOutput  bool          `json:"supports_structured_output"`
+	SupportsStreaming         bool          `json:"supports_streaming"`
+	SupportsAssistants        bool          `json:"supports_assistants"`
+	SupportsBatch             bool          `json:"supports_batch"`
+	MaxContextWindow          int           `json:"max_context_window"`
+	SupportedImageFormats     []string      `json:"supported_image_formats"`
+	CostPer1KTokens           CostStructure `json:"cost_per_1k_tokens"`
+
 	// Provider-specific capabilities
-	OpenAISpecific            *OpenAICapabilities        `json:"openai_specific,omitempty"`
-	AnthropicSpecific         *AnthropicCapabilities     `json:"anthropic_specific,omitempty"`
+	OpenAISpecific    *OpenAICapabilities    `json:"openai_specific,omitempty"`
+	AnthropicSpecific *AnthropicCapabilities `json:"anthropic_specific,omitempty"`
 }
 
 type ModelInfo struct {
-	Name                 string   `json:"name" yaml:"name"`
-	DisplayName          string   `json:"display_name" yaml:"display_name"`
-	MaxContextWindow     int      `json:"max_context_window" yaml:"max_context_window"`
-	MaxOutputTokens      int      `json:"max_output_tokens" yaml:"max_output_tokens"`
-	SupportsFunctions    bool     `json:"supports_functions" yaml:"supports_functions"`
-	SupportsVision       bool     `json:"supports_vision" yaml:"supports_vision"`
-	SupportsStructured   bool     `json:"supports_structured_output" yaml:"supports_structured_output"`
-	InputCostPer1K       float64  `json:"input_cost_per_1k" yaml:"input_cost_per_1k"`
-	OutputCostPer1K      float64  `json:"output_cost_per_1k" yaml:"output_cost_per_1k"`
+	Name               string  `json:"name" yaml:"name"`
+	DisplayName        string  `json:"display_name" yaml:"display_name"`
+	MaxContextWindow   int     `json:"max_context_window" yaml:"max_context_window"`
+	MaxOutputTokens    int     `json:"max_output_tokens" yaml:"max_output_tokens"`
+	SupportsFunctions  bool    `json:"supports_functions" yaml:"supports_functions"`
+	SupportsVision     bool    `json:"supports_vision" yaml:"supports_vision"`
+	SupportsStructured bool    `json:"supports_structured_output" yaml:"supports_structured_output"`
+	InputCostPer1K     float64 `json:"input_cost_per_1k" yaml:"input_cost_per_1k"`
+	OutputCostPer1K    float64 `json:"output_cost_per_1k" yaml:"output_cost_per_1k"`
 
 	// Provider-specific model info
-	ProviderModelID      string   `json:"provider_model_id,omitempty" yaml:"provider_model_id"`
-	Tags                 []string `json:"tags,omitempty" yaml:"tags"`
+	ProviderModelID string   `json:"provider_model_id,omitempty" yaml:"provider_model_id"`
+	Tags            []string `json:"tags,omitempty" yaml:"tags"`
 }
 
 type CostStructure struct {
@@ -55,20 +55,20 @@ type OpenAICapabilities struct {
 }
 
 type AnthropicCapabilities struct {
-	SupportsSystemMessages    bool     `json:"supports_system_messages"`
-	MaxSystemMessageLength    int      `json:"max_system_message_length"`
-	SupportsStopSequences     bool     `json:"supports_stop_sequences"`
-	SupportsToolUse           bool     `json:"supports_tool_use"`
-	MaxToolCalls              int      `json:"max_tool_calls"`
-	SupportedStopSequences    []string `json:"supported_stop_sequences"`
+	SupportsSystemMessages bool     `json:"supports_system_messages"`
+	MaxSystemMessageLength int      `json:"max_system_message_length"`
+	SupportsStopSequences  bool     `json:"supports_stop_sequences"`
+	SupportsToolUse        bool     `json:"supports_tool_use"`
+	MaxToolCalls           int      `json:"max_tool_calls"`
+	SupportedStopSequences []string `json:"supported_stop_sequences"`
 }
 
 // Health check types
 type HealthStatus struct {
-	Status        string `json:"status"` // "healthy", "degraded", "unhealthy"
-	ResponseTime  int64  `json:"response_time_ms"`
-	LastChecked   int64  `json:"last_checked"`
-	ErrorMessage  string `json:"error_message,omitempty"`
+	Status       string `json:"status"` // "healthy", "degraded", "unhealthy"
+	ResponseTime int64  `json:"response_time_ms"`
+	LastChecked  int64  `json:"last_checked"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // Routing configuration

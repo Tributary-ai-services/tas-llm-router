@@ -222,7 +222,7 @@ func TestInMemoryRateLimiter_TokenRefill(t *testing.T) {
 	// Should be allowed again due to token refill
 	result, err = limiter.Allow(ctx, "test-key")
 	require.NoError(t, err)
-	// This might be true or false depending on exact timing, 
+	// This might be true or false depending on exact timing,
 	// but the test demonstrates the refill concept
 }
 
@@ -258,7 +258,7 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	// Test with auth info
 	authInfo := &AuthInfo{UserID: "test-user"}
 	ctx = context.WithValue(ctx, "auth_info", authInfo)
-	
+
 	// The function should still work (implementation details may vary)
 	result = getClientIP(ctx)
 	assert.Equal(t, "unknown", result) // No client_ip in context

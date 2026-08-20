@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
 	"net"
 	"net/http"
 	"strings"
@@ -1154,4 +1155,15 @@ func ResolvedTarget(ctx context.Context) *policy.Target {
 		return nil
 	}
 	return holder.get().Target
+}
+
+// ResolvedResilience returns the matched rule's health/budgets overrides, or
+// nils when no rule set any.
+func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Budgets) {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return nil, nil
+	}
+	res := holder.get()
+	return res.Health, res.Budgets
 }

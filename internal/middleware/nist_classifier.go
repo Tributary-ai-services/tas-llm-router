@@ -24,10 +24,10 @@ package middleware
 // NIST AI RMF characteristic constants. Use these strings as map
 // keys throughout the pipeline so the dashboard stays in sync.
 const (
-	NISTSecureResilient  = "secure_resilient"
-	NISTPrivacyEnhanced  = "privacy_enhanced"
-	NISTValidReliable    = "valid_reliable"
-	NISTSafe             = "safe"
+	NISTSecureResilient = "secure_resilient"
+	NISTPrivacyEnhanced = "privacy_enhanced"
+	NISTValidReliable   = "valid_reliable"
+	NISTSafe            = "safe"
 
 	// nistOther is a fallback bucket for findings whose pattern ID
 	// isn't in the table (e.g. a new matcher landed before the
@@ -45,9 +45,9 @@ var nistByPatternID = map[string]string{
 	// refusal both surface as Valid & Reliable failures — degraded
 	// input quality drives degraded output. Role-claim is a soft
 	// prompt injection → Secure & Resilient.
-	"aiqg-bloated-context":     NISTValidReliable,
-	"aiqg-refusal":             NISTValidReliable,
-	"aiqg-role-claim":          NISTSecureResilient,
+	"aiqg-bloated-context": NISTValidReliable,
+	"aiqg-refusal":         NISTValidReliable,
+	"aiqg-role-claim":      NISTSecureResilient,
 	// Outbound quality matchers (Gatekeeper#9). All three signal
 	// degraded model output → Valid & Reliable.
 	"aiqg-repetition":          NISTValidReliable,
@@ -78,15 +78,15 @@ var nistByPatternID = map[string]string{
 
 	// Credential exposure — leaked secrets are a privacy issue
 	// (someone's secret in an LLM transcript = data leak).
-	"cred-api-key":          NISTPrivacyEnhanced,
-	"cred-aws-access-key":   NISTPrivacyEnhanced,
-	"cred-aws-secret-key":   NISTPrivacyEnhanced,
-	"cred-azure-key":        NISTPrivacyEnhanced,
+	"cred-api-key":           NISTPrivacyEnhanced,
+	"cred-aws-access-key":    NISTPrivacyEnhanced,
+	"cred-aws-secret-key":    NISTPrivacyEnhanced,
+	"cred-azure-key":         NISTPrivacyEnhanced,
 	"cred-connection-string": NISTPrivacyEnhanced,
-	"cred-gcp-key":          NISTPrivacyEnhanced,
-	"cred-jwt-token":        NISTPrivacyEnhanced,
-	"cred-oauth-token":      NISTPrivacyEnhanced,
-	"cred-private-key":      NISTPrivacyEnhanced,
+	"cred-gcp-key":           NISTPrivacyEnhanced,
+	"cred-jwt-token":         NISTPrivacyEnhanced,
+	"cred-oauth-token":       NISTPrivacyEnhanced,
+	"cred-private-key":       NISTPrivacyEnhanced,
 
 	// Injection — by definition adversarial input.
 	"injection-prompt": NISTSecureResilient,
@@ -94,18 +94,18 @@ var nistByPatternID = map[string]string{
 	"injection-xss":    NISTSecureResilient,
 
 	// PII — every type is a privacy finding.
-	"pii-address":          NISTPrivacyEnhanced,
-	"pii-bank-account":     NISTPrivacyEnhanced,
-	"pii-credit-card":      NISTPrivacyEnhanced,
-	"pii-dob":              NISTPrivacyEnhanced,
-	"pii-drivers-license":  NISTPrivacyEnhanced,
-	"pii-email":            NISTPrivacyEnhanced,
-	"pii-ip-address":       NISTPrivacyEnhanced,
-	"pii-mrn":              NISTPrivacyEnhanced,
-	"pii-name":             NISTPrivacyEnhanced,
-	"pii-passport":         NISTPrivacyEnhanced,
-	"pii-phone":            NISTPrivacyEnhanced,
-	"pii-ssn":              NISTPrivacyEnhanced,
+	"pii-address":         NISTPrivacyEnhanced,
+	"pii-bank-account":    NISTPrivacyEnhanced,
+	"pii-credit-card":     NISTPrivacyEnhanced,
+	"pii-dob":             NISTPrivacyEnhanced,
+	"pii-drivers-license": NISTPrivacyEnhanced,
+	"pii-email":           NISTPrivacyEnhanced,
+	"pii-ip-address":      NISTPrivacyEnhanced,
+	"pii-mrn":             NISTPrivacyEnhanced,
+	"pii-name":            NISTPrivacyEnhanced,
+	"pii-passport":        NISTPrivacyEnhanced,
+	"pii-phone":           NISTPrivacyEnhanced,
+	"pii-ssn":             NISTPrivacyEnhanced,
 }
 
 // MapPatternToNIST returns the NIST characteristic for a Gatekeeper

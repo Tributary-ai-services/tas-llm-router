@@ -97,6 +97,10 @@ type AIQGConfig struct {
 	// in-memory cache when Redis isn't configured.
 	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
 
+	// Breaker is passive outlier detection + retry budgets
+	// (routing-decision.md step 2).
+	Breaker AIQGBreakerConfig `yaml:"breaker"`
+
 	// SemCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
 	// Default off. Uses the dedicated redis-semcache (FT.*) + Ollama embeddings.
 	SemCache AIQGSemCacheConfig `yaml:"semantic_cache"`
@@ -146,6 +150,25 @@ type AIQGSemCacheConfig struct {
 	// 1.0 — at current traffic every data point is wanted. Env
 	// AIQG_SEMCACHE_JUDGE_SAMPLE_RATE.
 	JudgeSampleRate float64 `yaml:"judge_sample_rate"`
+}
+
+// AIQGBreakerConfig configures passive outlier detection. Zero values fall
+// back to the conservative defaults in pkg/aiqg/breaker, so only the settings
+// an operator actually wants to change need to be set.
+//
+// Env: AIQG_BREAKER_ENABLED, AIQG_BREAKER_CONSECUTIVE_ERRORS,
+// AIQG_BREAKER_ERROR_RATE_PERCENT, AIQG_BREAKER_MIN_REQUESTS,
+// AIQG_BREAKER_WINDOW, AIQG_BREAKER_EJECT_FOR, AIQG_BREAKER_RETRY_RATIO,
+// AIQG_BREAKER_MIN_RETRIES.
+type AIQGBreakerConfig struct {
+	Enabled           bool          `yaml:"enabled"`
+	ConsecutiveErrors int           `yaml:"consecutive_errors"`
+	ErrorRatePercent  int           `yaml:"error_rate_percent"`
+	MinRequests       int           `yaml:"min_requests"`
+	Window            time.Duration `yaml:"window"`
+	EjectFor          time.Duration `yaml:"eject_for"`
+	RetryRatio        float64       `yaml:"retry_ratio"`
+	MinRetries        int           `yaml:"min_retries"`
 }
 
 // AIQGResponseCacheConfig configures the C1 response cache. Env:
@@ -659,6 +682,47 @@ func (c *Config) loadFromEnv() {
 	if v := os.Getenv("AIQG_RESPONSE_CACHE_IN_EXPERIMENTS"); v != "" {
 		c.AIQG.ResponseCache.InExperiments = v == "true" || v == "1"
 	}
+	// Breaker. Off by default: it changes which provider serves a request,
+	// so it is opt-in per environment rather than switched on everywhere by a
+	// deploy.
+	if v := os.Getenv("AIQG_BREAKER_ENABLED"); v != "" {
+		c.AIQG.Breaker.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("AIQG_BREAKER_CONSECUTIVE_ERRORS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.AIQG.Breaker.ConsecutiveErrors = n
+		}
+	}
+	if v := os.Getenv("AIQG_BREAKER_ERROR_RATE_PERCENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.AIQG.Breaker.ErrorRatePercent = n
+		}
+	}
+	if v := os.Getenv("AIQG_BREAKER_MIN_REQUESTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.AIQG.Breaker.MinRequests = n
+		}
+	}
+	if v := os.Getenv("AIQG_BREAKER_WINDOW"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.AIQG.Breaker.Window = d
+		}
+	}
+	if v := os.Getenv("AIQG_BREAKER_EJECT_FOR"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.AIQG.Breaker.EjectFor = d
+		}
+	}
+	if v := os.Getenv("AIQG_BREAKER_RETRY_RATIO"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.AIQG.Breaker.RetryRatio = f
+		}
+	}
+	if v := os.Getenv("AIQG_BREAKER_MIN_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.AIQG.Breaker.MinRetries = n
+		}
+	}
 	// C4 semantic cache. Shadow defaults ON when enabled (safe first mode).
 	if v := os.Getenv("AIQG_SEMCACHE_ENABLED"); v != "" {
 		c.AIQG.SemCache.Enabled = v == "true" || v == "1"
@@ -921,6 +985,16 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			MaxBodyBytes:          c.AIQG.ResponseCache.MaxBodyBytes,
 			AllowNondeterministic: c.AIQG.ResponseCache.AllowNondeterministic,
 			InExperiments:         c.AIQG.ResponseCache.InExperiments,
+		},
+		Breaker: server.AIQGBreakerConfig{
+			Enabled:           c.AIQG.Breaker.Enabled,
+			ConsecutiveErrors: c.AIQG.Breaker.ConsecutiveErrors,
+			ErrorRatePercent:  c.AIQG.Breaker.ErrorRatePercent,
+			MinRequests:       c.AIQG.Breaker.MinRequests,
+			Window:            c.AIQG.Breaker.Window,
+			EjectFor:          c.AIQG.Breaker.EjectFor,
+			RetryRatio:        c.AIQG.Breaker.RetryRatio,
+			MinRetries:        c.AIQG.Breaker.MinRetries,
 		},
 		SemCache: server.AIQGSemCacheConfig{
 			Enabled:         c.AIQG.SemCache.Enabled,

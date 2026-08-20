@@ -20,8 +20,10 @@ type stubProvider struct {
 	checkCount int32
 }
 
-func (s *stubProvider) GetCapabilities() types.ProviderCapabilities { return types.ProviderCapabilities{} }
-func (s *stubProvider) GetProviderName() string                     { return s.name }
+func (s *stubProvider) GetCapabilities() types.ProviderCapabilities {
+	return types.ProviderCapabilities{}
+}
+func (s *stubProvider) GetProviderName() string { return s.name }
 func (s *stubProvider) ChatCompletion(ctx context.Context, req *types.ChatRequest) (*types.ChatResponse, error) {
 	return nil, nil
 }

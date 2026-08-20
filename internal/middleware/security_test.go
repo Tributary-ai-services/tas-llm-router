@@ -277,7 +277,7 @@ func TestSecurityMiddleware_AuditOnly(t *testing.T) {
 
 	// Wait for async audit logging
 	time.Sleep(100 * time.Millisecond)
-	
+
 	// Verify audit event was logged
 	assert.Greater(t, middleware.auditor.GetEventCount(), int64(0))
 }
@@ -300,7 +300,7 @@ func TestSecurityMiddleware_GetStats(t *testing.T) {
 	assert.Contains(t, stats, "rate_limiter_enabled")
 	assert.Contains(t, stats, "validation_enabled")
 	assert.Contains(t, stats, "authentication_enabled")
-	
+
 	assert.True(t, stats["rate_limiter_enabled"].(bool))
 	assert.True(t, stats["validation_enabled"].(bool))
 	assert.True(t, stats["authentication_enabled"].(bool))
@@ -334,7 +334,7 @@ func TestSecurityMiddleware_Stop(t *testing.T) {
 
 	// Stop should not panic and should clean up resources
 	middleware.Stop()
-	
+
 	// Multiple stops should be safe
 	middleware.Stop()
 }
@@ -376,9 +376,9 @@ func TestSecurityMiddleware_CORSMiddleware(t *testing.T) {
 
 func TestGetClientIPFromRequest(t *testing.T) {
 	tests := []struct {
-		name           string
-		setupRequest   func() *http.Request
-		expectedIP     string
+		name         string
+		setupRequest func() *http.Request
+		expectedIP   string
 	}{
 		{
 			name: "X-Forwarded-For header",

@@ -12,6 +12,7 @@ import (
 
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/breaker"
 )
 
 // Router handles intelligent request routing to LLM providers
@@ -24,6 +25,21 @@ type Router struct {
 	logger              *logrus.Logger
 	lastHealthCheck     time.Time
 	healthCheckInterval time.Duration
+
+	// breaker is passive outlier detection over real request outcomes. It is
+	// a SECOND, INDEPENDENT input to health, not a replacement for the active
+	// probe above: the probe can mark a provider down with no traffic at all,
+	// and the breaker can mark it down while the probe still passes (see the
+	// breaker package doc — OpenAI's probe is ListModels, which says nothing
+	// about whether completions work). A target must satisfy both.
+	breaker *breaker.Breaker
+	// ejected caches breaker state so candidate filtering — which runs over
+	// every provider on every request — does not make a Redis round trip per
+	// candidate. Refreshed by the same ticker as the active probe. The
+	// authoritative check, including the single-probe half-open gate, is the
+	// one Admit call made against the FINAL selection.
+	ejected   map[string]breaker.State
+	ejectedMu sync.RWMutex
 }
 
 // RoutingStrategy defines how to route requests
@@ -45,6 +61,7 @@ func NewRouter(logger *logrus.Logger) *Router {
 		healthStatus:        make(map[string]*types.HealthStatus),
 		logger:              logger,
 		healthCheckInterval: 30 * time.Second,
+		ejected:             make(map[string]breaker.State),
 	}
 }
 
@@ -135,6 +152,12 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 		return nil, nil, err
 	}
 
+	// Authoritative breaker check on the FINAL selection. Candidate filtering
+	// already used the cached state; this call is what owns the half-open
+	// probe, so it happens exactly once per request against exactly one
+	// target.
+	decision, provider = r.admitOrReselect(ctx, req, decision, provider, strategy)
+
 	// Initialize metadata tracking
 	metadata := &types.RouterMetadata{
 		Provider:       decision.SelectedProvider,
@@ -210,6 +233,19 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 				// Continue with retry
 			case <-ctx.Done():
 				return nil, nil, fmt.Errorf("request cancelled during retry backoff: %w", ctx.Err())
+			}
+		}
+
+		// A retry must fit the fleet-wide budget. A per-request attempt cap
+		// cannot prevent a retry storm on its own: when a provider degrades,
+		// every in-flight request retries at once and the retries become the
+		// load that keeps it down.
+		if attempt > 1 && r.breaker != nil && r.breaker.Enabled() {
+			if !r.breakerFor(ctx).AllowRetry(ctx, breaker.Target(decision.SelectedProvider, req.Model)) {
+				lastError = fmt.Errorf("retry budget exhausted for provider %s", decision.SelectedProvider)
+				r.logger.WithField("provider", decision.SelectedProvider).
+					Warn("Retry suppressed: budget exhausted")
+				break
 			}
 		}
 
@@ -653,8 +689,17 @@ func (r *Router) getHealthyProviders() []string {
 	return healthy
 }
 
-// isProviderHealthy checks if a provider is healthy
+// isProviderHealthy reports whether a provider may be considered as a
+// candidate. Both inputs must agree: the active probe (is the vendor
+// reachable) and the passive breaker (are real requests to it succeeding).
+//
+// A provider ejected by the breaker is excluded here so it is never SELECTED,
+// which is different from being admitted — see admit(), which owns the
+// half-open probe and is called once against the final choice.
 func (r *Router) isProviderHealthy(name string) bool {
+	if r.isEjected(name) {
+		return false
+	}
 	r.healthMu.RLock()
 	status, exists := r.healthStatus[name]
 	r.healthMu.RUnlock()
@@ -664,6 +709,68 @@ func (r *Router) isProviderHealthy(name string) bool {
 
 	// Consider provider healthy if status is "healthy" or "unknown" (untested)
 	return status.Status == "healthy" || status.Status == "unknown"
+}
+
+// isEjected reports the cached breaker verdict for a provider-level target.
+// Reads the cache rather than the store: this runs per candidate per request.
+func (r *Router) isEjected(name string) bool {
+	r.ejectedMu.RLock()
+	defer r.ejectedMu.RUnlock()
+	return r.ejected[breaker.Target(name, "")] == breaker.Open
+}
+
+// SetBreaker attaches passive outlier detection. Safe to call with nil, which
+// leaves the router on active health checks alone.
+func (r *Router) SetBreaker(b *breaker.Breaker) { r.breaker = b }
+
+// Breaker returns the attached breaker, or nil.
+func (r *Router) Breaker() *breaker.Breaker { return r.breaker }
+
+// refreshBreakerCache repopulates the ejection cache used by candidate
+// filtering. Called on the health-check tick so the two health inputs refresh
+// together.
+func (r *Router) refreshBreakerCache(ctx context.Context) {
+	if r.breaker == nil || !r.breaker.Enabled() {
+		return
+	}
+	next := make(map[string]breaker.State, len(r.providerNames))
+	for _, name := range r.providerNames {
+		st, err := r.breaker.Status(ctx, breaker.Target(name, ""))
+		if err != nil {
+			continue
+		}
+		next[breaker.Target(name, "")] = st.State
+	}
+	r.ejectedMu.Lock()
+	r.ejected = next
+	r.ejectedMu.Unlock()
+}
+
+// RecordOutcome accounts a completed attempt against the breaker. Called by
+// the server after the provider call returns, because only the caller knows
+// whether the request actually succeeded — the router hands back a provider
+// and never sees the result.
+//
+// Records at BOTH granularities: a vendor-wide outage and a single degraded
+// model are different failures needing different responses, and recording only
+// one of them makes the other undetectable.
+func (r *Router) RecordOutcome(ctx context.Context, provider, model string, outcome breaker.Outcome) {
+	if r.breaker == nil || !r.breaker.Enabled() {
+		return
+	}
+	br := r.breakerFor(ctx)
+	br.Record(ctx, breaker.Target(provider, ""), outcome)
+	if model != "" {
+		br.Record(ctx, breaker.Target(provider, model), outcome)
+	}
+}
+
+// breakerFor returns the breaker to use for this request, applying any
+// resilience overrides a matched route rule resolved. Falls back to the
+// gateway-wide breaker when no rule set any.
+func (r *Router) breakerFor(ctx context.Context) *breaker.Breaker {
+	h, b := ResilienceFrom(ctx)
+	return r.breaker.Override(h, b)
 }
 
 // filterByFeatures filters providers based on required features
@@ -811,6 +918,7 @@ func (r *Router) updateHealthStatus(ctx context.Context) {
 		r.healthStatus[name] = status
 		r.healthMu.Unlock()
 	}
+	r.refreshBreakerCache(ctx)
 }
 
 // GetHealthStatus returns the health status of all providers
@@ -939,6 +1047,64 @@ func (r *Router) routeWithPin(ctx context.Context, req *types.ChatRequest, strat
 		dec.EstimatedCost = costEst.TotalCost
 	}
 	return dec, prov, nil
+}
+
+// admitOrReselect asks the breaker whether the chosen target may receive this
+// request, and picks another provider when it may not.
+//
+// When the breaker denies and NO alternative exists, the request proceeds
+// anyway and says so in the reasoning. That is deliberate: ejection exists to
+// shift traffic away from a bad target, and with nowhere to shift it, refusing
+// every request is strictly worse than trying a provider that may have
+// recovered. Ejection protects a system that has somewhere else to go; it is
+// not a kill switch. Once ordered fallback chains land (step 3) the "nowhere
+// to go" case becomes rare and this can harden.
+func (r *Router) admitOrReselect(ctx context.Context, req *types.ChatRequest, decision *RoutingDecision, provider providers.LLMProvider, strategy RoutingStrategy) (*RoutingDecision, providers.LLMProvider) {
+	if r.breaker == nil || !r.breaker.Enabled() || decision == nil {
+		return decision, provider
+	}
+	// A matched route rule may tighten or loosen the thresholds for THIS
+	// request. The counters stay shared — see Breaker.Override.
+	br := r.breakerFor(ctx)
+	target := breaker.Target(decision.SelectedProvider, req.Model)
+	ok, state := br.Admit(ctx, target)
+	if ok {
+		if state == breaker.HalfOpen {
+			decision.Reasoning = append(decision.Reasoning,
+				"breaker half-open: this request is the single recovery probe for "+target)
+		}
+		return decision, provider
+	}
+
+	// Denied. Look for any other healthy provider.
+	for _, name := range r.providerNames {
+		if name == decision.SelectedProvider || !r.isProviderHealthy(name) {
+			continue
+		}
+		alt, exists := r.providers[name]
+		if !exists {
+			continue
+		}
+		if admitted, _ := br.Admit(ctx, breaker.Target(name, req.Model)); !admitted {
+			continue
+		}
+		r.logger.WithFields(logrus.Fields{
+			"ejected": decision.SelectedProvider,
+			"chosen":  name,
+		}).Warn("Breaker ejected the selected provider; routed to an alternative")
+		return &RoutingDecision{
+			SelectedProvider: name,
+			EstimatedCost:    decision.EstimatedCost,
+			Reasoning: append(decision.Reasoning,
+				"breaker ejected "+decision.SelectedProvider+"; routed to "+name),
+		}, alt
+	}
+
+	r.logger.WithField("provider", decision.SelectedProvider).
+		Warn("Breaker ejected the selected provider but no alternative is available; proceeding")
+	decision.Reasoning = append(decision.Reasoning,
+		"breaker ejected "+decision.SelectedProvider+" but no alternative was available; proceeded anyway")
+	return decision, provider
 }
 
 // routeByStrategyNoting routes normally but records why the pin was ignored.

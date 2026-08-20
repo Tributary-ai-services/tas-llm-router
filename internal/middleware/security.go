@@ -20,11 +20,11 @@ type SecurityMiddlewareConfig struct {
 
 // SecurityMiddleware combines all security middleware components
 type SecurityMiddleware struct {
-	authProvider    *security.DefaultAuthProvider
-	rateLimiter     security.RateLimiter
-	validator       *security.RequestValidator
-	auditor         *security.AuditLogger
-	logger          *logrus.Logger
+	authProvider *security.DefaultAuthProvider
+	rateLimiter  security.RateLimiter
+	validator    *security.RequestValidator
+	auditor      *security.AuditLogger
+	logger       *logrus.Logger
 }
 
 // NewSecurityMiddleware creates a new security middleware stack
@@ -34,13 +34,13 @@ func NewSecurityMiddleware(config *SecurityMiddlewareConfig, logger *logrus.Logg
 	if config.Auth != nil {
 		authProvider = security.NewDefaultAuthProvider(config.Auth, logger)
 	}
-	
+
 	// Initialize rate limiter
 	var rateLimiter security.RateLimiter
 	if config.RateLimit != nil && config.RateLimit.Enabled {
 		rateLimiter = security.NewInMemoryRateLimiter(config.RateLimit, logger)
 	}
-	
+
 	// Initialize request validator
 	var validator *security.RequestValidator
 	var err error
@@ -50,13 +50,13 @@ func NewSecurityMiddleware(config *SecurityMiddlewareConfig, logger *logrus.Logg
 			return nil, err
 		}
 	}
-	
+
 	// Initialize audit logger
 	var auditor *security.AuditLogger
 	if config.Audit != nil {
 		auditor = security.NewAuditLogger(config.Audit, logger)
 	}
-	
+
 	return &SecurityMiddleware{
 		authProvider: authProvider,
 		rateLimiter:  rateLimiter,
@@ -71,31 +71,31 @@ func (s *SecurityMiddleware) Handler() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		// Build middleware chain in reverse order (innermost first)
 		handler := next
-		
+
 		// 1. Audit logging (outermost - logs everything)
 		if s.auditor != nil {
 			handler = s.auditor.AuditMiddleware()(handler)
 		}
-		
+
 		// 2. Authentication (before rate limiting to identify users)
 		if s.authProvider != nil {
 			handler = s.authProvider.AuthMiddleware()(handler)
 		}
-		
+
 		// 3. Rate limiting (after auth to use user-based limits)
 		if s.rateLimiter != nil {
 			keyExtractor := security.DefaultKeyExtractor
 			handler = security.RateLimitMiddleware(s.rateLimiter, keyExtractor)(handler)
 		}
-		
+
 		// 4. Request validation (innermost - validates each request)
 		if s.validator != nil {
 			handler = s.validator.ValidationMiddleware()(handler)
 		}
-		
+
 		// 5. Security headers (add security headers to all responses)
 		handler = s.securityHeadersMiddleware()(handler)
-		
+
 		return handler
 	}
 }
@@ -144,15 +144,15 @@ func (s *SecurityMiddleware) securityHeadersMiddleware() func(http.Handler) http
 			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 			w.Header().Set("Content-Security-Policy", "default-src 'self'")
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-			
+
 			// Remove server information
 			w.Header().Del("Server")
 			w.Header().Set("Server", "LLM-Router-WAF/1.0")
-			
+
 			// Add custom security headers
 			w.Header().Set("X-API-Version", "1.0")
 			w.Header().Set("X-Request-ID", r.Header.Get("X-Request-ID"))
-			
+
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -163,7 +163,7 @@ func (s *SecurityMiddleware) Stop() {
 	if s.auditor != nil {
 		s.auditor.Stop()
 	}
-	
+
 	if rateLimiter, ok := s.rateLimiter.(*security.InMemoryRateLimiter); ok {
 		rateLimiter.Stop()
 	}
@@ -172,21 +172,21 @@ func (s *SecurityMiddleware) Stop() {
 // GetStats returns security middleware statistics
 func (s *SecurityMiddleware) GetStats() map[string]interface{} {
 	stats := make(map[string]interface{})
-	
+
 	// Add audit stats
 	if s.auditor != nil {
 		stats["audit_events_logged"] = s.auditor.GetEventCount()
 	}
-	
+
 	// Add rate limiter stats (would need to implement this in rate limiter)
 	stats["rate_limiter_enabled"] = s.rateLimiter != nil
-	
+
 	// Add validator stats
 	stats["validation_enabled"] = s.validator != nil
-	
+
 	// Add auth stats
 	stats["authentication_enabled"] = s.authProvider != nil
-	
+
 	return stats
 }
 
@@ -196,10 +196,10 @@ func (s *SecurityMiddleware) HealthCheck() error {
 	if s.authProvider == nil {
 		return fmt.Errorf("authentication provider not initialized")
 	}
-	
+
 	// Additional health checks would go here
 	// For example, check if external audit endpoint is reachable
-	
+
 	return nil
 }
 
@@ -221,12 +221,12 @@ func (s *SecurityMiddleware) APIKeyOnlyMiddleware() func(http.Handler) http.Hand
 			if apiKey == "" {
 				apiKey = r.Header.Get("API-Key")
 			}
-			
+
 			if apiKey == "" {
 				http.Error(w, "API key required", http.StatusUnauthorized)
 				return
 			}
-			
+
 			// Validate API key
 			ctx := context.WithValue(r.Context(), "client_ip", getClientIPFromRequest(r))
 			authInfo, err := s.authProvider.ValidateAPIKey(ctx, apiKey)
@@ -235,10 +235,10 @@ func (s *SecurityMiddleware) APIKeyOnlyMiddleware() func(http.Handler) http.Hand
 				http.Error(w, "Invalid API key", http.StatusUnauthorized)
 				return
 			}
-			
+
 			// Add auth info to context
 			ctx = context.WithValue(r.Context(), "auth_info", authInfo)
-			
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -254,9 +254,9 @@ func (s *SecurityMiddleware) JWTOnlyMiddleware() func(http.Handler) http.Handler
 				http.Error(w, "JWT token required", http.StatusUnauthorized)
 				return
 			}
-			
+
 			token := strings.TrimPrefix(authHeader, "Bearer ")
-			
+
 			// Validate JWT
 			claims, err := s.authProvider.ValidateJWT(token)
 			if err != nil {
@@ -264,7 +264,7 @@ func (s *SecurityMiddleware) JWTOnlyMiddleware() func(http.Handler) http.Handler
 				http.Error(w, "Invalid JWT token", http.StatusUnauthorized)
 				return
 			}
-			
+
 			// Create auth info from claims
 			authInfo := &security.AuthInfo{
 				UserID:      claims.UserID,
@@ -272,10 +272,10 @@ func (s *SecurityMiddleware) JWTOnlyMiddleware() func(http.Handler) http.Handler
 				Metadata:    claims.Metadata,
 				ExpiresAt:   &claims.ExpiresAt.Time,
 			}
-			
+
 			// Add auth info to context
 			ctx := context.WithValue(r.Context(), "auth_info", authInfo)
-			
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -286,7 +286,7 @@ func (s *SecurityMiddleware) CORSMiddleware(allowedOrigins []string) func(http.H
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			
+
 			// Check if origin is allowed
 			allowed := false
 			for _, allowedOrigin := range allowedOrigins {
@@ -295,20 +295,20 @@ func (s *SecurityMiddleware) CORSMiddleware(allowedOrigins []string) func(http.H
 					break
 				}
 			}
-			
+
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 				w.Header().Set("Access-Control-Max-Age", "86400")
 			}
-			
+
 			// Handle preflight OPTIONS requests
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
-			
+
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -322,18 +322,18 @@ func getClientIPFromRequest(r *http.Request) string {
 		ips := strings.Split(xff, ",")
 		return strings.TrimSpace(ips[0])
 	}
-	
+
 	// Check X-Real-IP header
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return xri
 	}
-	
+
 	// Fall back to RemoteAddr
 	ip := r.RemoteAddr
 	if colonIndex := strings.LastIndex(ip, ":"); colonIndex != -1 {
 		ip = ip[:colonIndex]
 	}
-	
+
 	return ip
 }
 

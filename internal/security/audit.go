@@ -33,22 +33,22 @@ const (
 
 // AuditEvent represents a security audit event
 type AuditEvent struct {
-	ID          string                 `json:"id"`
-	Timestamp   time.Time              `json:"timestamp"`
-	EventType   AuditEventType         `json:"event_type"`
-	UserID      string                 `json:"user_id,omitempty"`
-	SessionID   string                 `json:"session_id,omitempty"`
-	IPAddress   string                 `json:"ip_address"`
-	UserAgent   string                 `json:"user_agent,omitempty"`
-	Resource    string                 `json:"resource,omitempty"`
-	Action      string                 `json:"action,omitempty"`
-	Method      string                 `json:"method,omitempty"`
-	StatusCode  int                    `json:"status_code,omitempty"`
-	Message     string                 `json:"message"`
-	Details     map[string]interface{} `json:"details,omitempty"`
-	Severity    string                 `json:"severity"`
-	Source      string                 `json:"source"`
-	RequestID   string                 `json:"request_id,omitempty"`
+	ID         string                 `json:"id"`
+	Timestamp  time.Time              `json:"timestamp"`
+	EventType  AuditEventType         `json:"event_type"`
+	UserID     string                 `json:"user_id,omitempty"`
+	SessionID  string                 `json:"session_id,omitempty"`
+	IPAddress  string                 `json:"ip_address"`
+	UserAgent  string                 `json:"user_agent,omitempty"`
+	Resource   string                 `json:"resource,omitempty"`
+	Action     string                 `json:"action,omitempty"`
+	Method     string                 `json:"method,omitempty"`
+	StatusCode int                    `json:"status_code,omitempty"`
+	Message    string                 `json:"message"`
+	Details    map[string]interface{} `json:"details,omitempty"`
+	Severity   string                 `json:"severity"`
+	Source     string                 `json:"source"`
+	RequestID  string                 `json:"request_id,omitempty"`
 }
 
 // AuditConfig holds audit logging configuration
@@ -113,7 +113,7 @@ func (a *AuditLogger) LogEvent(ctx context.Context, eventType AuditEventType, me
 	enabled := a.config.Enabled
 	stopped := a.stopped
 	a.mu.RUnlock()
-	
+
 	if !enabled || stopped {
 		return
 	}
@@ -157,18 +157,18 @@ func (a *AuditLogger) LogEvent(ctx context.Context, eventType AuditEventType, me
 func (a *AuditLogger) LogAuthenticationAttempt(ctx context.Context, userID, method string, success bool, details map[string]interface{}) {
 	eventType := AuthenticationSuccess
 	message := fmt.Sprintf("User %s authenticated successfully using %s", userID, method)
-	
+
 	if !success {
 		eventType = AuthenticationFailure
 		message = fmt.Sprintf("Authentication failed for user %s using %s", userID, method)
 	}
-	
+
 	if details == nil {
 		details = make(map[string]interface{})
 	}
 	details["auth_method"] = method
 	details["success"] = success
-	
+
 	a.LogEvent(ctx, eventType, message, details)
 }
 
@@ -179,7 +179,7 @@ func (a *AuditLogger) LogAPIKeyUsage(ctx context.Context, apiKey, endpoint strin
 		"endpoint":       endpoint,
 		"status_code":    statusCode,
 	}
-	
+
 	message := fmt.Sprintf("API key used for %s (status: %d)", endpoint, statusCode)
 	a.LogEvent(ctx, APIKeyUsage, message, details)
 }
@@ -191,7 +191,7 @@ func (a *AuditLogger) LogSecurityViolation(ctx context.Context, violationType, d
 	}
 	details["violation_type"] = violationType
 	details["description"] = description
-	
+
 	message := fmt.Sprintf("Security violation detected: %s - %s", violationType, description)
 	a.LogEvent(ctx, SecurityViolation, message, details)
 }
@@ -203,7 +203,7 @@ func (a *AuditLogger) LogSuspiciousActivity(ctx context.Context, activity, reaso
 	}
 	details["activity"] = activity
 	details["reason"] = reason
-	
+
 	message := fmt.Sprintf("Suspicious activity detected: %s - %s", activity, reason)
 	a.LogEvent(ctx, SuspiciousActivity, message, details)
 }
@@ -213,24 +213,24 @@ func (a *AuditLogger) AuditMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			startTime := time.Now()
-			
+
 			// Create a response writer wrapper to capture status code
 			wrapper := &responseWriterWrapper{
 				ResponseWriter: w,
 				statusCode:     200,
 			}
-			
+
 			// Add request ID to context
 			requestID := generateRequestID()
 			ctx := context.WithValue(r.Context(), "request_id", requestID)
 			ctx = context.WithValue(ctx, "client_ip", getClientIPFromRequest(r))
-			
+
 			// Process request
 			next.ServeHTTP(wrapper, r.WithContext(ctx))
-			
+
 			// Log the request
 			duration := time.Since(startTime)
-			
+
 			details := map[string]interface{}{
 				"method":      r.Method,
 				"url":         r.URL.String(),
@@ -239,7 +239,7 @@ func (a *AuditLogger) AuditMiddleware() func(http.Handler) http.Handler {
 				"user_agent":  r.UserAgent(),
 				"referer":     r.Referer(),
 			}
-			
+
 			// Add request headers if configured
 			if a.config.IncludeRequest {
 				headers := make(map[string]string)
@@ -250,17 +250,17 @@ func (a *AuditLogger) AuditMiddleware() func(http.Handler) http.Handler {
 				}
 				details["request_headers"] = headers
 			}
-			
+
 			// Add auth info if available
 			if authInfo, ok := ctx.Value("auth_info").(*AuthInfo); ok {
 				details["user_id"] = authInfo.UserID
 				details["auth_type"] = authInfo.Metadata["auth_type"]
 			}
-			
+
 			// Determine event type based on status code
 			eventType := AuthenticationSuccess
 			message := fmt.Sprintf("%s %s - %d", r.Method, r.URL.Path, wrapper.statusCode)
-			
+
 			if wrapper.statusCode >= 400 {
 				if wrapper.statusCode == 401 {
 					eventType = AuthenticationFailure
@@ -272,7 +272,7 @@ func (a *AuditLogger) AuditMiddleware() func(http.Handler) http.Handler {
 					eventType = ValidationFailure
 				}
 			}
-			
+
 			a.LogEvent(ctx, eventType, message, details)
 		})
 	}
@@ -289,16 +289,16 @@ func (a *AuditLogger) GetEventCount() int64 {
 func (a *AuditLogger) Stop() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	
+
 	if !a.config.Enabled || a.stopped {
 		return
 	}
-	
+
 	a.stopped = true
 	close(a.stopChan)
 	a.wg.Wait()
 	close(a.buffer)
-	
+
 	// Flush remaining events
 	for event := range a.buffer {
 		a.writeEvent(event)
@@ -314,30 +314,30 @@ func (a *AuditLogger) start() {
 
 func (a *AuditLogger) eventProcessor() {
 	defer a.wg.Done()
-	
+
 	ticker := time.NewTicker(a.config.FlushInterval)
 	defer ticker.Stop()
-	
+
 	events := make([]*AuditEvent, 0, 100)
-	
+
 	for {
 		select {
 		case event := <-a.buffer:
 			events = append(events, event)
-			
+
 			// Flush if buffer is full
 			if len(events) >= 100 {
 				a.flushEvents(events)
 				events = events[:0]
 			}
-			
+
 		case <-ticker.C:
 			// Periodic flush
 			if len(events) > 0 {
 				a.flushEvents(events)
 				events = events[:0]
 			}
-			
+
 		case <-a.stopChan:
 			// Final flush on shutdown
 			if len(events) > 0 {
@@ -357,26 +357,26 @@ func (a *AuditLogger) flushEvents(events []*AuditEvent) {
 func (a *AuditLogger) writeEvent(event *AuditEvent) {
 	// Write to structured log
 	fields := logrus.Fields{
-		"audit_event":  true,
-		"event_type":   event.EventType,
-		"event_id":     event.ID,
-		"user_id":      event.UserID,
-		"ip_address":   event.IPAddress,
-		"resource":     event.Resource,
-		"action":       event.Action,
-		"status_code":  event.StatusCode,
-		"severity":     event.Severity,
-		"request_id":   event.RequestID,
-		"timestamp":    event.Timestamp,
+		"audit_event": true,
+		"event_type":  event.EventType,
+		"event_id":    event.ID,
+		"user_id":     event.UserID,
+		"ip_address":  event.IPAddress,
+		"resource":    event.Resource,
+		"action":      event.Action,
+		"status_code": event.StatusCode,
+		"severity":    event.Severity,
+		"request_id":  event.RequestID,
+		"timestamp":   event.Timestamp,
 	}
-	
+
 	// Add details
 	for key, value := range event.Details {
 		fields[fmt.Sprintf("detail_%s", key)] = value
 	}
-	
+
 	entry := a.logger.WithFields(fields)
-	
+
 	// Log at appropriate level based on severity
 	switch event.Severity {
 	case "critical":
@@ -388,7 +388,7 @@ func (a *AuditLogger) writeEvent(event *AuditEvent) {
 	default:
 		entry.Debug(event.Message)
 	}
-	
+
 	// Send to remote endpoint if configured
 	if a.config.RemoteEndpoint != "" {
 		go a.sendToRemoteEndpoint(event)
@@ -405,7 +405,7 @@ func (a *AuditLogger) sanitizeDetails(details map[string]interface{}) map[string
 	if details == nil {
 		return nil
 	}
-	
+
 	sanitized := make(map[string]interface{})
 	for key, value := range details {
 		if a.isSensitiveField(key) {
@@ -414,33 +414,33 @@ func (a *AuditLogger) sanitizeDetails(details map[string]interface{}) map[string
 			sanitized[key] = value
 		}
 	}
-	
+
 	return sanitized
 }
 
 func (a *AuditLogger) isSensitiveField(field string) bool {
 	fieldLower := strings.ToLower(field)
-	
+
 	// Default sensitive fields
 	defaultSensitive := []string{
 		"password", "token", "secret", "key", "auth", "credential",
 		"authorization", "x-api-key", "api-key", "bearer",
 	}
-	
+
 	// Check default sensitive fields
 	for _, sensitive := range defaultSensitive {
 		if strings.Contains(fieldLower, sensitive) {
 			return true
 		}
 	}
-	
+
 	// Check configured sensitive fields
 	for _, sensitive := range a.config.SensitiveFields {
 		if strings.EqualFold(field, sensitive) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
