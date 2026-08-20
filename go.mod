@@ -32,6 +32,7 @@ replace github.com/Tributary-ai-services/Gatekeeper => ../Gatekeeper
 replace github.com/Tributary-ai-services/aether-shared/go-events => ../aether-shared/go-events
 
 require (
+	github.com/Tributary-ai-services/aether-shared/go-aiqg-matcher v0.0.0
 	github.com/Tributary-ai-services/aether-shared/go-events v0.0.0-00010101000000-000000000000 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -76,3 +77,5 @@ require (
 	golang.org/x/sys v0.39.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
+
+replace github.com/Tributary-ai-services/aether-shared/go-aiqg-matcher => ../aether-shared/go-aiqg-matcher
