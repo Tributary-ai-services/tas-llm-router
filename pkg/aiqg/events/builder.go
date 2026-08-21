@@ -71,6 +71,9 @@ type RoutingView struct {
 	// breakpoints that actually reached the vendor.
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
+	AffinityHeld           bool
+	AffinityEpoch          string
+	AffinityReason         string
 
 	// Token usage from the vendor response (stamped by handlers via
 	// middleware.StampTokenUsage). UsageSet distinguishes "vendor
@@ -693,6 +696,9 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		FinishReason:               finishReason,
 		PromptCacheMode:            routing.PromptCacheMode,
 		PromptCacheBreakpoints:     routing.PromptCacheBreakpoints,
+		AffinityHeld:               routing.AffinityHeld,
+		AffinityEpoch:              routing.AffinityEpoch,
+		AffinityReason:             routing.AffinityReason,
 		CredentialSource:           routing.CredentialSource,
 		CredentialID:               routing.CredentialID,
 		Streamed:                   snap.ChunkCount > 0,

@@ -228,6 +228,11 @@ func ParseHeaders(req *http.Request) (AIQGHeaders, error) {
 // to lift the cross-app identity keys (user.id, session.id, account.id —
 // the Datadog/OTel defaults) onto the AIQG event. Defensive: malformed
 // pairs are skipped, never panics. Returns nil for an empty header.
+// BaggageSessionID extracts W3C baggage session.id, the documented fallback
+// when TAS-Conversation-Id is absent. Exported so affinity uses the SAME
+// fallback chain as the experiment runner rather than a parallel one.
+func BaggageSessionID(raw string) string { return parseBaggage(raw)["session.id"] }
+
 func parseBaggage(raw string) map[string]string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

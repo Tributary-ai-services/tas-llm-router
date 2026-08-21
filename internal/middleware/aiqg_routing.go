@@ -42,6 +42,9 @@ type Routing struct {
 	// Vendor finish_reason — "stop" / "length" / "content_filter" /
 	// "tool_calls" / "function_call". Empty string means unset (no
 	// vendor response). First-write-wins like the other stampers.
+	affinityHeld           bool
+	affinityEpoch          string
+	affinityReason         string
 	promptCacheMode        string
 	promptCacheBreakpoints int
 	finishReason           string
@@ -187,6 +190,12 @@ type RoutingSnapshot struct {
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
 
+	// Affinity outcome: whether it held, which epoch, and why not when it did
+	// not.
+	AffinityHeld   bool
+	AffinityEpoch  string
+	AffinityReason string
+
 	// BYOK credential attribution (Plan #14). Never the key.
 	CredentialSource string
 	CredentialID     string
@@ -272,6 +281,9 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		OutboundFindings:           copyCounts(r.outboundFindings),
 		ScanRan:                    r.scanRan,
 		FinishReason:               r.finishReason,
+		AffinityHeld:               r.affinityHeld,
+		AffinityEpoch:              r.affinityEpoch,
+		AffinityReason:             r.affinityReason,
 		PromptCacheMode:            r.promptCacheMode,
 		PromptCacheBreakpoints:     r.promptCacheBreakpoints,
 		CredentialSource:           r.credentialSource,
@@ -652,6 +664,25 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens, cacheC
 // from each chunk's choice.FinishReason (only the last chunk
 // typically populates it), but if a later fallback path tries to
 // stamp again the first authoritative value wins.
+// StampAffinity records whether provider affinity held, which epoch the
+// request belonged to, and — when it did not hold — why.
+//
+// The reason is the point. "Affinity broke" is not actionable; "the system
+// prompt changed" and "the conversation went idle past the TTL" are, and they
+// call for completely different responses — one points at a deploy, the other
+// at traffic shape.
+func StampAffinity(ctx context.Context, held bool, epoch, reason string) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.affinityHeld = held
+	r.affinityEpoch = epoch
+	r.affinityReason = reason
+}
+
 // StampPromptCache records what prompt-cache mode was actually APPLIED and how
 // many breakpoints actually reach the vendor.
 //

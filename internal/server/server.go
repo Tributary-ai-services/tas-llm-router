@@ -25,6 +25,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
 	"github.com/tributary-ai/llm-router-waf/internal/workflow"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/affinity"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/breaker"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/cacheconfig"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/credentials"
@@ -44,6 +45,9 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
+	// affinity keeps a conversation on the provider whose vendor prompt cache
+	// is warm (routing-decision.md §5.5). nil = disabled.
+	affinity             *affinity.Manager
 	router               *routing.Router
 	httpServer           *http.Server
 	logger               *logrus.Logger
@@ -230,12 +234,26 @@ type AIQGServerConfig struct {
 	// ResponseCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
 	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
 
+	// Affinity keeps a conversation on the provider whose vendor prompt cache
+	// is warm. Mirrors config.AIQGAffinityConfig.
+	Affinity AIQGAffinityConfig `yaml:"affinity"`
+
 	// Breaker is passive outlier detection + retry budgets
 	// (routing-decision.md step 2).
 	Breaker AIQGBreakerConfig `yaml:"breaker"`
 
 	// SemCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
 	SemCache AIQGSemCacheConfig `yaml:"semantic_cache"`
+}
+
+// AIQGAffinityConfig configures provider affinity. Mirrors
+// config.AIQGAffinityConfig (straight field copy in ToServerConfig).
+type AIQGAffinityConfig struct {
+	Enabled   bool          `yaml:"enabled"`
+	KeySource string        `yaml:"key_source"`
+	Scope     string        `yaml:"scope"`
+	TTL       time.Duration `yaml:"ttl"`
+	OnBreak   string        `yaml:"on_break"`
 }
 
 // AIQGBreakerConfig configures passive outlier detection. Mirrors
@@ -484,6 +502,38 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 					"retry_ratio":        eff.RetryRatio,
 				}).Info("AIQG breaker enabled (passive outlier detection + retry budget)")
 			}
+		}
+
+		// Provider affinity (routing-decision.md §5.5). Prefers the shared Redis
+		// so affinity is FLEET-WIDE: per-replica state would send the same
+		// conversation to a different provider depending on which pod answered,
+		// rebuilding the vendor cache each time — exactly the cost affinity
+		// exists to avoid.
+		if config.AIQG.Affinity.Enabled {
+			acfg := affinity.Config{
+				KeySource: config.AIQG.Affinity.KeySource,
+				Scope:     config.AIQG.Affinity.Scope,
+				TTL:       config.AIQG.Affinity.TTL,
+				OnBreak:   affinity.OnBreak(config.AIQG.Affinity.OnBreak),
+			}
+			if acfg.KeySource == "" {
+				acfg.KeySource = "conversation"
+			}
+			var store affinity.Store
+			backend := "memory (per-replica — affinity is NOT shared across pods)"
+			if sharedRedis != nil {
+				store = affinity.NewRedisStore(sharedRedis)
+				backend = "redis (fleet-wide)"
+			} else {
+				store = affinity.NewMemoryStore()
+			}
+			server.affinity = affinity.New(store, acfg)
+			logger.WithFields(logrus.Fields{
+				"backend":    backend,
+				"key_source": acfg.KeySource,
+				"scope":      acfg.Scope,
+				"on_break":   acfg.OnBreak,
+			}).Info("AIQG provider affinity enabled (keeps a conversation on a warm vendor cache)")
 		}
 
 		// C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md). Runs on the
@@ -911,6 +961,10 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// here — after resolution, before the vendor call — because the mode may
 	// come from the matched route as well as the request header.
 	s.applyPromptCacheMode(r, &req)
+	// Affinity is resolved AFTER the chain is on the context, because the
+	// usable predicate consults constraints — a warm cache on a denied vendor
+	// must never be offered in the first place.
+	r, _ = s.resolveAffinity(r, &req)
 	if ctxChanged {
 		r = r.WithContext(reqCtx)
 	}

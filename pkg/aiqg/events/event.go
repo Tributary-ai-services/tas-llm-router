@@ -227,6 +227,15 @@ type ResponseEvent struct {
 	PromptCacheMode        string `json:"prompt_cache_mode,omitempty"`
 	PromptCacheBreakpoints int    `json:"prompt_cache_breakpoints,omitempty"`
 
+	// Provider affinity (routing-decision.md §5.5). AffinityEpoch identifies
+	// the span over which the vendor cache can stay warm; AffinityReason says
+	// why affinity did not hold, which is the actionable half — an edited
+	// system prompt and an idle gap look identical in a hit-rate chart and
+	// call for opposite responses.
+	AffinityHeld   bool   `json:"affinity_held,omitempty"`
+	AffinityEpoch  string `json:"affinity_epoch,omitempty"`
+	AffinityReason string `json:"affinity_reason,omitempty"`
+
 	// BYOK credential attribution (Plan #14): which key served the vendor call
 	// — upstream_header | stored | tas_shared — and the stored credential id
 	// (present only when credential_source=stored). NEVER the key. omitempty.

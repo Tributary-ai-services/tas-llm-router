@@ -915,6 +915,9 @@ func routingView(r *Routing) events.RoutingView {
 	return events.RoutingView{
 		PromptCacheMode:            s.PromptCacheMode,
 		PromptCacheBreakpoints:     s.PromptCacheBreakpoints,
+		AffinityHeld:               s.AffinityHeld,
+		AffinityEpoch:              s.AffinityEpoch,
+		AffinityReason:             s.AffinityReason,
 		Vendor:                     s.Vendor,
 		Model:                      s.Model,
 		Streaming:                  s.Streaming,

@@ -158,6 +158,10 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 	// target.
 	decision, provider = r.admitOrReselect(ctx, req, decision, provider, strategy)
 
+	// Affinity last: it is an economic preference and must never override the
+	// correctness inputs above it.
+	decision, provider = r.applyAffinity(ctx, decision, provider)
+
 	// Initialize metadata tracking
 	metadata := &types.RouterMetadata{
 		Provider:       decision.SelectedProvider,
@@ -710,6 +714,11 @@ func (r *Router) isProviderHealthy(name string) bool {
 	// Consider provider healthy if status is "healthy" or "unknown" (untested)
 	return status.Status == "healthy" || status.Status == "unknown"
 }
+
+// ProviderHealthy is the exported form of the router's health verdict, for
+// callers outside this package that must respect health before proposing a
+// provider — notably affinity, which must never offer an ejected target.
+func (r *Router) ProviderHealthy(name string) bool { return r.isProviderHealthy(name) }
 
 // isEjected reports the cached breaker verdict for a provider-level target.
 // Reads the cache rather than the store: this runs per candidate per request.
