@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
 	"net"
 	"net/http"
 	"time"
@@ -18,7 +19,9 @@ import (
 // cycle: middleware → events → middleware). Callers in middleware
 // construct one from their AIQGHeaders before invoking Build.
 type AIQGHeadersView struct {
-	SourceApp    string
+	SourceApp string
+	// Synthetic is the caller's declaration that this traffic is not real.
+	Synthetic    bool
 	Workflow     string
 	Policy       []string
 	PolicyBundle string
@@ -494,6 +497,17 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		sourceApp = token.SourceApp
 	}
 
+	// Synthetic classification. A DECLARED marking wins, because it is exact
+	// and survives renaming; the source-app denylist is the interim for
+	// generators not yet updated, and is recorded distinctly so its
+	// contribution can be watched as it shrinks.
+	synthetic, syntheticReason := headers.Synthetic, ""
+	if synthetic {
+		syntheticReason = resilience.SyntheticDeclared
+	} else if resilience.IsSyntheticSourceApp(sourceApp) {
+		synthetic, syntheticReason = true, resilience.SyntheticSourceApp
+	}
+
 	// Client IP, gated by the deployment's IP-capture mode.
 	clientIPVal := applyIPMode(clientIP(r), opts.IPCaptureMode)
 
@@ -696,6 +710,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		FinishReason:               finishReason,
 		PromptCacheMode:            routing.PromptCacheMode,
 		PromptCacheBreakpoints:     routing.PromptCacheBreakpoints,
+		Synthetic:                  synthetic,
+		SyntheticReason:            syntheticReason,
 		AffinityHeld:               routing.AffinityHeld,
 		AffinityEpoch:              routing.AffinityEpoch,
 		AffinityReason:             routing.AffinityReason,

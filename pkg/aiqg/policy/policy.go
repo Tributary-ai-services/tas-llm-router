@@ -68,6 +68,12 @@ type Resolution struct {
 	// Affinity is the matched rule's provider-affinity block, overriding the
 	// gateway's own configuration for this request.
 	Affinity *resilience.Affinity
+	// Selection / Switching / Verbosity drive step 5's expected_cost and
+	// weighted strategies. Verbosity arrives only when a rule asks for
+	// expected_cost — see the resolver.
+	Selection *resilience.Selection
+	Switching *resilience.Switching
+	Verbosity []resilience.Verbosity
 }
 
 // Target is a resolved routing destination. Model empty means "keep the
@@ -175,6 +181,9 @@ type resolveResponse struct {
 	Fallback    *resilience.Fallback    `json:"fallback,omitempty"`
 	Constraints *resilience.Constraints `json:"constraints,omitempty"`
 	Affinity    *resilience.Affinity    `json:"affinity,omitempty"`
+	Selection   *resilience.Selection   `json:"selection,omitempty"`
+	Switching   *resilience.Switching   `json:"switching,omitempty"`
+	Verbosity   []resilience.Verbosity  `json:"verbosity,omitempty"`
 }
 
 // ErrResolverBadRequest is returned when the dashboard rejects the
@@ -246,6 +255,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		// block stays nil so the gateway's own defaults apply untouched.
 		res.Health, res.Budgets = v.Health, v.Budgets
 		res.Fallback, res.Constraints, res.Affinity = v.Fallback, v.Constraints, v.Affinity
+		res.Selection, res.Switching, res.Verbosity = v.Selection, v.Switching, v.Verbosity
 		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log

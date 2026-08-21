@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,6 +50,11 @@ type AIQGHeaders struct {
 	Trace                 bool     // TAS-Trace=1
 	DryRun                bool     // TAS-Dry-Run=1
 	SourceApp             string   // TAS-Source-App (max 128 chars)
+	// Synthetic marks traffic that knows it is not real — probes, smoke tests,
+	// demo generators. Declared by the caller rather than inferred, because a
+	// generator that renames itself must not silently start counting as
+	// production the moment a denylist stops matching it.
+	Synthetic bool // TAS-Synthetic
 
 	// Identity (additive, observability attribution — see
 	// docs/AIQG-AGENT-FLOW-ATTRIBUTION.md). Self-asserted; never
@@ -168,6 +174,7 @@ func ParseHeaders(req *http.Request) (AIQGHeaders, error) {
 		Trace:                 req.Header.Get("TAS-Trace") == "1",
 		DryRun:                req.Header.Get("TAS-Dry-Run") == "1",
 		SourceApp:             strings.TrimSpace(req.Header.Get("TAS-Source-App")),
+		Synthetic:             parseSyntheticHeader(req.Header.Get(resilience.SyntheticHeader)),
 
 		AgentID:        strings.TrimSpace(req.Header.Get("TAS-Agent-Id")),
 		AgentName:      strings.TrimSpace(req.Header.Get("TAS-Agent-Name")),
@@ -232,6 +239,18 @@ func ParseHeaders(req *http.Request) (AIQGHeaders, error) {
 // when TAS-Conversation-Id is absent. Exported so affinity uses the SAME
 // fallback chain as the experiment runner rather than a parallel one.
 func BaggageSessionID(raw string) string { return parseBaggage(raw)["session.id"] }
+
+// parseSyntheticHeader accepts the usual truthy spellings. Anything else — a
+// typo, a stray value — reads as NOT synthetic, so a mistake here can only ever
+// leave traffic counted as real. The opposite default would let a typo quietly
+// erase real traffic from the measurements that price routing.
+func parseSyntheticHeader(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "synthetic":
+		return true
+	}
+	return false
+}
 
 func parseBaggage(raw string) map[string]string {
 	raw = strings.TrimSpace(raw)

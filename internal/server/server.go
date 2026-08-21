@@ -491,6 +491,13 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				}
 				b := breaker.New(store, bcfg)
 				router.SetBreaker(b)
+				// Switching hysteresis shares the same fleet-wide store choice:
+				// per-replica dwell is no dwell at all.
+				if sharedRedis != nil {
+					router.SetDwellStore(routing.NewRedisDwellStore(sharedRedis))
+				} else {
+					router.SetDwellStore(routing.NewMemoryDwellStore())
+				}
 				eff := b.Config()
 				logger.WithFields(logrus.Fields{
 					"backend":            backend,
@@ -873,7 +880,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		// attribution headers. Without them in this list a browser client can
 		// send traffic but not attribute it, so its own requests show up
 		// unattributed in Traffic Explorer — which is where the UI displays them.
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, TAS-Auth, anthropic-version, TAS-Upstream-Authorization, TAS-Source-App, TAS-Agent-Id, TAS-Agent-Name, TAS-Agent-Version, TAS-Flow-Id, TAS-Conversation-Id, TAS-Cache, TAS-Prompt-Cache, TAS-Prompt-Cache-TTL, baggage")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, TAS-Auth, anthropic-version, TAS-Upstream-Authorization, TAS-Source-App, TAS-Agent-Id, TAS-Agent-Name, TAS-Agent-Version, TAS-Flow-Id, TAS-Conversation-Id, TAS-Cache, TAS-Prompt-Cache, TAS-Prompt-Cache-TTL, TAS-Synthetic, baggage")
 		// Let browser clients read the routing-decision headers (moved off
 		// the SSE stream), the AIQG response-event id, and the cache verdict.
 		// X-TAS-Cache (hit | semantic_hit | bypass; absent on a miss) is the
@@ -953,6 +960,12 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// The failover chain and the tenant's constraints. Attached even when only
 	// constraints are present: they bound routing whether or not a rule
 	// configured failover, including on the default path where no rule matched.
+	// Selection strategy + hysteresis + the measured verbosity table.
+	if sel, sw, verb := middleware.ResolvedSelection(reqCtx); !sel.IsZero() || !sw.IsZero() || len(verb) > 0 {
+		reqCtx = routing.WithSelection(reqCtx, sel, sw, verb, affinityKeyFor(r))
+		reqCtx = routing.WithWorkflow(reqCtx, r.Header.Get("TAS-Workflow"))
+		ctxChanged = true
+	}
 	if fb, cons := middleware.ResolvedFallback(reqCtx); fb != nil || cons != nil {
 		reqCtx = routing.WithChain(reqCtx, routing.NewChain(fb, cons))
 		ctxChanged = true
