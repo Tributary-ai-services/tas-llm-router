@@ -84,8 +84,15 @@ func (r *Router) routeBySelection(ctx context.Context, req *types.ChatRequest, w
 		return nil, nil, false
 	}
 	chain := ChainFrom(ctx)
+	// Quality gates filter the candidate set BEFORE selection prices anything.
+	// Lexicographic: a candidate either clears the floor or it does not, and
+	// cost only chooses between those that already have.
+	gated := map[string]bool{}
+	for _, name := range r.gatedCandidates(ctx, workflow) {
+		gated[name] = true
+	}
 	eligible := func(name string) bool {
-		return chain.AllowedTarget(name) && r.isProviderHealthy(name)
+		return chain.AllowedTarget(name) && r.isProviderHealthy(name) && gated[name]
 	}
 
 	switch sc.Selection.Strategy {
@@ -214,3 +221,46 @@ var nowFunc = time.Now
 // dwellTTL bounds the stored switch record to the window it governs: once the
 // window passes the record has no meaning.
 func dwellTTL(seconds int) time.Duration { return time.Duration(seconds) * time.Second }
+
+// gatedCandidates returns the providers surviving this rule's quality floors,
+// and stamps what was excluded onto the decision context.
+func (r *Router) gatedCandidates(ctx context.Context, workflow string) []string {
+	modelFor := func(provider string) string {
+		// Quality is measured per model, and a provider serves whichever model
+		// the request named — so the candidate's model is the request's model.
+		if req, ok := ctx.Value(gateModelKey{}).(string); ok {
+			return req
+		}
+		return ""
+	}
+	kept, excluded, note := gateCandidates(ctx, r.providerNames, modelFor, workflow)
+	if h, ok := ctx.Value(gateResultKey{}).(*gateResultHolder); ok {
+		h.excluded, h.note = excluded, note
+	}
+	return kept
+}
+
+type gateModelKey struct{}
+type gateResultKey struct{}
+
+type gateResultHolder struct {
+	excluded []ExcludedCandidate
+	note     string
+}
+
+// WithGateContext prepares a request for quality gating, carrying the model
+// being judged and a slot for the result.
+func WithGateContext(ctx context.Context, model string) context.Context {
+	ctx = context.WithValue(ctx, gateModelKey{}, model)
+	return context.WithValue(ctx, gateResultKey{}, &gateResultHolder{})
+}
+
+// GateExclusions returns candidates removed by quality floors, and any note
+// about abstention, for stamping onto the event.
+func GateExclusions(ctx context.Context) ([]ExcludedCandidate, string) {
+	h, ok := ctx.Value(gateResultKey{}).(*gateResultHolder)
+	if !ok {
+		return nil, ""
+	}
+	return h.excluded, h.note
+}

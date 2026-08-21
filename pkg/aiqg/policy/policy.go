@@ -74,6 +74,9 @@ type Resolution struct {
 	Selection *resilience.Selection
 	Switching *resilience.Switching
 	Verbosity []resilience.Verbosity
+	// Signals are the rule's quality floors; Quality is the measured evidence.
+	Signals *resilience.Signals
+	Quality []resilience.QualitySignal
 }
 
 // Target is a resolved routing destination. Model empty means "keep the
@@ -176,14 +179,16 @@ type resolveResponse struct {
 		Model    string `json:"model,omitempty"`
 		Source   string `json:"source,omitempty"`
 	} `json:"target,omitempty"`
-	Health      *resilience.Health      `json:"health,omitempty"`
-	Budgets     *resilience.Budgets     `json:"budgets,omitempty"`
-	Fallback    *resilience.Fallback    `json:"fallback,omitempty"`
-	Constraints *resilience.Constraints `json:"constraints,omitempty"`
-	Affinity    *resilience.Affinity    `json:"affinity,omitempty"`
-	Selection   *resilience.Selection   `json:"selection,omitempty"`
-	Switching   *resilience.Switching   `json:"switching,omitempty"`
-	Verbosity   []resilience.Verbosity  `json:"verbosity,omitempty"`
+	Health      *resilience.Health         `json:"health,omitempty"`
+	Budgets     *resilience.Budgets        `json:"budgets,omitempty"`
+	Fallback    *resilience.Fallback       `json:"fallback,omitempty"`
+	Constraints *resilience.Constraints    `json:"constraints,omitempty"`
+	Affinity    *resilience.Affinity       `json:"affinity,omitempty"`
+	Selection   *resilience.Selection      `json:"selection,omitempty"`
+	Switching   *resilience.Switching      `json:"switching,omitempty"`
+	Verbosity   []resilience.Verbosity     `json:"verbosity,omitempty"`
+	Signals     *resilience.Signals        `json:"signals,omitempty"`
+	Quality     []resilience.QualitySignal `json:"quality,omitempty"`
 }
 
 // ErrResolverBadRequest is returned when the dashboard rejects the
@@ -256,6 +261,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		res.Health, res.Budgets = v.Health, v.Budgets
 		res.Fallback, res.Constraints, res.Affinity = v.Fallback, v.Constraints, v.Affinity
 		res.Selection, res.Switching, res.Verbosity = v.Selection, v.Switching, v.Verbosity
+		res.Signals, res.Quality = v.Signals, v.Quality
 		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log

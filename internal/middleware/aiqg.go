@@ -1174,6 +1174,21 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	return res.Health, res.Budgets
 }
 
+// ResolvedSignals returns the matched rule's quality floors and the measured
+// evidence they gate against.
+func ResolvedSignals(ctx context.Context) (resilience.Signals, []resilience.QualitySignal) {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return resilience.Signals{}, nil
+	}
+	res := holder.get()
+	var sig resilience.Signals
+	if res.Signals != nil {
+		sig = *res.Signals
+	}
+	return sig, res.Quality
+}
+
 // ResolvedSelection returns the matched rule's selection and switching blocks
 // plus the measured verbosity table, or zero values when no rule set them.
 func ResolvedSelection(ctx context.Context) (resilience.Selection, resilience.Switching, []resilience.Verbosity) {
