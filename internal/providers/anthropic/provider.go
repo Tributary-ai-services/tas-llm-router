@@ -430,6 +430,12 @@ func (p *AnthropicProvider) CreateAssistant(ctx context.Context, req *types.Assi
 func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*anthropic.MessageNewParams, error) {
 	// Extract system message if present
 	var systemMessage string
+	// systemCached records whether the caller asked for a prompt-cache
+	// breakpoint at the end of the system block. That single placement caches
+	// tools AND system together — tools render first — which for agent traffic
+	// is the largest, safest win available (see
+	// docs/AIQG-PROMPT-CACHE-CONTROL.md §4.1).
+	var systemCached bool
 	var messages []anthropic.MessageParam
 
 	for _, msg := range req.Messages {
@@ -440,6 +446,9 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 				systemMessage = content
 			default:
 				return nil, fmt.Errorf("system messages must be text only for Anthropic")
+			}
+			if msg.CacheControl != nil {
+				systemCached = true
 			}
 			continue
 		}
@@ -460,9 +469,17 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 
 	// Set system message if present
 	if systemMessage != "" {
-		anthropicReq.System = []anthropic.TextBlockParam{
-			{Text: systemMessage, Type: "text"},
+		block := anthropic.TextBlockParam{Text: systemMessage, Type: "text"}
+		if systemCached {
+			// The pinned SDK's CacheControlEphemeralParam carries Type only —
+			// no TTL field — so a caller's 1h request cannot be expressed here
+			// and silently gets the 5m default. Honouring the breakpoint at
+			// the wrong TTL is still far better than dropping it, which is
+			// what happened before this existed. Upgrading the SDK is tracked
+			// separately (docs/AIQG-PROMPT-CACHE-CONTROL.md §7).
+			block.CacheControl = anthropic.CacheControlEphemeralParam{}
 		}
+		anthropicReq.System = []anthropic.TextBlockParam{block}
 	}
 
 	// Set optional parameters

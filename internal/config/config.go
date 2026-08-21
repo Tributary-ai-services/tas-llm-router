@@ -101,6 +101,10 @@ type AIQGConfig struct {
 	// (routing-decision.md step 2).
 	Breaker AIQGBreakerConfig `yaml:"breaker"`
 
+	// Affinity keeps a conversation on the provider whose vendor prompt cache
+	// is warm (routing-decision.md §5.5).
+	Affinity AIQGAffinityConfig `yaml:"affinity"`
+
 	// SemCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
 	// Default off. Uses the dedicated redis-semcache (FT.*) + Ollama embeddings.
 	SemCache AIQGSemCacheConfig `yaml:"semantic_cache"`
@@ -150,6 +154,18 @@ type AIQGSemCacheConfig struct {
 	// 1.0 — at current traffic every data point is wanted. Env
 	// AIQG_SEMCACHE_JUDGE_SAMPLE_RATE.
 	JudgeSampleRate float64 `yaml:"judge_sample_rate"`
+}
+
+// AIQGAffinityConfig configures provider affinity.
+//
+// Env: AIQG_AFFINITY_ENABLED, AIQG_AFFINITY_KEY_SOURCE, AIQG_AFFINITY_SCOPE,
+// AIQG_AFFINITY_TTL, AIQG_AFFINITY_ON_BREAK.
+type AIQGAffinityConfig struct {
+	Enabled   bool          `yaml:"enabled"`
+	KeySource string        `yaml:"key_source"`
+	Scope     string        `yaml:"scope"`
+	TTL       time.Duration `yaml:"ttl"`
+	OnBreak   string        `yaml:"on_break"`
 }
 
 // AIQGBreakerConfig configures passive outlier detection. Zero values fall
@@ -682,6 +698,25 @@ func (c *Config) loadFromEnv() {
 	if v := os.Getenv("AIQG_RESPONSE_CACHE_IN_EXPERIMENTS"); v != "" {
 		c.AIQG.ResponseCache.InExperiments = v == "true" || v == "1"
 	}
+	// Affinity. Off by default: it changes which provider serves a request, so
+	// it is opted into per environment rather than switched on by a deploy.
+	if v := os.Getenv("AIQG_AFFINITY_ENABLED"); v != "" {
+		c.AIQG.Affinity.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("AIQG_AFFINITY_KEY_SOURCE"); v != "" {
+		c.AIQG.Affinity.KeySource = v
+	}
+	if v := os.Getenv("AIQG_AFFINITY_SCOPE"); v != "" {
+		c.AIQG.Affinity.Scope = v
+	}
+	if v := os.Getenv("AIQG_AFFINITY_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.AIQG.Affinity.TTL = d
+		}
+	}
+	if v := os.Getenv("AIQG_AFFINITY_ON_BREAK"); v != "" {
+		c.AIQG.Affinity.OnBreak = v
+	}
 	// Breaker. Off by default: it changes which provider serves a request,
 	// so it is opt-in per environment rather than switched on everywhere by a
 	// deploy.
@@ -985,6 +1020,13 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			MaxBodyBytes:          c.AIQG.ResponseCache.MaxBodyBytes,
 			AllowNondeterministic: c.AIQG.ResponseCache.AllowNondeterministic,
 			InExperiments:         c.AIQG.ResponseCache.InExperiments,
+		},
+		Affinity: server.AIQGAffinityConfig{
+			Enabled:   c.AIQG.Affinity.Enabled,
+			KeySource: c.AIQG.Affinity.KeySource,
+			Scope:     c.AIQG.Affinity.Scope,
+			TTL:       c.AIQG.Affinity.TTL,
+			OnBreak:   c.AIQG.Affinity.OnBreak,
 		},
 		Breaker: server.AIQGBreakerConfig{
 			Enabled:           c.AIQG.Breaker.Enabled,

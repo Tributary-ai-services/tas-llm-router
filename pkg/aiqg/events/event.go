@@ -215,6 +215,27 @@ type ResponseEvent struct {
 	FinishReason    string    `json:"finish_reason,omitempty"`
 	VendorRequestID string    `json:"vendor_request_id,omitempty"`
 
+	// Prompt-cache control (docs/AIQG-PROMPT-CACHE-CONTROL.md). Both describe
+	// the OUTCOME, not the intent: Mode is what was actually applied, and
+	// Breakpoints is how many actually reached the vendor.
+	//
+	// Breakpoints is the field that matters. A route whose operator believes
+	// caching is on while every request carries zero breakpoints is the exact
+	// silent failure this feature exists to end — it produces no error and no
+	// cache reads, just full price — and it is invisible unless the count is
+	// recorded per request.
+	PromptCacheMode        string `json:"prompt_cache_mode,omitempty"`
+	PromptCacheBreakpoints int    `json:"prompt_cache_breakpoints,omitempty"`
+
+	// Provider affinity (routing-decision.md §5.5). AffinityEpoch identifies
+	// the span over which the vendor cache can stay warm; AffinityReason says
+	// why affinity did not hold, which is the actionable half — an edited
+	// system prompt and an idle gap look identical in a hit-rate chart and
+	// call for opposite responses.
+	AffinityHeld   bool   `json:"affinity_held,omitempty"`
+	AffinityEpoch  string `json:"affinity_epoch,omitempty"`
+	AffinityReason string `json:"affinity_reason,omitempty"`
+
 	// BYOK credential attribution (Plan #14): which key served the vendor call
 	// — upstream_header | stored | tas_shared — and the stored credential id
 	// (present only when credential_source=stored). NEVER the key. omitempty.

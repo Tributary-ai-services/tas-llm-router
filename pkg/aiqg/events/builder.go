@@ -67,6 +67,14 @@ type RoutingView struct {
 	Streaming    bool
 	StreamingSet bool
 
+	// Prompt-cache outcome: the mode actually applied and the number of
+	// breakpoints that actually reached the vendor.
+	PromptCacheMode        string
+	PromptCacheBreakpoints int
+	AffinityHeld           bool
+	AffinityEpoch          string
+	AffinityReason         string
+
 	// Token usage from the vendor response (stamped by handlers via
 	// middleware.StampTokenUsage). UsageSet distinguishes "vendor
 	// returned 0 tokens" (a legitimate value for content_filter
@@ -686,6 +694,11 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Status:                     status,
 		HTTPStatus:                 opts.HTTPStatus,
 		FinishReason:               finishReason,
+		PromptCacheMode:            routing.PromptCacheMode,
+		PromptCacheBreakpoints:     routing.PromptCacheBreakpoints,
+		AffinityHeld:               routing.AffinityHeld,
+		AffinityEpoch:              routing.AffinityEpoch,
+		AffinityReason:             routing.AffinityReason,
 		CredentialSource:           routing.CredentialSource,
 		CredentialID:               routing.CredentialID,
 		Streamed:                   snap.ChunkCount > 0,

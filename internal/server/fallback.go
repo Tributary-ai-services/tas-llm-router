@@ -51,7 +51,11 @@ func (s *Server) completeWithFallback(
 	chain := routing.ChainFrom(ctx)
 
 	resp, err := s.attempt(ctx, req, provider, metadata)
-	if err == nil || !chain.Configured() {
+	if err == nil {
+		s.recordServedAffinity(r, metadata)
+		return resp, nil
+	}
+	if !chain.Configured() {
 		return resp, err
 	}
 
@@ -102,6 +106,10 @@ func (s *Server) completeWithFallback(
 
 		resp, err = s.attempt(ctx, req, next, metadata)
 		if err == nil {
+			// Recorded from the tier that actually served, not the one we
+			// intended: sticking the next turn to a provider that just failed
+			// would be worse than no affinity at all.
+			s.recordServedAffinity(r, metadata)
 			return resp, nil
 		}
 	}
@@ -126,4 +134,13 @@ func (s *Server) attempt(
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("Chat completion failed")
 	}
 	return resp, err
+}
+
+// recordServedAffinity remembers the provider that actually served, so the next
+// turn in this epoch sticks to it.
+func (s *Server) recordServedAffinity(r *http.Request, metadata *types.RouterMetadata) {
+	if metadata == nil {
+		return
+	}
+	s.recordAffinity(r, routing.AffinityFrom(r.Context()), metadata.Provider, metadata.Model)
 }

@@ -65,6 +65,9 @@ type Resolution struct {
 	// the traffic nobody wrote a rule for.
 	Fallback    *resilience.Fallback
 	Constraints *resilience.Constraints
+	// Affinity is the matched rule's provider-affinity block, overriding the
+	// gateway's own configuration for this request.
+	Affinity *resilience.Affinity
 }
 
 // Target is a resolved routing destination. Model empty means "keep the
@@ -171,6 +174,7 @@ type resolveResponse struct {
 	Budgets     *resilience.Budgets     `json:"budgets,omitempty"`
 	Fallback    *resilience.Fallback    `json:"fallback,omitempty"`
 	Constraints *resilience.Constraints `json:"constraints,omitempty"`
+	Affinity    *resilience.Affinity    `json:"affinity,omitempty"`
 }
 
 // ErrResolverBadRequest is returned when the dashboard rejects the
@@ -241,7 +245,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		// Carried through only when the control plane sent them; an absent
 		// block stays nil so the gateway's own defaults apply untouched.
 		res.Health, res.Budgets = v.Health, v.Budgets
-		res.Fallback, res.Constraints = v.Fallback, v.Constraints
+		res.Fallback, res.Constraints, res.Affinity = v.Fallback, v.Constraints, v.Affinity
 		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log

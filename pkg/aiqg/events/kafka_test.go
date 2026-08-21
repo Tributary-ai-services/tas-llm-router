@@ -139,7 +139,7 @@ func TestMultiEmitter_FirstErrorButContinues(t *testing.T) {
 
 // Close is safe to call repeatedly + tolerates nil producer.
 func TestKafkaEmitter_CloseIdempotent(t *testing.T) {
-	(&KafkaEmitter{}).Close()  // nil producer — no panic
+	(&KafkaEmitter{}).Close()    // nil producer — no panic
 	(*KafkaEmitter)(nil).Close() // nil receiver — no panic
 
 	prod := mocks.NewSyncProducer(t, nil)

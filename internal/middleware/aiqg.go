@@ -913,6 +913,11 @@ func routingView(r *Routing) events.RoutingView {
 	}
 	s := r.Snapshot()
 	return events.RoutingView{
+		PromptCacheMode:            s.PromptCacheMode,
+		PromptCacheBreakpoints:     s.PromptCacheBreakpoints,
+		AffinityHeld:               s.AffinityHeld,
+		AffinityEpoch:              s.AffinityEpoch,
+		AffinityReason:             s.AffinityReason,
 		Vendor:                     s.Vendor,
 		Model:                      s.Model,
 		Streaming:                  s.Streaming,
@@ -1166,6 +1171,16 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	}
 	res := holder.get()
 	return res.Health, res.Budgets
+}
+
+// ResolvedAffinity returns the matched rule's affinity block, or nil when no
+// rule configured one.
+func ResolvedAffinity(ctx context.Context) *resilience.Affinity {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return nil
+	}
+	return holder.get().Affinity
 }
 
 // ResolvedFallback returns the matched rule's failover chain and the tenant's

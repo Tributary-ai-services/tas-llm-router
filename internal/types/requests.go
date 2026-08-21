@@ -39,18 +39,48 @@ type ChatRequest struct {
 }
 
 type Message struct {
-	Role       string                 `json:"role"`
-	Content    interface{}            `json:"content"` // string or []ContentPart for multimodal
-	Name       string                 `json:"name,omitempty"`
-	ToolCalls  []ToolCall             `json:"tool_calls,omitempty"`
-	ToolCallID string                 `json:"tool_call_id,omitempty"` // For tool result messages (role=tool)
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`     // Per-message metadata (e.g. trust: "pre_scanned")
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"` // string or []ContentPart for multimodal
+	Name    string      `json:"name,omitempty"`
+	// CacheControl marks a breakpoint at the end of this message. Provided at
+	// message level as well as block level because the common case — "cache
+	// everything through the end of my system prompt" — is awkward to express
+	// when Content is a plain string, which is how most callers send it.
+	CacheControl *CacheControl          `json:"cache_control,omitempty"`
+	ToolCalls    []ToolCall             `json:"tool_calls,omitempty"`
+	ToolCallID   string                 `json:"tool_call_id,omitempty"` // For tool result messages (role=tool)
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`     // Per-message metadata (e.g. trust: "pre_scanned")
 }
 
 type ContentPart struct {
 	Type     string    `json:"type"` // "text" or "image_url"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
+	// CacheControl marks this block as a vendor prompt-cache breakpoint.
+	//
+	// Until this field existed the gateway DROPPED a client's cache_control
+	// silently — Go's encoding/json discards unknown fields — so callers could
+	// ask for prompt caching, get no error, and pay full price forever
+	// (tas-llm-router#100). We even read cache-token usage back, reporting a
+	// saving we could never request.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// CacheControl is a vendor prompt-cache breakpoint: "cache everything up to and
+// including this block".
+//
+// The type is deliberately Anthropic-shaped because Anthropic is the only
+// provider that takes an explicit breakpoint. OpenAI caches automatically with
+// no control surface, so for OpenAI this field is simply inert — it is not an
+// error to send it, and silently ignoring it there is correct rather than
+// lossy.
+type CacheControl struct {
+	// Type is "ephemeral" — the only value the API accepts today.
+	Type string `json:"type"`
+	// TTL is "5m" or "1h". Empty means the vendor default (5m). The 1h option
+	// requires an SDK upgrade (see docs/AIQG-PROMPT-CACHE-CONTROL.md §7), so it
+	// is carried but may not yet be honoured.
+	TTL string `json:"ttl,omitempty"`
 }
 
 type ImageURL struct {
@@ -68,6 +98,10 @@ type Function struct {
 type Tool struct {
 	Type     string   `json:"type"`
 	Function Function `json:"function,omitempty"`
+	// CacheControl on the LAST tool caches the whole tool block. Tools render
+	// first, so a breakpoint here is the cheapest large win for agent traffic,
+	// where tool definitions are big and identical on every turn.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 type ToolCall struct {

@@ -2,11 +2,14 @@ package routing
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sirupsen/logrus"
 
 	resilience "github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience"
+
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/affinity"
 
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
@@ -216,5 +219,85 @@ func TestNoPermittedProviderIsAnError(t *testing.T) {
 	_, _, err := r.routeWithPin(ctx, &types.ChatRequest{Model: "gpt-4o-mini"}, RoutingStrategyCostOptimized)
 	if err == nil {
 		t.Fatal("routing succeeded with every provider denied; a constraint breach must fail instead")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Affinity precedence. Affinity is an economic optimisation and sits BELOW
+// every correctness input; these assert the ordering directly.
+// ---------------------------------------------------------------------------
+
+func affinityHeld(provider, model string) affinity.Decision {
+	return affinity.Decision{Held: true, Target: affinity.Target{Provider: provider, Model: model}}
+}
+
+func TestAffinityRedirectsWhenNothingElseObjects(t *testing.T) {
+	r := chainRouter(t)
+	ctx := WithAffinity(context.Background(), affinityHeld("anthropic", "claude-haiku-4-5"))
+
+	dec := &RoutingDecision{SelectedProvider: "openai"}
+	got, prov := r.applyAffinity(ctx, dec, r.providers["openai"])
+	if got.SelectedProvider != "anthropic" || prov == nil {
+		t.Fatalf("selected %q, want the affine provider", got.SelectedProvider)
+	}
+	if !reasoningMentions(got.Reasoning, "warm vendor prompt cache") {
+		t.Fatalf("reasoning %v does not explain the redirect", got.Reasoning)
+	}
+}
+
+// An operator naming a provider outranks an inferred preference.
+func TestPinBeatsAffinity(t *testing.T) {
+	r := chainRouter(t)
+	ctx := WithAffinity(WithPinnedProvider(context.Background(), "openai"), affinityHeld("anthropic", "m"))
+
+	dec := &RoutingDecision{SelectedProvider: "openai"}
+	got, _ := r.applyAffinity(ctx, dec, r.providers["openai"])
+	if got.SelectedProvider != "openai" {
+		t.Fatal("affinity overrode an explicit pin")
+	}
+	if !reasoningMentions(got.Reasoning, "a route rule pins a provider") {
+		t.Fatalf("reasoning %v does not record why affinity was declined", got.Reasoning)
+	}
+}
+
+// A warm cache on an unhealthy provider is worthless.
+func TestAffinityYieldsToHealth(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+	r := NewRouter(logger)
+	r.RegisterProvider("openai", &stubProvider{name: "openai"})
+	r.RegisterProvider("anthropic", &stubProvider{name: "anthropic", healthErr: errors.New("down")})
+	r.updateHealthStatus(context.Background())
+
+	ctx := WithAffinity(context.Background(), affinityHeld("anthropic", "m"))
+	dec := &RoutingDecision{SelectedProvider: "openai"}
+	got, _ := r.applyAffinity(ctx, dec, r.providers["openai"])
+	if got.SelectedProvider != "openai" {
+		t.Fatal("affinity sent traffic to an unhealthy provider")
+	}
+	if !reasoningMentions(got.Reasoning, "unconfigured or unhealthy") {
+		t.Fatalf("reasoning %v does not record why", got.Reasoning)
+	}
+}
+
+// "Affinity held" and "the strategy happened to agree" look identical on the
+// event unless the agreement is recorded, and they mean different things when
+// cache hit rates fall.
+func TestAgreementIsRecordedDistinctly(t *testing.T) {
+	r := chainRouter(t)
+	ctx := WithAffinity(context.Background(), affinityHeld("openai", "gpt-4o-mini"))
+	dec := &RoutingDecision{SelectedProvider: "openai"}
+	got, _ := r.applyAffinity(ctx, dec, r.providers["openai"])
+	if !reasoningMentions(got.Reasoning, "strategy agreed") {
+		t.Fatalf("reasoning %v does not distinguish agreement from a redirect", got.Reasoning)
+	}
+}
+
+func TestNoAffinityIsInert(t *testing.T) {
+	r := chainRouter(t)
+	dec := &RoutingDecision{SelectedProvider: "openai"}
+	got, prov := r.applyAffinity(context.Background(), dec, r.providers["openai"])
+	if got != dec || prov == nil {
+		t.Fatal("an absent affinity decision altered routing")
 	}
 }
