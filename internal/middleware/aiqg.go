@@ -916,6 +916,8 @@ func routingView(r *Routing) events.RoutingView {
 	return events.RoutingView{
 		PromptCacheMode:            s.PromptCacheMode,
 		PromptCacheBreakpoints:     s.PromptCacheBreakpoints,
+		SignalsExcluded:            toEventExclusions(s.SignalsExcluded),
+		SignalsNote:                s.SignalsNote,
 		AffinityHeld:               s.AffinityHeld,
 		AffinityEpoch:              s.AffinityEpoch,
 		AffinityReason:             s.AffinityReason,
@@ -1228,4 +1230,20 @@ func ResolvedFallback(ctx context.Context) (*resilience.Fallback, *resilience.Co
 	}
 	res := holder.get()
 	return res.Fallback, res.Constraints
+}
+
+// toEventExclusions converts the middleware's local gate-exclusion shape to the
+// event schema's. The duplication is deliberate — see GateExclusion.
+func toEventExclusions(in []GateExclusion) []events.ExcludedCandidate {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]events.ExcludedCandidate, len(in))
+	for i, e := range in {
+		out[i] = events.ExcludedCandidate{
+			Provider: e.Provider, Model: e.Model,
+			Dimension: e.Dimension, Reason: e.Reason,
+		}
+	}
+	return out
 }

@@ -77,6 +77,8 @@ type RoutingView struct {
 	AffinityHeld           bool
 	AffinityEpoch          string
 	AffinityReason         string
+	SignalsExcluded        []ExcludedCandidate
+	SignalsNote            string
 
 	// Token usage from the vendor response (stamped by handlers via
 	// middleware.StampTokenUsage). UsageSet distinguishes "vendor
@@ -712,6 +714,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		PromptCacheBreakpoints:     routing.PromptCacheBreakpoints,
 		Synthetic:                  synthetic,
 		SyntheticReason:            syntheticReason,
+		SignalsExcluded:            routing.SignalsExcluded,
+		SignalsNote:                routing.SignalsNote,
 		AffinityHeld:               routing.AffinityHeld,
 		AffinityEpoch:              routing.AffinityEpoch,
 		AffinityReason:             routing.AffinityReason,

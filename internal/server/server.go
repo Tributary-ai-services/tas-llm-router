@@ -966,6 +966,12 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		reqCtx = routing.WithSignals(reqCtx, sig, quality)
 		reqCtx = routing.WithGateContext(reqCtx, req.Model)
 		ctxChanged = true
+		// Exclusions are collected during routing; stamped after, so the event
+		// carries what the gate actually did on this request.
+		defer func() {
+			ex, note := routing.GateExclusions(reqCtx)
+			middleware.StampSignals(reqCtx, toMiddlewareExclusions(ex), note)
+		}()
 	}
 	// Selection strategy + hysteresis + the measured verbosity table.
 	if sel, sw, verb := middleware.ResolvedSelection(reqCtx); !sel.IsZero() || !sw.IsZero() || len(verb) > 0 {
@@ -2835,4 +2841,21 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics += "llm_router_active_api_keys{service=\"llm-router\"} 12\n"
 
 	fmt.Fprint(w, metrics)
+}
+
+// toMiddlewareExclusions converts routing's gate exclusions to the middleware
+// sidecar's shape. Two conversions rather than a shared type, so neither the
+// routing package nor the middleware depends on the event schema.
+func toMiddlewareExclusions(in []routing.ExcludedCandidate) []middleware.GateExclusion {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]middleware.GateExclusion, len(in))
+	for i, e := range in {
+		out[i] = middleware.GateExclusion{
+			Provider: e.Provider, Model: e.Model,
+			Dimension: e.Dimension, Reason: e.Reason,
+		}
+	}
+	return out
 }

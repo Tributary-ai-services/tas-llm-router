@@ -245,6 +245,16 @@ type ResponseEvent struct {
 	Synthetic       bool   `json:"synthetic,omitempty"`
 	SyntheticReason string `json:"synthetic_reason,omitempty"`
 
+	// SignalsExcluded records candidates a quality gate removed, each with the
+	// dimension that caused it. A first-class outcome rather than a log line: a
+	// model quietly vanishing from consideration, while the request succeeds on
+	// another, is invisible otherwise.
+	//
+	// SignalsNote records an abstention — the gate could not judge — which is a
+	// different fact from every candidate passing.
+	SignalsExcluded []ExcludedCandidate `json:"signals_excluded,omitempty"`
+	SignalsNote     string              `json:"signals_note,omitempty"`
+
 	AffinityHeld   bool   `json:"affinity_held,omitempty"`
 	AffinityEpoch  string `json:"affinity_epoch,omitempty"`
 	AffinityReason string `json:"affinity_reason,omitempty"`
@@ -486,4 +496,12 @@ func StatusFromHTTP(code int) string {
 	default:
 		return StatusVendorError
 	}
+}
+
+// ExcludedCandidate is a routing candidate removed by a quality gate.
+type ExcludedCandidate struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model,omitempty"`
+	Dimension string `json:"dimension"`
+	Reason    string `json:"reason,omitempty"`
 }
