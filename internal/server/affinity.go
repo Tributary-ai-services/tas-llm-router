@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -26,7 +27,12 @@ import (
 // denied provider is never proposed in the first place. Filtering afterwards
 // would leave a window where the wrong provider had already been chosen.
 func (s *Server) resolveAffinity(r *http.Request, req *types.ChatRequest) (*http.Request, affinity.Decision) {
-	if s.affinity == nil || !s.affinity.Enabled() {
+	// A matched route rule may configure affinity for this request even when
+	// the gateway has none configured globally — that is the point of putting
+	// it on the rule, since affinity suits multi-turn flows and not the
+	// single-shot traffic sharing the same gateway.
+	mgr := s.affinityFor(r.Context())
+	if mgr == nil || !mgr.Enabled() {
 		return r, affinity.Decision{}
 	}
 	// Same accessor the response caches use — the tenant lives in the AIQG
@@ -47,7 +53,7 @@ func (s *Server) resolveAffinity(r *http.Request, req *types.ChatRequest) (*http
 		return s.router.ProviderHealthy(provider)
 	}
 
-	d := s.affinity.Resolve(r.Context(), tenantID, key, cachePrefixHash(req), time.Now(), usable)
+	d := mgr.Resolve(r.Context(), tenantID, key, cachePrefixHash(req), time.Now(), usable)
 	ctx := routing.WithAffinity(r.Context(), d)
 	middleware.StampAffinity(ctx, d.Held, d.Epoch.String(), d.Reason)
 	return r.WithContext(ctx), d
@@ -59,7 +65,8 @@ func (s *Server) resolveAffinity(r *http.Request, req *types.ChatRequest) (*http
 // fallback or a breaker reselection may have moved it — and sticking the next
 // turn to a provider that just failed would be worse than no affinity at all.
 func (s *Server) recordAffinity(r *http.Request, d affinity.Decision, provider, model string) {
-	if s.affinity == nil || !s.affinity.Enabled() || provider == "" {
+	mgr := s.affinityFor(r.Context())
+	if mgr == nil || !mgr.Enabled() || provider == "" {
 		return
 	}
 	// Same accessor the response caches use — the tenant lives in the AIQG
@@ -69,7 +76,7 @@ func (s *Server) recordAffinity(r *http.Request, d affinity.Decision, provider, 
 	if key == "" {
 		return
 	}
-	s.affinity.Record(r.Context(), tenantID, key, d.Epoch, provider, model, time.Now())
+	mgr.Record(r.Context(), tenantID, key, d.Epoch, provider, model, time.Now())
 }
 
 // affinityKeyFor derives the identity to stick on.
@@ -83,4 +90,24 @@ func affinityKeyFor(r *http.Request) string {
 		return v
 	}
 	return middleware.BaggageSessionID(r.Header.Get("baggage"))
+}
+
+// affinityFor returns the manager for this request: the rule's settings when a
+// matched rule configured affinity, otherwise the gateway's own.
+//
+// The rule's block REPLACES the gateway config rather than merging with it. A
+// merge would make "this rule turns affinity off" inexpressible — an empty
+// key_source would read as "inherit" and silently leave affinity on, which is
+// the opposite of what an operator writing an empty block means.
+func (s *Server) affinityFor(ctx context.Context) *affinity.Manager {
+	rule := middleware.ResolvedAffinity(ctx)
+	if rule == nil || s.affinity == nil {
+		return s.affinity
+	}
+	return s.affinity.WithConfig(affinity.Config{
+		KeySource: rule.KeySource,
+		Scope:     rule.Scope,
+		TTL:       time.Duration(rule.TTLSeconds) * time.Second,
+		OnBreak:   affinity.OnBreak(rule.OnBreak),
+	})
 }

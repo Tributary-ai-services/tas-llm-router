@@ -1173,6 +1173,16 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	return res.Health, res.Budgets
 }
 
+// ResolvedAffinity returns the matched rule's affinity block, or nil when no
+// rule configured one.
+func ResolvedAffinity(ctx context.Context) *resilience.Affinity {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return nil
+	}
+	return holder.get().Affinity
+}
+
 // ResolvedFallback returns the matched rule's failover chain and the tenant's
 // constraints. Constraints may be present with no chain — they bound routing
 // whether or not a rule configured failover.

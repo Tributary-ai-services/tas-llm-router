@@ -289,6 +289,18 @@ func (m *Manager) Record(ctx context.Context, tenant, key string, e Epoch, provi
 	m.store.Put(ctx, tenant, key, e, t, m.cfg.ttl())
 }
 
+// WithConfig returns a Manager sharing this one's store but using cfg.
+//
+// The store is shared so a rule-level override still reads and writes the same
+// affinity as everything else for that conversation: two rules disagreeing
+// about TTL must not each keep a private view of where the conversation lives.
+func (m *Manager) WithConfig(cfg Config) *Manager {
+	if m == nil {
+		return nil
+	}
+	return &Manager{store: m.store, cfg: cfg}
+}
+
 // ShouldFail reports whether an unhonoured affinity must fail the request
 // rather than silently switching provider.
 func (m *Manager) ShouldFail(d Decision) bool {
