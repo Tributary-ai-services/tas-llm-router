@@ -40,6 +40,9 @@ type Router struct {
 	// one Admit call made against the FINAL selection.
 	ejected   map[string]breaker.State
 	ejectedMu sync.RWMutex
+
+	// dwell is fleet-wide switching hysteresis state (step 5).
+	dwell DwellStore
 }
 
 // RoutingStrategy defines how to route requests
@@ -462,6 +465,12 @@ func (r *Router) getProviderForModel(model string) (string, bool) {
 
 // routeByStrategy routes the request using the specified strategy
 func (r *Router) routeByStrategy(ctx context.Context, req *types.ChatRequest, strategy RoutingStrategy) (*RoutingDecision, providers.LLMProvider, error) {
+	// A matched rule may replace the configured strategy for this request.
+	// Checked first, and falls through untouched when no rule asked — a rule
+	// that does not request a new strategy must behave exactly as before.
+	if dec, prov, handled := r.routeBySelection(ctx, req, WorkflowFrom(ctx)); handled {
+		return dec, prov, nil
+	}
 	switch strategy {
 	case RoutingStrategySpecific:
 		return r.routeToSpecificProvider(ctx, req)

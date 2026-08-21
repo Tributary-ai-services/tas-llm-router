@@ -1174,6 +1174,25 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	return res.Health, res.Budgets
 }
 
+// ResolvedSelection returns the matched rule's selection and switching blocks
+// plus the measured verbosity table, or zero values when no rule set them.
+func ResolvedSelection(ctx context.Context) (resilience.Selection, resilience.Switching, []resilience.Verbosity) {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return resilience.Selection{}, resilience.Switching{}, nil
+	}
+	res := holder.get()
+	var sel resilience.Selection
+	var sw resilience.Switching
+	if res.Selection != nil {
+		sel = *res.Selection
+	}
+	if res.Switching != nil {
+		sw = *res.Switching
+	}
+	return sel, sw, res.Verbosity
+}
+
 // ResolvedAffinity returns the matched rule's affinity block, or nil when no
 // rule configured one.
 func ResolvedAffinity(ctx context.Context) *resilience.Affinity {
