@@ -232,6 +232,19 @@ type ResponseEvent struct {
 	// why affinity did not hold, which is the actionable half — an edited
 	// system prompt and an idle gap look identical in a hit-rate chart and
 	// call for opposite responses.
+	// Synthetic marks traffic that is not real customer usage — probes, smoke
+	// tests, demo generators. It exists because measurement-driven routing is
+	// only as good as the events behind it: measured over 30 days, every
+	// gpt-4o-mini event in production came from gateway verification probes
+	// averaging three output tokens against a real ~48, which would have
+	// priced the model ~16x cheaper than reality.
+	//
+	// SyntheticReason distinguishes traffic that DECLARED itself from traffic
+	// matched by the interim source-app denylist, so the denylist's
+	// contribution can be watched as it shrinks.
+	Synthetic       bool   `json:"synthetic,omitempty"`
+	SyntheticReason string `json:"synthetic_reason,omitempty"`
+
 	AffinityHeld   bool   `json:"affinity_held,omitempty"`
 	AffinityEpoch  string `json:"affinity_epoch,omitempty"`
 	AffinityReason string `json:"affinity_reason,omitempty"`

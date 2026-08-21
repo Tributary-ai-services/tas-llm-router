@@ -865,6 +865,7 @@ func headersView(h AIQGHeaders) events.AIQGHeadersView {
 		FlowID:           h.FlowID,
 		ConversationID:   h.ConversationID,
 		TraceID:          h.TraceID,
+		Synthetic:        h.Synthetic,
 		BaggageUserID:    h.Baggage["user.id"],
 		BaggageSessionID: h.Baggage["session.id"],
 
