@@ -24,6 +24,16 @@ COPY aether-shared/go-events/ /build/aether-shared/go-events/
 # Shared traffic matcher (route rules + experiment cohorts). Same sibling-replace
 # pattern; must land before `go mod download` so the replace target resolves.
 COPY aether-shared/go-aiqg-matcher/ /build/aether-shared/go-aiqg-matcher/
+# Shared routing-decision contract: health, budgets, fallback, constraints,
+# affinity, selection and synthetic identification (routing steps 2-5). Same
+# sibling-replace pattern.
+#
+# Adding a sibling `replace` to go.mod REQUIRES a COPY here. That coupling is
+# invisible from go.mod, and it is how this Dockerfile went stale: the gateway
+# has depended on this module since step 2 while the image build had no line
+# for it, so the next image build would have failed on a missing replace target
+# rather than on anything in the change that triggered it.
+COPY aether-shared/go-aiqg-resilience/ /build/aether-shared/go-aiqg-resilience/
 
 WORKDIR /build/app
 
