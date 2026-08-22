@@ -1176,6 +1176,18 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	return res.Health, res.Budgets
 }
 
+// ResolvedLimits returns the matched rule's context/output caps.
+func ResolvedLimits(ctx context.Context) resilience.Limits {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return resilience.Limits{}
+	}
+	if l := holder.get().Limits; l != nil {
+		return *l
+	}
+	return resilience.Limits{}
+}
+
 // ResolvedSignals returns the matched rule's quality floors and the measured
 // evidence they gate against.
 func ResolvedSignals(ctx context.Context) (resilience.Signals, []resilience.QualitySignal) {

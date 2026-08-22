@@ -960,6 +960,12 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// The failover chain and the tenant's constraints. Attached even when only
 	// constraints are present: they bound routing whether or not a rule
 	// configured failover, including on the default path where no rule matched.
+	// Context/output caps (step 7). Attached before routing so the pre-flight
+	// check and the fallback walk both see them.
+	if lim := middleware.ResolvedLimits(reqCtx); !lim.IsZero() {
+		reqCtx = routing.WithLimits(reqCtx, lim)
+		ctxChanged = true
+	}
 	// Quality gates run BEFORE selection, so they are attached first: they
 	// filter the candidate set that selection then prices.
 	if sig, quality := middleware.ResolvedSignals(reqCtx); !sig.IsZero() {
