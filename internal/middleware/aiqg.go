@@ -916,6 +916,9 @@ func routingView(r *Routing) events.RoutingView {
 	return events.RoutingView{
 		PromptCacheMode:            s.PromptCacheMode,
 		PromptCacheBreakpoints:     s.PromptCacheBreakpoints,
+		EnforcementMode:            s.EnforcementMode,
+		EnforcementOutcome:         s.EnforcementOutcome,
+		EnforcementPatterns:        s.EnforcementPatterns,
 		Findings:                   toEventFindings(s.ScanFindings),
 		FindingsTruncated:          s.FindingsTruncated,
 		SignalsExcluded:            toEventExclusions(s.SignalsExcluded),
@@ -1178,6 +1181,25 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	return res.Health, res.Budgets
 }
 
+// ResolvedEnforcement returns the bundle's enforcement mode and its rule
+// actions keyed by pattern_id.
+//
+// Defaults to observe with no rules, so an unresolved or unconfigured bundle
+// enforces nothing — the safe direction, since an operator who has not chosen
+// enforcement has not consented to it.
+func ResolvedEnforcement(ctx context.Context) (resilience.Mode, map[string]string) {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return resilience.ModeObserve, nil
+	}
+	res := holder.get()
+	mode := resilience.ModeObserve
+	if res.Enforcement != nil && res.Enforcement.Mode != "" {
+		mode = res.Enforcement.Mode
+	}
+	return mode, res.RuleActions
+}
+
 // ResolvedLimits returns the matched rule's context/output caps.
 func ResolvedLimits(ctx context.Context) resilience.Limits {
 	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
@@ -1278,4 +1300,15 @@ func toEventFindings(in []ScanFinding) []events.Finding {
 		}
 	}
 	return out
+}
+
+// WithResolvedEnforcementForTest injects an enforcement decision without a full
+// policy resolution. Test-only: the production path always comes from resolve.
+func WithResolvedEnforcementForTest(ctx context.Context, mode resilience.Mode, actions map[string]string) context.Context {
+	h := &bundleResolutionHolder{}
+	h.set(policy.Resolution{
+		Enforcement: &resilience.Enforcement{Mode: mode},
+		RuleActions: actions,
+	})
+	return context.WithValue(ctx, bundleResolutionCtxKey{}, h)
 }

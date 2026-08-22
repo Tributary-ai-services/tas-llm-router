@@ -444,6 +444,13 @@ type AssuranceSummary struct {
 	// Findings carries per-finding audit detail: where each pattern matched,
 	// a masked preview, and whether it was acted on. Counts above remain the
 	// authoritative totals; this is the evidence behind them.
+	// Enforcement records what policy decided and in which mode. The mode is
+	// not optional context: "blocked" and "would_block" are only
+	// distinguishable together, and an outcome without its mode is unreadable.
+	EnforcementMode     string   `json:"enforcement_mode,omitempty"`
+	EnforcementOutcome  string   `json:"enforcement_outcome,omitempty"`
+	EnforcementPatterns []string `json:"enforcement_patterns,omitempty"`
+
 	Findings          []Finding `json:"findings,omitempty"`
 	FindingsTruncated int       `json:"findings_truncated,omitempty"`
 

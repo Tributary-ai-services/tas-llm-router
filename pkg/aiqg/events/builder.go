@@ -77,6 +77,9 @@ type RoutingView struct {
 	AffinityHeld           bool
 	AffinityEpoch          string
 	AffinityReason         string
+	EnforcementMode        string
+	EnforcementOutcome     string
+	EnforcementPatterns    []string
 	Findings               []Finding
 	FindingsTruncated      int
 	SignalsExcluded        []ExcludedCandidate
@@ -676,8 +679,11 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			TagFindings:      routing.TagFindings,
 			// The evidence behind the counts above. Capped, with the drop
 			// recorded — the counts stay complete and authoritative.
-			Findings:          routing.Findings,
-			FindingsTruncated: routing.FindingsTruncated,
+			EnforcementMode:     routing.EnforcementMode,
+			EnforcementOutcome:  routing.EnforcementOutcome,
+			EnforcementPatterns: routing.EnforcementPatterns,
+			Findings:            routing.Findings,
+			FindingsTruncated:   routing.FindingsTruncated,
 		}
 	}
 

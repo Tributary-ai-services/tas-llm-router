@@ -1114,6 +1114,15 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			middleware.StampNISTFindings(r.Context(), nistCounts)
 			middleware.StampTagFindings(r.Context(), tagCounts)
 			middleware.StampScanFindings(r.Context(), audit, events.MaxFindingsPerEvent)
+
+			// Policy enforcement (step 8). Runs alongside the pre-existing
+			// ShouldBlock above rather than replacing it: in observe mode
+			// policy changes nothing and the existing controls keep operating
+			// exactly as before, so adopting this feature cannot reduce
+			// protection on a tenant that has not configured enforcement.
+			if s.applyEnforcement(w, r, result.ScanResult.Findings, "inbound") {
+				return
+			}
 		}
 	}
 
