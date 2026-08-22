@@ -42,6 +42,8 @@ type Routing struct {
 	// Vendor finish_reason — "stop" / "length" / "content_filter" /
 	// "tool_calls" / "function_call". Empty string means unset (no
 	// vendor response). First-write-wins like the other stampers.
+	signalsExcluded        []GateExclusion
+	signalsNote            string
 	affinityHeld           bool
 	affinityEpoch          string
 	affinityReason         string
@@ -192,9 +194,11 @@ type RoutingSnapshot struct {
 
 	// Affinity outcome: whether it held, which epoch, and why not when it did
 	// not.
-	AffinityHeld   bool
-	AffinityEpoch  string
-	AffinityReason string
+	AffinityHeld    bool
+	AffinityEpoch   string
+	AffinityReason  string
+	SignalsExcluded []GateExclusion
+	SignalsNote     string
 
 	// BYOK credential attribution (Plan #14). Never the key.
 	CredentialSource string
@@ -281,6 +285,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		OutboundFindings:           copyCounts(r.outboundFindings),
 		ScanRan:                    r.scanRan,
 		FinishReason:               r.finishReason,
+		SignalsExcluded:            r.signalsExcluded,
+		SignalsNote:                r.signalsNote,
 		AffinityHeld:               r.affinityHeld,
 		AffinityEpoch:              r.affinityEpoch,
 		AffinityReason:             r.affinityReason,
@@ -664,6 +670,36 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens, cacheC
 // from each chunk's choice.FinishReason (only the last chunk
 // typically populates it), but if a later fallback path tries to
 // stamp again the first authoritative value wins.
+// GateExclusion is a candidate a quality gate removed.
+//
+// Declared here rather than imported from events for the same anti-cycle reason
+// as RoutingSnapshot: this package must not depend on the event schema.
+// Conversion happens once, in routingView.
+type GateExclusion struct {
+	Provider  string
+	Model     string
+	Dimension string
+	Reason    string
+}
+
+// StampSignals records which candidates a quality gate removed, and any
+// abstention note.
+//
+// Stamped as structured entries rather than a message so the UI can render the
+// dimension per candidate: "excluded by signals" is never the whole answer.
+func StampSignals(ctx context.Context, excluded []GateExclusion, note string) {
+	if len(excluded) == 0 && note == "" {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.signalsExcluded, r.signalsNote = excluded, note
+}
+
 // StampAffinity records whether provider affinity held, which epoch the
 // request belonged to, and — when it did not hold — why.
 //
