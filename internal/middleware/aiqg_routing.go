@@ -42,6 +42,8 @@ type Routing struct {
 	// Vendor finish_reason — "stop" / "length" / "content_filter" /
 	// "tool_calls" / "function_call". Empty string means unset (no
 	// vendor response). First-write-wins like the other stampers.
+	scanFindings           []ScanFinding
+	findingsTruncated      int
 	signalsExcluded        []GateExclusion
 	signalsNote            string
 	affinityHeld           bool
@@ -194,11 +196,13 @@ type RoutingSnapshot struct {
 
 	// Affinity outcome: whether it held, which epoch, and why not when it did
 	// not.
-	AffinityHeld    bool
-	AffinityEpoch   string
-	AffinityReason  string
-	SignalsExcluded []GateExclusion
-	SignalsNote     string
+	AffinityHeld      bool
+	AffinityEpoch     string
+	AffinityReason    string
+	ScanFindings      []ScanFinding
+	FindingsTruncated int
+	SignalsExcluded   []GateExclusion
+	SignalsNote       string
 
 	// BYOK credential attribution (Plan #14). Never the key.
 	CredentialSource string
@@ -285,6 +289,8 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		OutboundFindings:           copyCounts(r.outboundFindings),
 		ScanRan:                    r.scanRan,
 		FinishReason:               r.finishReason,
+		ScanFindings:               append([]ScanFinding(nil), r.scanFindings...),
+		FindingsTruncated:          r.findingsTruncated,
 		SignalsExcluded:            r.signalsExcluded,
 		SignalsNote:                r.signalsNote,
 		AffinityHeld:               r.affinityHeld,
@@ -670,6 +676,52 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens, cacheC
 // from each chunk's choice.FinishReason (only the last chunk
 // typically populates it), but if a later fallback path tries to
 // stamp again the first authoritative value wins.
+// ScanFinding is one detected pattern with its audit detail.
+//
+// Declared here rather than imported from events, for the same anti-cycle
+// reason as GateExclusion and RoutingSnapshot: this package must not depend on
+// the event schema. Converted once, in routingView.
+//
+// The matched VALUE is deliberately absent. Gatekeeper provides a masked
+// preview and a hash precisely so an audit trail can be specific without
+// becoming the leak it documents.
+type ScanFinding struct {
+	PatternID    string
+	Severity     string
+	Direction    string
+	FieldPath    string
+	Offset       int
+	Length       int
+	ValuePreview string
+	ValueHash    string
+	Confidence   float64
+	Redacted     bool
+	Frameworks   []string
+}
+
+// StampScanFindings appends per-finding audit detail, capped.
+//
+// Counts are stamped separately and stay authoritative; this is the evidence
+// behind them, and truncation is recorded rather than silent.
+func StampScanFindings(ctx context.Context, findings []ScanFinding, cap int) {
+	if len(findings) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, f := range findings {
+		if len(r.scanFindings) >= cap {
+			r.findingsTruncated++
+			continue
+		}
+		r.scanFindings = append(r.scanFindings, f)
+	}
+}
+
 // GateExclusion is a candidate a quality gate removed.
 //
 // Declared here rather than imported from events for the same anti-cycle reason
