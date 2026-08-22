@@ -76,6 +76,13 @@ type Resolution struct {
 	Verbosity []resilience.Verbosity
 	// Signals are the rule's quality floors; Quality is the measured evidence.
 	// Limits cap context and output for this rule's traffic.
+	// Enforcement is the bundle's mode; RuleActions maps pattern_id to the
+	// action that bundle's rules specify. The map rather than the rules
+	// themselves because the gateway only needs the verdict, not the rule
+	// metadata — and a smaller payload rides on every resolution.
+	Enforcement *resilience.Enforcement
+	RuleActions map[string]string
+
 	Limits  *resilience.Limits
 	Signals *resilience.Signals
 	Quality []resilience.QualitySignal
@@ -189,6 +196,8 @@ type resolveResponse struct {
 	Selection   *resilience.Selection      `json:"selection,omitempty"`
 	Switching   *resilience.Switching      `json:"switching,omitempty"`
 	Verbosity   []resilience.Verbosity     `json:"verbosity,omitempty"`
+	Enforcement *resilience.Enforcement    `json:"enforcement,omitempty"`
+	RuleActions map[string]string          `json:"rule_actions,omitempty"`
 	Limits      *resilience.Limits         `json:"limits,omitempty"`
 	Signals     *resilience.Signals        `json:"signals,omitempty"`
 	Quality     []resilience.QualitySignal `json:"quality,omitempty"`
@@ -265,6 +274,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		res.Fallback, res.Constraints, res.Affinity = v.Fallback, v.Constraints, v.Affinity
 		res.Selection, res.Switching, res.Verbosity = v.Selection, v.Switching, v.Verbosity
 		res.Signals, res.Quality, res.Limits = v.Signals, v.Quality, v.Limits
+		res.Enforcement, res.RuleActions = v.Enforcement, v.RuleActions
 		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log

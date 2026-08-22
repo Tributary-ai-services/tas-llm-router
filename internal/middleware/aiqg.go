@@ -1176,6 +1176,25 @@ func ResolvedResilience(ctx context.Context) (*resilience.Health, *resilience.Bu
 	return res.Health, res.Budgets
 }
 
+// ResolvedEnforcement returns the bundle's enforcement mode and its rule
+// actions keyed by pattern_id.
+//
+// Defaults to observe with no rules, so an unresolved or unconfigured bundle
+// enforces nothing — the safe direction, since an operator who has not chosen
+// enforcement has not consented to it.
+func ResolvedEnforcement(ctx context.Context) (resilience.Mode, map[string]string) {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return resilience.ModeObserve, nil
+	}
+	res := holder.get()
+	mode := resilience.ModeObserve
+	if res.Enforcement != nil && res.Enforcement.Mode != "" {
+		mode = res.Enforcement.Mode
+	}
+	return mode, res.RuleActions
+}
+
 // ResolvedLimits returns the matched rule's context/output caps.
 func ResolvedLimits(ctx context.Context) resilience.Limits {
 	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
