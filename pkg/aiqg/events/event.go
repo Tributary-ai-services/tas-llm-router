@@ -439,8 +439,21 @@ type TokenAccounting struct {
 // to aggregate. The per-severity maps stay omitempty so a clean scan
 // doesn't bloat the event payload with empty objects.
 type AssuranceSummary struct {
-	InboundCount     int            `json:"inbound_count"`
-	OutboundCount    int            `json:"outbound_count"`
+	InboundCount  int `json:"inbound_count"`
+	OutboundCount int `json:"outbound_count"`
+	// Findings carries per-finding audit detail: where each pattern matched,
+	// a masked preview, and whether it was acted on. Counts above remain the
+	// authoritative totals; this is the evidence behind them.
+	// Enforcement records what policy decided and in which mode. The mode is
+	// not optional context: "blocked" and "would_block" are only
+	// distinguishable together, and an outcome without its mode is unreadable.
+	EnforcementMode     string   `json:"enforcement_mode,omitempty"`
+	EnforcementOutcome  string   `json:"enforcement_outcome,omitempty"`
+	EnforcementPatterns []string `json:"enforcement_patterns,omitempty"`
+
+	Findings          []Finding `json:"findings,omitempty"`
+	FindingsTruncated int       `json:"findings_truncated,omitempty"`
+
 	InboundFindings  map[string]int `json:"inbound_findings,omitempty"`
 	OutboundFindings map[string]int `json:"outbound_findings,omitempty"`
 	WorstSeverity    string         `json:"worst_severity,omitempty"`

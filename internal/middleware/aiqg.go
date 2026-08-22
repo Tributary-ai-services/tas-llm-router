@@ -916,6 +916,11 @@ func routingView(r *Routing) events.RoutingView {
 	return events.RoutingView{
 		PromptCacheMode:            s.PromptCacheMode,
 		PromptCacheBreakpoints:     s.PromptCacheBreakpoints,
+		EnforcementMode:            s.EnforcementMode,
+		EnforcementOutcome:         s.EnforcementOutcome,
+		EnforcementPatterns:        s.EnforcementPatterns,
+		Findings:                   toEventFindings(s.ScanFindings),
+		FindingsTruncated:          s.FindingsTruncated,
 		SignalsExcluded:            toEventExclusions(s.SignalsExcluded),
 		SignalsNote:                s.SignalsNote,
 		AffinityHeld:               s.AffinityHeld,
@@ -1277,4 +1282,33 @@ func toEventExclusions(in []GateExclusion) []events.ExcludedCandidate {
 		}
 	}
 	return out
+}
+
+// toEventFindings converts the sidecar's local finding shape to the event
+// schema's. Duplication is deliberate — see ScanFinding.
+func toEventFindings(in []ScanFinding) []events.Finding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]events.Finding, len(in))
+	for i, f := range in {
+		out[i] = events.Finding{
+			PatternID: f.PatternID, Severity: f.Severity, Direction: f.Direction,
+			FieldPath: f.FieldPath, Offset: f.Offset, Length: f.Length,
+			ValuePreview: f.ValuePreview, ValueHash: f.ValueHash,
+			Confidence: f.Confidence, Redacted: f.Redacted, Frameworks: f.Frameworks,
+		}
+	}
+	return out
+}
+
+// WithResolvedEnforcementForTest injects an enforcement decision without a full
+// policy resolution. Test-only: the production path always comes from resolve.
+func WithResolvedEnforcementForTest(ctx context.Context, mode resilience.Mode, actions map[string]string) context.Context {
+	h := &bundleResolutionHolder{}
+	h.set(policy.Resolution{
+		Enforcement: &resilience.Enforcement{Mode: mode},
+		RuleActions: actions,
+	})
+	return context.WithValue(ctx, bundleResolutionCtxKey{}, h)
 }
