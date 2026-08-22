@@ -445,3 +445,23 @@ func TestNilErrorIsNotFallbackEligible(t *testing.T) {
 		t.Fatal("nil error reported as fallback-eligible")
 	}
 }
+
+// A pre-flight limit breach is presented to the classifier as a context
+// overflow so it takes the SAME path as the vendor's own 400. If this stopped
+// classifying, limits would silently stop advancing the fallback chain — and
+// the feature would be strictly worse than not having it.
+func TestPreflightLimitBreachClassifiesAsContextOverflow(t *testing.T) {
+	msg := "context length exceeded: request is 3000 tokens over this route's configured context limit of 200000 for anthropic/claude-haiku-4-5"
+	class, ok := ClassifyFailure(errors.New(msg))
+	if !ok {
+		t.Fatal("a limit breach was not fallback-eligible; the chain would never advance")
+	}
+	if class != resilience.FailureContextOverflow {
+		t.Fatalf("classified as %v, want context_overflow", class)
+	}
+	// And it must not eject the provider: the provider is fine, our request
+	// was too big.
+	if got := ClassifyError(errors.New(msg)); got == ServerError {
+		t.Fatal("a limit breach counted against the provider")
+	}
+}

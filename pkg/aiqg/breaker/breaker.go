@@ -389,6 +389,17 @@ func ClassifyError(err error) Outcome {
 	switch {
 	case strings.Contains(s, "429") || strings.Contains(s, "rate limit") || strings.Contains(s, "too many requests"):
 		return RateLimited
+	// Context overflow is OUR request being too big for this model — never the
+	// provider's fault. Matched on phrasing rather than only on a "400" prefix
+	// because it also arrives from the gateway's own pre-flight limit check
+	// (step 7), which has no HTTP status to stringify. Without this branch that
+	// check would count every oversized prompt against the provider and could
+	// eject a perfectly healthy one — a config-shaped input turning into an
+	// outage, which is precisely what this classification exists to prevent.
+	case containsAny(s,
+		"context length", "context_length_exceeded", "maximum context",
+		"context window", "too many tokens", "prompt is too long", "input is too long"):
+		return ClientError
 	case containsAny(s, "400 ", "401 ", "403 ", "404 ", "422 ",
 		"bad request", "unauthorized", "not_found_error", "not found", "invalid_request"):
 		return ClientError

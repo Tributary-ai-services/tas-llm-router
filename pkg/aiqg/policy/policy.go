@@ -75,6 +75,8 @@ type Resolution struct {
 	Switching *resilience.Switching
 	Verbosity []resilience.Verbosity
 	// Signals are the rule's quality floors; Quality is the measured evidence.
+	// Limits cap context and output for this rule's traffic.
+	Limits  *resilience.Limits
 	Signals *resilience.Signals
 	Quality []resilience.QualitySignal
 }
@@ -187,6 +189,7 @@ type resolveResponse struct {
 	Selection   *resilience.Selection      `json:"selection,omitempty"`
 	Switching   *resilience.Switching      `json:"switching,omitempty"`
 	Verbosity   []resilience.Verbosity     `json:"verbosity,omitempty"`
+	Limits      *resilience.Limits         `json:"limits,omitempty"`
 	Signals     *resilience.Signals        `json:"signals,omitempty"`
 	Quality     []resilience.QualitySignal `json:"quality,omitempty"`
 }
@@ -261,7 +264,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		res.Health, res.Budgets = v.Health, v.Budgets
 		res.Fallback, res.Constraints, res.Affinity = v.Fallback, v.Constraints, v.Affinity
 		res.Selection, res.Switching, res.Verbosity = v.Selection, v.Switching, v.Verbosity
-		res.Signals, res.Quality = v.Signals, v.Quality
+		res.Signals, res.Quality, res.Limits = v.Signals, v.Quality, v.Limits
 		return res, nil
 	case http.StatusNotFound:
 		// Explicit header named an unknown bundle. Caller can log

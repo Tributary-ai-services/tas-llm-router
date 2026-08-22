@@ -50,6 +50,29 @@ func (s *Server) completeWithFallback(
 	ctx := r.Context()
 	chain := routing.ChainFrom(ctx)
 
+	// Pre-flight limits (step 7). A breach is turned into the SAME failure the
+	// chain already acts on rather than returned to the caller, because context
+	// overflow is fallback-eligible: a larger-window tier can serve the
+	// identical request. Returning an error here would make limits strictly
+	// worse than having none — the vendor's own 400 would at least have
+	// advanced the chain, while a tidy local rejection would not.
+	//
+	// Detecting the problem earlier must not mean recovering from it less.
+	if b := s.router.CheckLimits(ctx, metadata.Provider, req.Model, req); b != nil {
+		s.logger.WithFields(logrus.Fields{
+			"provider": b.Provider, "model": b.Model,
+			"window": b.Window, "overage": b.Overage,
+		}).Warn("Request exceeds the effective context window; treating as context overflow")
+		metadata.RoutingReason = append(metadata.RoutingReason, b.Error())
+		return s.walkChainFrom(r, req, metadata, chain, errLimitBreach{b})
+	}
+	// Output caps bound the request rather than refusing it: asking for more
+	// output than the tenant permits is still a serviceable request.
+	if applied, changed := s.router.ApplyOutputCap(ctx, metadata.Provider, req.Model, req); changed {
+		metadata.RoutingReason = append(metadata.RoutingReason,
+			"max_tokens lowered to "+strconv.Itoa(applied)+" by this route's output limit")
+	}
+
 	resp, err := s.attempt(ctx, req, provider, metadata)
 	if err == nil {
 		s.recordServedAffinity(r, metadata)
@@ -59,6 +82,34 @@ func (s *Server) completeWithFallback(
 		return resp, err
 	}
 
+	return s.walkChainFrom(r, req, metadata, chain, err)
+}
+
+// errLimitBreach presents a pre-flight limit breach as a context-overflow
+// failure, so the existing classification treats it exactly like the vendor's
+// own — one code path, one behaviour.
+type errLimitBreach struct{ b *routing.LimitBreach }
+
+func (e errLimitBreach) Error() string {
+	// Worded to classify as context_overflow: the classifier reads the
+	// message, and a breach that failed to classify would silently stop
+	// advancing the chain.
+	return "context length exceeded: " + e.b.Error()
+}
+
+// walkChainFrom advances the fallback chain after an initial failure.
+func (s *Server) walkChainFrom(
+	r *http.Request,
+	req *types.ChatRequest,
+	metadata *types.RouterMetadata,
+	chain *routing.Chain,
+	err error,
+) (*types.ChatResponse, error) {
+	ctx := r.Context()
+	var resp *types.ChatResponse
+	if !chain.Configured() {
+		return nil, err
+	}
 	for pos := 1; ; pos++ {
 		class, eligible := breaker.ClassifyFailure(err)
 		if !eligible {
@@ -103,6 +154,18 @@ func (s *Server) completeWithFallback(
 		req.Model = tier.Model
 		metadata.Provider, metadata.Model = tier.Provider, tier.Model
 		metadata.AttemptCount++
+
+		// Re-check limits against the new tier: the whole point of advancing
+		// on a context overflow is that a different model has a different
+		// window, so a tier that also cannot fit must be skipped rather than
+		// attempted.
+		if b := s.router.CheckLimits(ctx, tier.Provider, tier.Model, req); b != nil {
+			metadata.RoutingReason = append(metadata.RoutingReason,
+				"skipped tier "+strconv.Itoa(tier.Position)+": "+b.Error())
+			err = errLimitBreach{b}
+			continue
+		}
+		s.router.ApplyOutputCap(ctx, tier.Provider, tier.Model, req)
 
 		resp, err = s.attempt(ctx, req, next, metadata)
 		if err == nil {
