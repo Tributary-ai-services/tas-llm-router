@@ -77,6 +77,8 @@ type RoutingView struct {
 	AffinityHeld           bool
 	AffinityEpoch          string
 	AffinityReason         string
+	Findings               []Finding
+	FindingsTruncated      int
 	SignalsExcluded        []ExcludedCandidate
 	SignalsNote            string
 
@@ -672,6 +674,10 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			WorstSeverity:    worstSeverityIn(routing.InboundFindings, routing.OutboundFindings),
 			NISTFindings:     routing.NISTFindings,
 			TagFindings:      routing.TagFindings,
+			// The evidence behind the counts above. Capped, with the drop
+			// recorded — the counts stay complete and authoritative.
+			Findings:          routing.Findings,
+			FindingsTruncated: routing.FindingsTruncated,
 		}
 	}
 

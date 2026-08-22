@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
+	"github.com/Tributary-ai-services/Gatekeeper/pkg/scan"
 	"github.com/redis/go-redis/v9"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
@@ -1098,14 +1099,21 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			counts := map[string]int{}
 			nistCounts := map[string]int{}
 			tagCounts := map[string]int{}
+			// Per-finding audit detail alongside the counts. Gatekeeper already
+			// produced all of this; the gateway used to discard it here, which
+			// is why "why was this blocked?" was previously unanswerable beyond
+			// "a rule fired somewhere".
+			audit := make([]middleware.ScanFinding, 0, len(result.ScanResult.Findings))
 			for _, f := range result.ScanResult.Findings {
 				counts[string(f.Severity)]++
 				nistCounts[middleware.MapPatternToNIST(f.PatternID)]++
 				tagCounts[f.PatternID]++
+				audit = append(audit, toScanFinding(f, middleware.GatekeeperDirectionInbound))
 			}
 			middleware.StampGatekeeperFindings(r.Context(), middleware.GatekeeperDirectionInbound, counts)
 			middleware.StampNISTFindings(r.Context(), nistCounts)
 			middleware.StampTagFindings(r.Context(), tagCounts)
+			middleware.StampScanFindings(r.Context(), audit, events.MaxFindingsPerEvent)
 		}
 	}
 
@@ -2864,4 +2872,30 @@ func toMiddlewareExclusions(in []routing.ExcludedCandidate) []middleware.GateExc
 		}
 	}
 	return out
+}
+
+// toScanFinding projects a Gatekeeper finding into the audit shape.
+//
+// The matched VALUE is deliberately not copied. Gatekeeper's own type carries
+// the comment "never log actual PII" and supplies ValuePreview and ValueHash for
+// exactly this purpose: an audit trail proving an SSN would have been redacted
+// must not become the place that SSN is stored.
+func toScanFinding(f scan.Finding, direction string) middleware.ScanFinding {
+	frameworks := make([]string, 0, len(f.Frameworks))
+	for _, fw := range f.Frameworks {
+		frameworks = append(frameworks, string(fw.Framework))
+	}
+	return middleware.ScanFinding{
+		PatternID:    f.PatternID,
+		Severity:     string(f.Severity),
+		Direction:    direction,
+		FieldPath:    f.Location.FieldPath,
+		Offset:       f.Location.Offset,
+		Length:       f.Location.Length,
+		ValuePreview: f.ValuePreview,
+		ValueHash:    f.ValueHash,
+		Confidence:   f.Confidence,
+		Redacted:     f.Redacted,
+		Frameworks:   frameworks,
+	}
 }

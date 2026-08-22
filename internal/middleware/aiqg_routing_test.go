@@ -311,3 +311,30 @@ func TestRoutingView_CarriesSemanticCacheFields(t *testing.T) {
 		t.Errorf("CacheSavedCostUSD = %v, want 0.00025", v.CacheSavedCostUSD)
 	}
 }
+
+// StampScanFindings caps detail without losing the fact that it capped —
+// a truncated list that does not admit it reads as the complete set.
+func TestStampScanFindingsRecordsTruncation(t *testing.T) {
+	ctx := WithRouting(context.Background(), &Routing{})
+	many := make([]ScanFinding, 60)
+	for i := range many {
+		many[i] = ScanFinding{PatternID: "pii-ssn", Severity: "critical", Direction: "inbound"}
+	}
+	StampScanFindings(ctx, many, 50)
+
+	snap := RoutingFromContext(ctx).Snapshot()
+	if len(snap.ScanFindings) != 50 {
+		t.Fatalf("kept %d findings, want the cap of 50", len(snap.ScanFindings))
+	}
+	if snap.FindingsTruncated != 10 {
+		t.Fatalf("truncated = %d, want 10 recorded rather than silently dropped", snap.FindingsTruncated)
+	}
+}
+
+func TestStampScanFindingsIsInertWhenEmpty(t *testing.T) {
+	ctx := WithRouting(context.Background(), &Routing{})
+	StampScanFindings(ctx, nil, 50)
+	if snap := RoutingFromContext(ctx).Snapshot(); len(snap.ScanFindings) != 0 || snap.FindingsTruncated != 0 {
+		t.Fatal("empty findings altered the sidecar")
+	}
+}
