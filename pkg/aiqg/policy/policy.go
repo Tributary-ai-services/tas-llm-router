@@ -68,6 +68,13 @@ type Resolution struct {
 	// Affinity is the matched rule's provider-affinity block, overriding the
 	// gateway's own configuration for this request.
 	Affinity *resilience.Affinity
+	// Controls are the tenant's per-tenant runtime switches (breaker, affinity)
+	// that fold OVER the gateway's env-flag defaults. Like Constraints they ride
+	// every resolution, not just a matched rule, because they bound routing as a
+	// whole. Nil means the tenant expressed no preference and the gateway
+	// defaults stand untouched — the tri-state that keeps "no opinion" distinct
+	// from "off".
+	Controls *resilience.Controls
 	// Selection / Switching / Verbosity drive step 5's expected_cost and
 	// weighted strategies. Verbosity arrives only when a rule asks for
 	// expected_cost — see the resolver.
@@ -193,6 +200,7 @@ type resolveResponse struct {
 	Fallback    *resilience.Fallback       `json:"fallback,omitempty"`
 	Constraints *resilience.Constraints    `json:"constraints,omitempty"`
 	Affinity    *resilience.Affinity       `json:"affinity,omitempty"`
+	Controls    *resilience.Controls       `json:"controls,omitempty"`
 	Selection   *resilience.Selection      `json:"selection,omitempty"`
 	Switching   *resilience.Switching      `json:"switching,omitempty"`
 	Verbosity   []resilience.Verbosity     `json:"verbosity,omitempty"`
@@ -272,6 +280,7 @@ func (r *DashboardResolver) Resolve(ctx context.Context, req ResolveRequest) (Re
 		// block stays nil so the gateway's own defaults apply untouched.
 		res.Health, res.Budgets = v.Health, v.Budgets
 		res.Fallback, res.Constraints, res.Affinity = v.Fallback, v.Constraints, v.Affinity
+		res.Controls = v.Controls
 		res.Selection, res.Switching, res.Verbosity = v.Selection, v.Switching, v.Verbosity
 		res.Signals, res.Quality, res.Limits = v.Signals, v.Quality, v.Limits
 		res.Enforcement, res.RuleActions = v.Enforcement, v.RuleActions

@@ -1256,6 +1256,17 @@ func ResolvedAffinity(ctx context.Context) *resilience.Affinity {
 	return holder.get().Affinity
 }
 
+// ResolvedControls returns the tenant's per-tenant feature switches, or nil
+// when the resolution carried none (the tenant expressed no preference and the
+// gateway env defaults stand).
+func ResolvedControls(ctx context.Context) *resilience.Controls {
+	holder, _ := ctx.Value(bundleResolutionCtxKey{}).(*bundleResolutionHolder)
+	if holder == nil {
+		return nil
+	}
+	return holder.get().Controls
+}
+
 // ResolvedFallback returns the matched rule's failover chain and the tenant's
 // constraints. Constraints may be present with no chain — they bound routing
 // whether or not a rule configured failover.

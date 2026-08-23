@@ -47,16 +47,22 @@ import (
 // Server represents the HTTP server
 type Server struct {
 	// affinity keeps a conversation on the provider whose vendor prompt cache
-	// is warm (routing-decision.md §5.5). nil = disabled.
-	affinity             *affinity.Manager
-	router               *routing.Router
-	httpServer           *http.Server
-	logger               *logrus.Logger
-	config               *ServerConfig
-	securityMiddleware   *middleware.SecurityMiddleware
-	validationMiddleware *middleware.ValidationMiddleware
-	gatekeeper           *gatekeeper.Client
-	gatekeeperConfig     *gatekeeper.Config
+	// is warm (routing-decision.md §5.5). Constructed always; the effective
+	// on/off is decided per request from the tenant control folded over
+	// affinityDefaultEnabled.
+	affinity *affinity.Manager
+	// affinityDefaultEnabled is the gateway-wide default (AIQG_AFFINITY_ENABLED)
+	// a per-tenant control overrides. When no tenant control is set, this alone
+	// decides whether affinity acts.
+	affinityDefaultEnabled bool
+	router                 *routing.Router
+	httpServer             *http.Server
+	logger                 *logrus.Logger
+	config                 *ServerConfig
+	securityMiddleware     *middleware.SecurityMiddleware
+	validationMiddleware   *middleware.ValidationMiddleware
+	gatekeeper             *gatekeeper.Client
+	gatekeeperConfig       *gatekeeper.Config
 	// extractionApplyDisabled is the global break-glass kill-switch for
 	// active payload reduction (Plan #7 Phase 4). When true the gateway
 	// never APPLIES a reduction — active bundles downgrade to shadow
@@ -481,19 +487,30 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				RetryRatio:        config.AIQG.Breaker.RetryRatio,
 				MinRetries:        config.AIQG.Breaker.MinRetries,
 			}
+			// Construct-ALWAYS: the breaker (with its store) exists regardless
+			// of the env default, so a per-tenant control can enable it at
+			// request time even when AIQG_BREAKER_ENABLED is off. The env flag
+			// becomes the DEFAULT the per-tenant control folds over — not the
+			// switch that decides whether the manager exists at all. With the
+			// default off and no tenant opting in, nothing records an outcome,
+			// so the store stays empty and behaviour is identical to today.
+			var store breaker.Store
+			backend := "memory (per-replica — breaker state is NOT shared across pods)"
+			if sharedRedis != nil {
+				store = breaker.NewRedisStore(sharedRedis)
+				backend = "redis (fleet-wide)"
+			} else {
+				store = breaker.NewMemoryStore()
+			}
+			b := breaker.New(store, bcfg)
+			router.SetBreaker(b)
+			router.SetBreakerDefaultEnabled(config.AIQG.Breaker.Enabled)
 			if config.AIQG.Breaker.Enabled {
-				var store breaker.Store
-				backend := "memory (per-replica — breaker state is NOT shared across pods)"
-				if sharedRedis != nil {
-					store = breaker.NewRedisStore(sharedRedis)
-					backend = "redis (fleet-wide)"
-				} else {
-					store = breaker.NewMemoryStore()
-				}
-				b := breaker.New(store, bcfg)
-				router.SetBreaker(b)
 				// Switching hysteresis shares the same fleet-wide store choice:
-				// per-replica dwell is no dwell at all.
+				// per-replica dwell is no dwell at all. Left gated on the env
+				// default — switching is a separate feature from the cooldown
+				// this control governs, so constructing it unconditionally would
+				// silently change switching behaviour for default-off gateways.
 				if sharedRedis != nil {
 					router.SetDwellStore(routing.NewRedisDwellStore(sharedRedis))
 				} else {
@@ -508,7 +525,10 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 					"window":             eff.Window,
 					"eject_for":          eff.EjectFor,
 					"retry_ratio":        eff.RetryRatio,
-				}).Info("AIQG breaker enabled (passive outlier detection + retry budget)")
+				}).Info("AIQG breaker enabled by default (passive outlier detection + retry budget)")
+			} else {
+				logger.WithField("backend", backend).
+					Info("AIQG breaker constructed, default-off (enable per-tenant via control plane)")
 			}
 		}
 
@@ -517,7 +537,16 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		// conversation to a different provider depending on which pod answered,
 		// rebuilding the vendor cache each time — exactly the cost affinity
 		// exists to avoid.
-		if config.AIQG.Affinity.Enabled {
+		{
+			// Construct-ALWAYS, same rationale as the breaker above: the manager
+			// (with its store) exists regardless of the env default so a
+			// per-tenant control can turn affinity on at request time even when
+			// AIQG_AFFINITY_ENABLED is off. The env flag is captured as the
+			// default the control folds over; the per-request gate in
+			// resolveAffinity/recordAffinity honours it. With the default off and
+			// no tenant opting in, that gate short-circuits and affinity never
+			// acts — identical to today, and a rule's affinity block alone does
+			// NOT silently enable it.
 			acfg := affinity.Config{
 				KeySource: config.AIQG.Affinity.KeySource,
 				Scope:     config.AIQG.Affinity.Scope,
@@ -536,12 +565,18 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				store = affinity.NewMemoryStore()
 			}
 			server.affinity = affinity.New(store, acfg)
-			logger.WithFields(logrus.Fields{
-				"backend":    backend,
-				"key_source": acfg.KeySource,
-				"scope":      acfg.Scope,
-				"on_break":   acfg.OnBreak,
-			}).Info("AIQG provider affinity enabled (keeps a conversation on a warm vendor cache)")
+			server.affinityDefaultEnabled = config.AIQG.Affinity.Enabled
+			if config.AIQG.Affinity.Enabled {
+				logger.WithFields(logrus.Fields{
+					"backend":    backend,
+					"key_source": acfg.KeySource,
+					"scope":      acfg.Scope,
+					"on_break":   acfg.OnBreak,
+				}).Info("AIQG provider affinity enabled by default (keeps a conversation on a warm vendor cache)")
+			} else {
+				logger.WithField("backend", backend).
+					Info("AIQG provider affinity constructed, default-off (enable per-tenant via control plane)")
+			}
 		}
 
 		// C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md). Runs on the
@@ -956,6 +991,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// routing metadata that must never reach a vendor payload.
 	if h, b := middleware.ResolvedResilience(reqCtx); h != nil || b != nil {
 		reqCtx = routing.WithResilience(reqCtx, h, b)
+		ctxChanged = true
+	}
+	// The tenant's per-tenant feature switches (breaker/affinity), folded over
+	// the gateway env defaults at the point each feature is consulted. Carried
+	// onto the routing context so the breaker — which lives in the routing
+	// package and cannot import the middleware — can read them. Nil is a no-op.
+	if ctrl := middleware.ResolvedControls(reqCtx); ctrl != nil {
+		reqCtx = routing.WithControls(reqCtx, ctrl)
 		ctxChanged = true
 	}
 	// The failover chain and the tenant's constraints. Attached even when only
