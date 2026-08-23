@@ -58,3 +58,23 @@ func ResilienceFrom(ctx context.Context) (*resilience.Health, *resilience.Budget
 	v, _ := ctx.Value(resilienceKey{}).(resilienceOverride)
 	return v.Health, v.Budgets
 }
+
+type controlsKey struct{}
+
+// WithControls returns a context carrying the tenant's per-tenant feature
+// switches. A nil block is a no-op — "the tenant expressed no preference"
+// costs nothing and leaves ControlsFrom yielding the zero value.
+func WithControls(ctx context.Context, c *resilience.Controls) context.Context {
+	if c == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, controlsKey{}, *c)
+}
+
+// ControlsFrom returns the tenant's switches as a value, or the zero Controls
+// (both prefs nil → inherit the gateway default) when none are set. Returning a
+// value keeps the caller nil-safe: Controls{}.BreakerEnabledOr(def) yields def.
+func ControlsFrom(ctx context.Context) resilience.Controls {
+	v, _ := ctx.Value(controlsKey{}).(resilience.Controls)
+	return v
+}

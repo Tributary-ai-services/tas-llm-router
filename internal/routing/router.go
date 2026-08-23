@@ -33,6 +33,11 @@ type Router struct {
 	// breaker package doc — OpenAI's probe is ListModels, which says nothing
 	// about whether completions work). A target must satisfy both.
 	breaker *breaker.Breaker
+	// breakerDefaultEnabled is the gateway-wide default (AIQG_BREAKER_ENABLED)
+	// that a per-tenant control folds over. The breaker is now constructed
+	// unconditionally, so this — not "is breaker nil" — is what decides whether
+	// the breaker acts for a request that carries no tenant control.
+	breakerDefaultEnabled bool
 	// ejected caches breaker state so candidate filtering — which runs over
 	// every provider on every request — does not make a Redis round trip per
 	// candidate. Refreshed by the same ticker as the active probe. The
@@ -247,7 +252,7 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 		// cannot prevent a retry storm on its own: when a provider degrades,
 		// every in-flight request retries at once and the retries become the
 		// load that keeps it down.
-		if attempt > 1 && r.breaker != nil && r.breaker.Enabled() {
+		if attempt > 1 && r.breakerEnabled(ctx) {
 			if !r.breakerFor(ctx).AllowRetry(ctx, breaker.Target(decision.SelectedProvider, req.Model)) {
 				lastError = fmt.Errorf("retry budget exhausted for provider %s", decision.SelectedProvider)
 				r.logger.WithField("provider", decision.SelectedProvider).
@@ -741,6 +746,20 @@ func (r *Router) isEjected(name string) bool {
 // leaves the router on active health checks alone.
 func (r *Router) SetBreaker(b *breaker.Breaker) { r.breaker = b }
 
+// SetBreakerDefaultEnabled records the gateway-wide default a per-tenant
+// control folds over. Set once at construction from AIQG_BREAKER_ENABLED.
+func (r *Router) SetBreakerDefaultEnabled(enabled bool) { r.breakerDefaultEnabled = enabled }
+
+// breakerEnabled reports whether the breaker should act for THIS request: the
+// breaker must be constructed (a store attached) AND the effective flag — the
+// tenant control folded over the gateway default — must be on. A request with
+// no tenant control uses the default, so behaviour is unchanged from before
+// per-tenant controls existed.
+func (r *Router) breakerEnabled(ctx context.Context) bool {
+	return r.breaker != nil && r.breaker.Enabled() &&
+		ControlsFrom(ctx).BreakerEnabledOr(r.breakerDefaultEnabled)
+}
+
 // Breaker returns the attached breaker, or nil.
 func (r *Router) Breaker() *breaker.Breaker { return r.breaker }
 
@@ -773,7 +792,7 @@ func (r *Router) refreshBreakerCache(ctx context.Context) {
 // model are different failures needing different responses, and recording only
 // one of them makes the other undetectable.
 func (r *Router) RecordOutcome(ctx context.Context, provider, model string, outcome breaker.Outcome) {
-	if r.breaker == nil || !r.breaker.Enabled() {
+	if !r.breakerEnabled(ctx) {
 		return
 	}
 	br := r.breakerFor(ctx)
@@ -1092,7 +1111,7 @@ func (r *Router) routeWithPin(ctx context.Context, req *types.ChatRequest, strat
 // not a kill switch. Once ordered fallback chains land (step 3) the "nowhere
 // to go" case becomes rare and this can harden.
 func (r *Router) admitOrReselect(ctx context.Context, req *types.ChatRequest, decision *RoutingDecision, provider providers.LLMProvider, strategy RoutingStrategy) (*RoutingDecision, providers.LLMProvider) {
-	if r.breaker == nil || !r.breaker.Enabled() || decision == nil {
+	if !r.breakerEnabled(ctx) || decision == nil {
 		return decision, provider
 	}
 	// A matched route rule may tighten or loosen the thresholds for THIS

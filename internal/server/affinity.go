@@ -27,6 +27,14 @@ import (
 // denied provider is never proposed in the first place. Filtering afterwards
 // would leave a window where the wrong provider had already been chosen.
 func (s *Server) resolveAffinity(r *http.Request, req *types.ChatRequest) (*http.Request, affinity.Decision) {
+	// Per-tenant gate FIRST, before any rule or manager config is consulted, so
+	// a tenant that opted out is never re-enabled by a rule that happens to
+	// carry an affinity block. With the env default off and no tenant control
+	// this short-circuits and affinity stays off exactly as before — a rule
+	// block alone does NOT silently enable it.
+	if !s.affinityEnabled(r.Context()) {
+		return r, affinity.Decision{}
+	}
 	// A matched route rule may configure affinity for this request even when
 	// the gateway has none configured globally — that is the point of putting
 	// it on the rule, since affinity suits multi-turn flows and not the
@@ -65,6 +73,11 @@ func (s *Server) resolveAffinity(r *http.Request, req *types.ChatRequest) (*http
 // fallback or a breaker reselection may have moved it — and sticking the next
 // turn to a provider that just failed would be worse than no affinity at all.
 func (s *Server) recordAffinity(r *http.Request, d affinity.Decision, provider, model string) {
+	// Same per-tenant gate as resolveAffinity: a tenant that opted out records
+	// nothing, so the store never learns a target it must not later honour.
+	if !s.affinityEnabled(r.Context()) {
+		return
+	}
 	mgr := s.affinityFor(r.Context())
 	if mgr == nil || !mgr.Enabled() || provider == "" {
 		return
@@ -90,6 +103,17 @@ func affinityKeyFor(r *http.Request) string {
 		return v
 	}
 	return middleware.BaggageSessionID(r.Header.Get("baggage"))
+}
+
+// affinityEnabled reports whether affinity should act for THIS request: the
+// tenant control folded over the gateway default (AIQG_AFFINITY_ENABLED). A
+// request carrying no tenant control uses the default, so behaviour matches
+// what it was before per-tenant controls existed.
+func (s *Server) affinityEnabled(ctx context.Context) bool {
+	if ctrl := middleware.ResolvedControls(ctx); ctrl != nil {
+		return ctrl.AffinityEnabledOr(s.affinityDefaultEnabled)
+	}
+	return s.affinityDefaultEnabled
 }
 
 // affinityFor returns the manager for this request: the rule's settings when a

@@ -33,6 +33,11 @@ func breakerRouter(t *testing.T, cfg breaker.Config) (*Router, *breaker.Breaker)
 
 	b := breaker.New(breaker.NewMemoryStore(), cfg)
 	r.SetBreaker(b)
+	// The breaker is now constructed unconditionally; the gateway default (or a
+	// per-tenant control) decides whether it ACTS. These tests exercise the
+	// enabled path, so set the default on — the equivalent of the env flag
+	// AIQG_BREAKER_ENABLED=true with no per-tenant override.
+	r.SetBreakerDefaultEnabled(true)
 	return r, b
 }
 
@@ -108,6 +113,7 @@ func TestProceedsWhenEjectedAndNoAlternativeExists(t *testing.T) {
 	r.updateHealthStatus(context.Background())
 	b := breaker.New(breaker.NewMemoryStore(), breaker.Config{ConsecutiveErrors: 2})
 	r.SetBreaker(b)
+	r.SetBreakerDefaultEnabled(true)
 
 	ctx := context.Background()
 	req := &types.ChatRequest{Model: "gpt-4o-mini"}
@@ -183,6 +189,38 @@ func TestNilBreakerLeavesRoutingUnchanged(t *testing.T) {
 	got, provider := r.admitOrReselect(ctx, &types.ChatRequest{}, dec, r.providers["openai"], RoutingStrategySpecific)
 	if got != dec || provider == nil {
 		t.Fatal("nil breaker altered the decision")
+	}
+}
+
+// Per-tenant control folds over the gateway default. The breaker is always
+// constructed now, so what decides whether it acts for a request is
+// breakerEnabled(ctx): the tenant control (if any) over the env default.
+func TestBreakerPerTenantControlGate(t *testing.T) {
+	tru, fls := true, false
+	cases := []struct {
+		name       string
+		defaultOn  bool
+		control    *resilience.Controls
+		wantActive bool
+	}{
+		// Zero behaviour change: default off + no tenant control = off, exactly
+		// as before per-tenant controls existed.
+		{"default-off, no control", false, nil, false},
+		{"default-on, no control", true, nil, true},
+		// A tenant opts in even though the gateway default is off.
+		{"default-off, control on", false, &resilience.Controls{BreakerEnabled: &tru}, true},
+		// A tenant opts out even though the gateway default is on.
+		{"default-on, control off", true, &resilience.Controls{BreakerEnabled: &fls}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := breakerRouter(t, breaker.Config{ConsecutiveErrors: 2})
+			r.SetBreakerDefaultEnabled(tc.defaultOn)
+			ctx := WithControls(context.Background(), tc.control)
+			if got := r.breakerEnabled(ctx); got != tc.wantActive {
+				t.Fatalf("breakerEnabled = %v, want %v", got, tc.wantActive)
+			}
+		})
 	}
 }
 
