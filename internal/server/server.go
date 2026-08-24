@@ -1040,10 +1040,15 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// Affinity is resolved AFTER the chain is on the context, because the
 	// usable predicate consults constraints — a warm cache on a denied vendor
 	// must never be offered in the first place.
-	r, _ = s.resolveAffinity(r, &req)
 	if ctxChanged {
 		r = r.WithContext(reqCtx)
 	}
+	// Resolve affinity AFTER r carries the finalized routing context (chain,
+	// constraints, controls). Previously this ran first and then the
+	// r.WithContext(reqCtx) above discarded affinity's decision whenever any
+	// resolution changed the context — which enabling a per-tenant control
+	// always does.
+	r, _ = s.resolveAffinity(r, &req)
 	// AIQG experiments (Phase D): resolve the variant claiming this request on
 	// the REQUESTED model + workflow (the cohort matches what the caller
 	// asked), then — for a running experiment — apply the variant's override
