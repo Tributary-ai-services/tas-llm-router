@@ -52,10 +52,10 @@ func TestEjectedProviderIsNotSelected(t *testing.T) {
 	}
 	r.refreshBreakerCache(ctx)
 
-	if r.isProviderHealthy("openai") {
+	if r.isProviderHealthy(context.Background(), "openai") {
 		t.Fatal("ejected provider still reported healthy — the breaker verdict never reached selection")
 	}
-	if !r.isProviderHealthy("anthropic") {
+	if !r.isProviderHealthy(context.Background(), "anthropic") {
 		t.Fatal("ejecting one provider must not affect another")
 	}
 }
@@ -71,7 +71,7 @@ func TestActiveProbeAndBreakerAreIndependent(t *testing.T) {
 	r.SetBreaker(breaker.New(breaker.NewMemoryStore(), breaker.Config{}))
 
 	// Breaker is perfectly happy; the probe is not. Still excluded.
-	if r.isProviderHealthy("openai") {
+	if r.isProviderHealthy(context.Background(), "openai") {
 		t.Fatal("probe-unhealthy provider was selected despite a closed breaker")
 	}
 }
@@ -166,7 +166,7 @@ func TestModelNotFoundDoesNotEjectTheProvider(t *testing.T) {
 	}
 	r.refreshBreakerCache(ctx)
 
-	if !r.isProviderHealthy("anthropic") {
+	if !r.isProviderHealthy(context.Background(), "anthropic") {
 		t.Fatal("a misconfigured pin ejected a healthy provider — client errors must never count")
 	}
 }
@@ -182,7 +182,7 @@ func TestNilBreakerLeavesRoutingUnchanged(t *testing.T) {
 
 	ctx := context.Background()
 	r.RecordOutcome(ctx, "openai", "gpt-4o-mini", breaker.ServerError) // must not panic
-	if !r.isProviderHealthy("openai") {
+	if !r.isProviderHealthy(context.Background(), "openai") {
 		t.Fatal("nil breaker excluded a healthy provider")
 	}
 	dec := &RoutingDecision{SelectedProvider: "openai"}
@@ -221,6 +221,62 @@ func TestBreakerPerTenantControlGate(t *testing.T) {
 				t.Fatalf("breakerEnabled = %v, want %v", got, tc.wantActive)
 			}
 		})
+	}
+}
+
+// Breaker isolation gives a tenant its OWN ejection keyspace: a provider
+// tripping under tenant A never affects an isolated tenant B, nor the shared
+// fleet view. (#161)
+func TestBreakerIsolationSeparatesTenants(t *testing.T) {
+	tru := true
+	r, _ := breakerRouter(t, breaker.Config{ConsecutiveErrors: 2})
+
+	isoCtl := &resilience.Controls{BreakerEnabled: &tru, BreakerIsolated: &tru}
+	ctxA := WithBreakerTenant(WithControls(context.Background(), isoCtl), "tenant-A")
+	ctxB := WithBreakerTenant(WithControls(context.Background(), isoCtl), "tenant-B")
+	ctxShared := WithControls(context.Background(), &resilience.Controls{BreakerEnabled: &tru})
+
+	// Tenant A trips openai — recorded into A's keyspace only.
+	for i := 0; i < 2; i++ {
+		r.RecordOutcome(ctxA, "openai", "", breaker.ServerError)
+	}
+
+	// Each isolated request reads its own verdict, computed once (as Route does).
+	ctxA = WithIsolatedEjected(ctxA, r.computeIsolatedEjected(ctxA))
+	ctxB = WithIsolatedEjected(ctxB, r.computeIsolatedEjected(ctxB))
+
+	if !r.isEjected(ctxA, "openai") {
+		t.Fatal("tenant A's own failures should eject openai for A")
+	}
+	if r.isEjected(ctxB, "openai") {
+		t.Fatal("A's failures must NOT eject openai for isolated tenant B")
+	}
+	// The shared fleet view never saw A's isolated failures (they keyed to
+	// tenant-A/openai, not openai).
+	r.refreshBreakerCache(ctxShared)
+	if r.isEjected(ctxShared, "openai") {
+		t.Fatal("isolated failures must not leak into the shared fleet view")
+	}
+}
+
+// The selection-time ejection check is gated on the request's effective
+// breaker: a force-off tenant is never filtered by another tenant's failures,
+// while a cooldown-on shared tenant still is. (#161)
+func TestEjectionOnlyFiltersBreakerOnRequests(t *testing.T) {
+	tru, fls := true, false
+	r, b := breakerRouter(t, breaker.Config{ConsecutiveErrors: 2})
+
+	// A shared provider genuinely trips.
+	for i := 0; i < 2; i++ {
+		b.Record(context.Background(), breaker.Target("openai", ""), breaker.ServerError)
+	}
+	r.refreshBreakerCache(context.Background())
+
+	if r.isEjected(WithControls(context.Background(), &resilience.Controls{BreakerEnabled: &fls}), "openai") {
+		t.Fatal("a force-off tenant must not see the shared ejection")
+	}
+	if !r.isEjected(WithControls(context.Background(), &resilience.Controls{BreakerEnabled: &tru}), "openai") {
+		t.Fatal("a cooldown-on shared tenant should see the shared ejection")
 	}
 }
 

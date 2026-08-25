@@ -58,7 +58,7 @@ func (s *Server) resolveAffinity(r *http.Request, req *types.ChatRequest) (*http
 		if !chain.AllowedTarget(provider) {
 			return false // compliance outranks economics, always
 		}
-		return s.router.ProviderHealthy(provider)
+		return s.router.ProviderHealthy(r.Context(), provider)
 	}
 
 	d := mgr.Resolve(r.Context(), tenantID, key, cachePrefixHash(req), time.Now(), usable)

@@ -92,7 +92,7 @@ func (r *Router) routeBySelection(ctx context.Context, req *types.ChatRequest, w
 		gated[name] = true
 	}
 	eligible := func(name string) bool {
-		return chain.AllowedTarget(name) && r.isProviderHealthy(name) && gated[name]
+		return chain.AllowedTarget(name) && r.isProviderHealthy(ctx, name) && gated[name]
 	}
 
 	switch sc.Selection.Strategy {

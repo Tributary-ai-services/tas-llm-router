@@ -78,3 +78,40 @@ func ControlsFrom(ctx context.Context) resilience.Controls {
 	v, _ := ctx.Value(controlsKey{}).(resilience.Controls)
 	return v
 }
+
+type breakerTenantKey struct{}
+
+// WithBreakerTenant carries the resolved tenant so the breaker can key its
+// state per tenant when isolation is on. Empty is a no-op — a request with no
+// tenant simply cannot isolate. The routing package cannot import middleware
+// (import cycle), so the server threads the tenant in explicitly, like the
+// controls above.
+func WithBreakerTenant(ctx context.Context, tenant string) context.Context {
+	if tenant == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, breakerTenantKey{}, tenant)
+}
+
+// BreakerTenantFrom returns the resolved tenant, or "" when none was set.
+func BreakerTenantFrom(ctx context.Context) string {
+	t, _ := ctx.Value(breakerTenantKey{}).(string)
+	return t
+}
+
+type isolatedEjectedKey struct{}
+
+// WithIsolatedEjected stashes the per-request ejection verdict for an
+// isolation-enabled tenant, computed once at the top of Route so the
+// per-candidate isProviderHealthy checks stay a map read rather than a store
+// round-trip each. Keyed by provider name. A no-op for the shared path, which
+// keeps using the fleet-wide background cache.
+func WithIsolatedEjected(ctx context.Context, ejected map[string]bool) context.Context {
+	return context.WithValue(ctx, isolatedEjectedKey{}, ejected)
+}
+
+// IsolatedEjectedFrom returns the per-request isolated ejection map, or nil.
+func IsolatedEjectedFrom(ctx context.Context) map[string]bool {
+	m, _ := ctx.Value(isolatedEjectedKey{}).(map[string]bool)
+	return m
+}

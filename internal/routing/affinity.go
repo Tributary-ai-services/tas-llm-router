@@ -60,7 +60,7 @@ func (r *Router) applyAffinity(ctx context.Context, decision *RoutingDecision, p
 		return decision, provider
 	}
 	alt, ok := r.providers[d.Target.Provider]
-	if !ok || !r.isProviderHealthy(d.Target.Provider) {
+	if !ok || !r.isProviderHealthy(ctx, d.Target.Provider) {
 		decision.Reasoning = append(decision.Reasoning,
 			"affinity to "+d.Target.Provider+" not honoured: unconfigured or unhealthy")
 		return decision, provider
