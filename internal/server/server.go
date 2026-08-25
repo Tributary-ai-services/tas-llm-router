@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -17,8 +18,10 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/Tributary-ai-services/Gatekeeper/pkg/scan"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
+	routermetrics "github.com/tributary-ai/llm-router-waf/internal/metrics"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
@@ -326,6 +329,23 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		router: router,
 		logger: logger,
 		config: config,
+	}
+
+	// llm_router_provider_health reads the router at scrape time rather than
+	// mirroring a gauge, so it cannot go stale. Registered once; a duplicate
+	// registration (a second NewServer in the same process, as tests do) is
+	// not fatal — the collector is already wired to the same source.
+	if err := routermetrics.RegisterProviderHealth(func() map[string]bool {
+		out := map[string]bool{}
+		for provider, health := range router.GetHealthStatus() {
+			out[provider] = health != nil && health.Status == "healthy"
+		}
+		return out
+	}); err != nil {
+		var dup prometheus.AlreadyRegisteredError
+		if !errors.As(err, &dup) {
+			return nil, fmt.Errorf("failed to register provider health metric: %w", err)
+		}
 	}
 
 	// Initialize security middleware if configured
@@ -823,10 +843,14 @@ func (s *Server) setupRoutes() *mux.Router {
 	// wrapped — they're internal-only and don't need TAS-* parsing or
 	// timing capture. Returns the handler verbatim when AIQG is disabled.
 	wrapAIQG := func(h http.HandlerFunc) http.Handler {
-		if s.aiqgMiddleware == nil {
-			return h
+		var inner http.Handler = h
+		if s.aiqgMiddleware != nil {
+			inner = s.aiqgMiddleware(h)
 		}
-		return s.aiqgMiddleware(h)
+		// Metrics sit outside the AIQG middleware on purpose: a request the
+		// gateway rejects (401 malformed/unknown token) is still traffic, and
+		// counting it is how an auth outage becomes visible.
+		return routermetrics.Middleware(inner)
 	}
 
 	// OpenAI compatible endpoints
@@ -868,8 +892,10 @@ func (s *Server) setupRoutes() *mux.Router {
 	// Health check endpoint (no /v1 prefix)
 	r.HandleFunc("/health", s.handleHealthCheck).Methods("GET")
 
-	// Metrics endpoint for Prometheus scraping (legacy hand-rolled).
-	r.HandleFunc("/metrics", s.handleMetrics).Methods("GET")
+	// Metrics endpoint for Prometheus scraping. Served from a real
+	// client_golang registry; the hand-rolled handler that used to back this
+	// derived its values from wall-clock time (see internal/metrics).
+	r.Handle("/metrics", promhttp.HandlerFor(routermetrics.Registry, promhttp.HandlerOpts{})).Methods("GET")
 
 	// AIQG metrics endpoint — separate registry served via promhttp.
 	// Scraped independently by Prometheus per shared-monitoring config.
@@ -1650,6 +1676,12 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 	// scores. No-ops outside AIQG mode.
 	if resp.Usage != nil {
 		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CacheCreationTokens, resp.Usage.CacheReadTokens)
+		// Same numbers the spend record uses, so the metric and the billing
+		// record cannot disagree.
+		routermetrics.ObserveTokens(metadata.Provider, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		if cost, ok := clear.DollarCost(metadata.Provider, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens); ok {
+			routermetrics.ObserveCost(metadata.Provider, resp.Model, cost)
+		}
 	}
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
@@ -1818,6 +1850,12 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	// TokenAccounting + Cost + Efficacy scores.
 	if resp.Usage != nil {
 		middleware.StampTokenUsage(r.Context(), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CacheCreationTokens, resp.Usage.CacheReadTokens)
+		// Same numbers the spend record uses, so the metric and the billing
+		// record cannot disagree.
+		routermetrics.ObserveTokens(metadata.Provider, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		if cost, ok := clear.DollarCost(metadata.Provider, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens); ok {
+			routermetrics.ObserveCost(metadata.Provider, resp.Model, cost)
+		}
 	}
 	if len(resp.Choices) > 0 {
 		middleware.StampFinishReason(r.Context(), resp.Choices[0].FinishReason)
@@ -2790,131 +2828,6 @@ func (rw *responseWriter) Flush() {
 	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
-}
-
-// handleMetrics serves Prometheus metrics endpoint
-func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-
-	// Basic metrics in Prometheus format
-	// This is a minimal implementation for demo purposes
-	// In production, this should use the prometheus/client_golang library
-
-	// Get provider health status
-	healthStatus := s.router.GetHealthStatus()
-
-	// Generate basic metrics
-	metrics := "# HELP llm_router_provider_health Provider health status (1=healthy, 0=unhealthy)\n"
-	metrics += "# TYPE llm_router_provider_health gauge\n"
-
-	for provider, health := range healthStatus {
-		status := 0
-		if health.Status == "healthy" {
-			status = 1
-		}
-		metrics += fmt.Sprintf("llm_router_provider_health{service=\"llm-router\",provider=\"%s\"} %d\n", provider, status)
-	}
-
-	// Active connections (mock data for now)
-	metrics += "\n# HELP llm_router_active_connections Current number of active connections\n"
-	metrics += "# TYPE llm_router_active_connections gauge\n"
-	metrics += "llm_router_active_connections{service=\"llm-router\"} 5\n"
-
-	// Request count (incremental mock data based on time)
-	now := time.Now().Unix()
-	baseRequests := now / 10 // Increments every 10 seconds
-
-	metrics += "\n# HELP llm_router_requests_total Total number of requests\n"
-	metrics += "# TYPE llm_router_requests_total counter\n"
-	metrics += fmt.Sprintf("llm_router_requests_total{service=\"llm-router\",provider=\"openai\",method=\"POST\",status_code=\"200\",client_ip=\"192.168.1.100\"} %d\n", 150+baseRequests*3)
-	metrics += fmt.Sprintf("llm_router_requests_total{service=\"llm-router\",provider=\"anthropic\",method=\"POST\",status_code=\"200\",client_ip=\"192.168.1.101\"} %d\n", 75+baseRequests*2)
-	metrics += fmt.Sprintf("llm_router_requests_total{service=\"llm-router\",provider=\"openai\",method=\"POST\",status_code=\"400\",client_ip=\"10.0.0.50\"} %d\n", 5+baseRequests/10)
-	metrics += fmt.Sprintf("llm_router_requests_total{service=\"llm-router\",provider=\"openai\",method=\"POST\",status_code=\"200\",client_ip=\"172.16.0.25\"} %d\n", 80+baseRequests*2)
-	metrics += fmt.Sprintf("llm_router_requests_total{service=\"llm-router\",provider=\"anthropic\",method=\"POST\",status_code=\"200\",client_ip=\"10.0.0.75\"} %d\n", 45+baseRequests)
-
-	// Token usage (incremental mock data based on time)
-	metrics += "\n# HELP llm_router_tokens_total Total number of tokens processed\n"
-	metrics += "# TYPE llm_router_tokens_total counter\n"
-	metrics += fmt.Sprintf("llm_router_tokens_total{service=\"llm-router\",provider=\"openai\",type=\"input\"} %d\n", 25000+baseRequests*500)
-	metrics += fmt.Sprintf("llm_router_tokens_total{service=\"llm-router\",provider=\"openai\",type=\"output\"} %d\n", 15000+baseRequests*300)
-	metrics += fmt.Sprintf("llm_router_tokens_total{service=\"llm-router\",provider=\"anthropic\",type=\"input\"} %d\n", 12000+baseRequests*250)
-	metrics += fmt.Sprintf("llm_router_tokens_total{service=\"llm-router\",provider=\"anthropic\",type=\"output\"} %d\n", 8000+baseRequests*150)
-
-	// Cost tracking (incremental mock data based on time)
-	metrics += "\n# HELP llm_router_cost_total Total cost in USD\n"
-	metrics += "# TYPE llm_router_cost_total counter\n"
-	metrics += fmt.Sprintf("llm_router_cost_total{service=\"llm-router\",provider=\"openai\",model=\"gpt-4o\"} %.2f\n", 12.50+float64(baseRequests)*0.05)
-	metrics += fmt.Sprintf("llm_router_cost_total{service=\"llm-router\",provider=\"anthropic\",model=\"claude-3-sonnet\"} %.2f\n", 8.75+float64(baseRequests)*0.03)
-
-	// Error tracking (mock data)
-	metrics += "\n# HELP llm_router_errors_total Total number of errors\n"
-	metrics += "# TYPE llm_router_errors_total counter\n"
-	metrics += "llm_router_errors_total{service=\"llm-router\",provider=\"openai\",error_type=\"timeout\"} 2\n"
-	metrics += "llm_router_errors_total{service=\"llm-router\",provider=\"anthropic\",error_type=\"rate_limit\"} 1\n"
-
-	// Rate limiting (mock data)
-	metrics += "\n# HELP llm_router_rate_limit_usage Rate limit usage as fraction (0-1)\n"
-	metrics += "# TYPE llm_router_rate_limit_usage gauge\n"
-	metrics += "llm_router_rate_limit_usage{service=\"llm-router\",provider=\"openai\"} 0.65\n"
-	metrics += "llm_router_rate_limit_usage{service=\"llm-router\",provider=\"anthropic\"} 0.32\n"
-
-	// Security metrics (incremental mock data)
-	metrics += "\n# HELP llm_router_auth_attempts_total Total authentication attempts\n"
-	metrics += "# TYPE llm_router_auth_attempts_total counter\n"
-	metrics += fmt.Sprintf("llm_router_auth_attempts_total{service=\"llm-router\",result=\"success\"} %d\n", 220+baseRequests*8)
-	metrics += fmt.Sprintf("llm_router_auth_attempts_total{service=\"llm-router\",result=\"failure\"} %d\n", 8+baseRequests/15)
-
-	// Security score (mock data)
-	metrics += "\n# HELP llm_router_security_score Security score (0-100)\n"
-	metrics += "# TYPE llm_router_security_score gauge\n"
-	metrics += "llm_router_security_score{service=\"llm-router\"} 85\n"
-
-	// Threat level (mock data)
-	metrics += "\n# HELP llm_router_threat_level Current threat level (0-3)\n"
-	metrics += "# TYPE llm_router_threat_level gauge\n"
-	metrics += "llm_router_threat_level{service=\"llm-router\"} 0\n"
-
-	// Rate limiting hits (incremental mock data)
-	metrics += "\n# HELP llm_router_rate_limit_hits_total Total rate limit hits\n"
-	metrics += "# TYPE llm_router_rate_limit_hits_total counter\n"
-	metrics += fmt.Sprintf("llm_router_rate_limit_hits_total{service=\"llm-router\",tier=\"premium\"} %d\n", 10+baseRequests/20)
-	metrics += fmt.Sprintf("llm_router_rate_limit_hits_total{service=\"llm-router\",tier=\"standard\"} %d\n", 25+baseRequests/10)
-
-	// Blocked requests (incremental mock data)
-	metrics += "\n# HELP llm_router_blocked_requests_total Total blocked requests\n"
-	metrics += "# TYPE llm_router_blocked_requests_total counter\n"
-	metrics += fmt.Sprintf("llm_router_blocked_requests_total{service=\"llm-router\",reason=\"rate_limit\"} %d\n", 5+baseRequests/30)
-	metrics += fmt.Sprintf("llm_router_blocked_requests_total{service=\"llm-router\",reason=\"auth_failure\"} %d\n", 3+baseRequests/50)
-
-	// Security events (incremental mock data)
-	metrics += "\n# HELP llm_router_security_events_total Total security events\n"
-	metrics += "# TYPE llm_router_security_events_total counter\n"
-	metrics += fmt.Sprintf("llm_router_security_events_total{service=\"llm-router\",event_type=\"suspicious_activity\",severity=\"medium\"} %d\n", 2+baseRequests/100)
-	metrics += fmt.Sprintf("llm_router_security_events_total{service=\"llm-router\",event_type=\"malicious_input\",severity=\"high\"} %d\n", 1+baseRequests/200)
-
-	// Validation failures (incremental mock data)
-	metrics += "\n# HELP llm_router_validation_failures_total Total validation failures\n"
-	metrics += "# TYPE llm_router_validation_failures_total counter\n"
-	metrics += fmt.Sprintf("llm_router_validation_failures_total{service=\"llm-router\",type=\"schema\"} %d\n", 8+baseRequests/25)
-	metrics += fmt.Sprintf("llm_router_validation_failures_total{service=\"llm-router\",type=\"content\"} %d\n", 12+baseRequests/15)
-
-	// Input sanitization (incremental mock data)
-	metrics += "\n# HELP llm_router_input_sanitized_total Total inputs sanitized\n"
-	metrics += "# TYPE llm_router_input_sanitized_total counter\n"
-	metrics += fmt.Sprintf("llm_router_input_sanitized_total{service=\"llm-router\"} %d\n", 45+baseRequests*2)
-
-	// Audit events (incremental mock data)
-	metrics += "\n# HELP llm_router_audit_events_total Total audit events\n"
-	metrics += "# TYPE llm_router_audit_events_total counter\n"
-	metrics += fmt.Sprintf("llm_router_audit_events_total{service=\"llm-router\",event_type=\"api_key_usage\",severity=\"low\",user_id=\"user123\"} %d\n", 150+baseRequests*5)
-	metrics += fmt.Sprintf("llm_router_audit_events_total{service=\"llm-router\",event_type=\"config_change\",severity=\"medium\",user_id=\"admin\"} %d\n", 3+baseRequests/50)
-
-	// Active API keys (mock data)
-	metrics += "\n# HELP llm_router_active_api_keys Number of active API keys\n"
-	metrics += "# TYPE llm_router_active_api_keys gauge\n"
-	metrics += "llm_router_active_api_keys{service=\"llm-router\"} 12\n"
-
-	fmt.Fprint(w, metrics)
 }
 
 // toMiddlewareExclusions converts routing's gate exclusions to the middleware
