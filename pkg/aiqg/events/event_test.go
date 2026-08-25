@@ -450,6 +450,45 @@ func TestLogEmitter_PromotesNestedFields(t *testing.T) {
 	requireField(t, resp, "median_inter_token_ms", int64(35))
 }
 
+// Affinity outcome fields promote to the response log line when affinity
+// resolved, so operators can filter which conversations held to a warm vendor
+// cache and why — and stay absent (not a false/empty cluster on every line)
+// when it did not. Regression for the LogEmitter omitting them entirely.
+func TestLogEmitter_PromotesAffinity(t *testing.T) {
+	emit := func(resp ResponseEvent) map[string]any {
+		cap := &fieldCapture{}
+		l := logrus.New()
+		l.SetOutput(testWriter{t})
+		l.AddHook(cap)
+		e := &LogEmitter{Logger: l}
+		resp.ResponseEventID, resp.RequestEventID = "resp-1", "req-1"
+		reqEnv := RequestEnvelope{Type: TypeRequest, ID: "req-1", Data: RequestEvent{RequestEventID: "req-1"}}
+		respEnv := ResponseEnvelope{Type: TypeResponse, ID: "resp-1", Data: resp}
+		if err := e.Emit(context.Background(), reqEnv, respEnv); err != nil {
+			t.Fatalf("Emit: %v", err)
+		}
+		if len(cap.entries) != 2 {
+			t.Fatalf("got %d entries, want 2", len(cap.entries))
+		}
+		return cap.entries[1]
+	}
+
+	// Resolved: all three promoted.
+	got := emit(ResponseEvent{Status: StatusSuccess, HTTPStatus: 200,
+		AffinityHeld: true, AffinityEpoch: "abc:3", AffinityReason: "affinity held on anthropic"})
+	requireField(t, got, "affinity_held", true)
+	requireField(t, got, "affinity_epoch", "abc:3")
+	requireField(t, got, "affinity_reason", "affinity held on anthropic")
+
+	// Not resolved: absent, so it doesn't clutter the ~all traffic without affinity.
+	got = emit(ResponseEvent{Status: StatusSuccess, HTTPStatus: 200})
+	for _, k := range []string{"affinity_held", "affinity_epoch", "affinity_reason"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("%s promoted when affinity did not resolve", k)
+		}
+	}
+}
+
 // ptrI64 returns a pointer to an int64 literal. Used only by tests
 // that need to populate Snapshot fields without spinning up a full
 // instrumentation.Collector run.
