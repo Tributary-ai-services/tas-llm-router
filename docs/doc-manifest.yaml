@@ -1,0 +1,33 @@
+# Maps code paths to the documents that describe them.
+# Read by .claude/skills/doc-factory/scripts/detect_stale_docs.py to decide which
+# documents a change has made stale. A document is regenerated when a watched
+# path changes after the document's verified_against commit.
+#
+# Keep `watches` narrow. Watching "internal/**" from an ops document means every
+# refactor triggers a regeneration that changes nothing an operator cares about.
+
+documents:
+  - path: docs/ops/llm-router.md
+    doc_type: ops
+    owner: "@jscharber"
+    watches:
+      # Operator-visible surface only: deployment shape, config, health, and the
+      # error strings that reach the failure-modes table.
+      - "k8s/**"
+      - "configs/**"
+      - "docker/**"
+      - "internal/server/**"
+      - "internal/providers/**"
+
+  - path: docs/dev/llm-router-api.md
+    doc_type: dev
+    owner: "@jscharber"
+    watches:
+      # The wire contract and everything that shapes it: surfaces, auth
+      # middleware, provider adapters, failure classification, and the spec.
+      - "internal/server/**"
+      - "internal/middleware/**"
+      - "internal/providers/**"
+      - "internal/routing/**"
+      - "pkg/aiqg/breaker/**"
+      - "docs/openapi.yaml"
