@@ -1,8 +1,31 @@
-# AIQG — Experiments Runner (Design)
+# AIQG — Experiments Runner
 
-Status: **Design / for review** — NOT implemented. Gates a change to the
-production gateway's routing of live customer LLM traffic; do not build
-without sign-off on §7 (Guardrails) and §13 (Risks).
+Status: **BUILT** — status corrected 2026-08-25. This document was still
+marked *"Design / for review — NOT implemented"* long after the runner
+shipped, which understated a live capability. Verified against the repos:
+
+| Design section | Where it lives | State |
+|---|---|---|
+| Experiment + variant model (§3–§5) | `aiqg-dashboard-be` migration `011_experiments.sql` — `experiment`, `experiment_variant` (JSONB `override`), `experiment_transition` | ✅ shipped |
+| CRUD + lifecycle API | `internal/handlers/experiments.go` · `/api/v1/experiments`, `/:id`, `/:id/results`, `/:id/transition`, `/:id/transitions` | ✅ shipped |
+| Verdict mechanics (§6.3) | `internal/handlers/verdict.go` — non-inferiority test, statuses `insufficient`/`promote`/`hold`/`reject`, quality margin ε=0.05, objective win ≥5%, **`minVerdictSamples = 30` per arm** | ✅ shipped |
+| Significance | `internal/handlers/significance.go` — two-sample z-test, "clear" = p < 0.05 | ✅ shipped |
+| Guardrails + auto-stop (§7) | `internal/experiments/autostop.go` — periodic evaluator trips a running experiment to `paused` (all traffic → control on the gateway's next cache refresh) when a variant is materially worse on error rate, latency or cost | ✅ shipped |
+| Per-variant quality + savings aggregation | `aiqg-dashboard-be` #76 | ✅ shipped |
+| Cohort assignment + stamping | `tas-llm-router/internal/middleware/aiqg_routing.go` — `experimentID` / `experimentVariant` claimed at request time and stamped on the event | ✅ shipped |
+| Dashboard | `aiqg-ui/src/pages/ExperimentsPage.tsx` + nav entry | ✅ shipped |
+
+**Read the sections below as the design rationale for shipped behaviour**, not
+as a proposal. Where an implementation detail differs from the text, the code
+is authoritative — the constants above were read from it.
+
+**Why this matters commercially:** `minVerdictSamples = 30` per arm is a far
+lower bar than the CLEAR quality-gate n-floor of 200. A cheaper-model
+substitution can therefore be proven safe on a customer's own traffic inside a
+pilot, without waiting for the scored-quality table to fill. That is the
+mechanism behind routing on *measured* rather than *predicted* quality — see
+`tas-aiqg/AIQG_ROUTING_COMPETITIVE.md` §5.1.
+
 Owner: AIQG · Related: `AIQG-AGENT-FLOW-ATTRIBUTION.md` (identity ladder),
 `aether-shared/data-models/aiqg/route-rule.md`, `aiqg-ui/docs/PERSONA-DASHBOARD-IA.md` §6.
 
