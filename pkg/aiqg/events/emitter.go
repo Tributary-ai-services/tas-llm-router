@@ -145,6 +145,17 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		"model":   resp.Data.Model,
 		"payload": string(respJSON),
 	}
+	// Affinity outcome (routing-decision.md §5.5) — promote so operators can see,
+	// directly off the response stream, which conversations held to a warm vendor
+	// cache and why. The fields live on the ResponseEvent (builder.go) and in the
+	// payload, but were not promoted, so LogQL could not filter on them. Present
+	// only when affinity actually resolved for the request (a per-tenant control
+	// or the gateway default enabled it); omitted for the traffic where it didn't.
+	if resp.Data.AffinityReason != "" || resp.Data.AffinityEpoch != "" {
+		respFields["affinity_held"] = resp.Data.AffinityHeld
+		respFields["affinity_epoch"] = resp.Data.AffinityEpoch
+		respFields["affinity_reason"] = resp.Data.AffinityReason
+	}
 	// Experiment attribution (Phase D) — promote so dashboards/Loki can slice
 	// per-variant directly; empty (omitted) for traffic no experiment claimed.
 	if resp.Data.ExperimentID != "" {
