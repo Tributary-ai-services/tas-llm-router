@@ -3,12 +3,13 @@
 // tokens — the rest of the AIQG-specific Go code.
 //
 // Why a dedicated registry instead of prometheus.DefaultRegisterer:
-// the existing internal/server.handleMetrics is hand-rolled and writes
-// plain-text metrics directly; mixing client_golang's automatic
-// gathering with that hand-rolled output is awkward. Instead we expose
-// these on a separate /aiqg/metrics endpoint via promhttp, scraped
-// independently in the Prometheus config. Migration of the legacy
-// handler to client_golang is deferred to its own slice.
+// an explicit registry keeps the surface enumerable and lets tests call
+// Registry.Gather() to assert on samples. Exposed on /aiqg/metrics via
+// promhttp, scraped independently in the Prometheus config.
+//
+// The legacy hand-rolled internal/server.handleMetrics this once had to
+// coexist with is gone — see internal/metrics, which now serves /metrics
+// from a real client_golang registry.
 //
 // Naming follows the Prometheus best-practice guide:
 //   - aiqg_<subsystem>_<noun>_<unit_or_total>

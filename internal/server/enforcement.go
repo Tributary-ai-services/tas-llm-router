@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	routermetrics "github.com/tributary-ai/llm-router-waf/internal/metrics"
 	"net/http"
 	"strings"
 
@@ -123,6 +124,7 @@ func (s *Server) applyEnforcement(w http.ResponseWriter, r *http.Request, findin
 		return false
 	}
 
+	routermetrics.BlockedRequestsTotal.WithLabelValues(direction).Inc()
 	s.logger.WithFields(logrus.Fields{
 		"patterns":  strings.Join(d.Patterns, ","),
 		"direction": direction,
