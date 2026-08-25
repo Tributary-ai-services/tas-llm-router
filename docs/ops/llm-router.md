@@ -218,14 +218,25 @@ and scrapes all four pods individually. Seventeen series are exported under the
 `llm_router_rate_limit_hits_total`, and `llm_router_cost_total`. Query them
 through Prometheus at `prometheus-shared.tas-shared:9090` or Grafana.
 >
-> [!WARNING] **The `llm_router_*` family serves placeholder values, not live
-> telemetry.** On 2026-08-24 these counters did not move across repeated scrapes,
-> `llm_router_auth_attempts_total` read 1.43e9, and the real `invalid x-api-key`
-> failures visible in Loki did not appear in `llm_router_errors_total` at all.
-> Both scrape jobs report healthy, so monitoring looks green while carrying
-> meaningless data — do not diagnose from these numbers, and do not build alerts
-> on them (`rate()` over a static counter is 0 forever). The `aiqg_*` family on
-> `/aiqg/metrics` is live and is what the new alerts use.
+> [!WARNING] **The `llm_router_*` family is synthetic, not telemetry.** The
+> handler at `internal/server/server.go:2796` builds the response by string
+> concatenation and labels its own output "mock data … for demo purposes". Only
+> **one** series is real: `llm_router_provider_health`, derived from the router's
+> health status. Everything else — requests, tokens, cost, auth attempts, rate
+> limits, blocked requests — is computed from wall-clock time as
+> `time.Now().Unix() / 10`, and errors, security score, and threat level are
+> hardcoded constants.
+>
+> This is worse than a stuck exporter. Because the values are a function of the
+> clock, they rise smoothly forever: `rate()` returns a plausible constant
+> (~0.8 requests/sec in total), so a dashboard shows steady traffic and a
+> "traffic has stopped" alert never fires — on a service receiving no traffic at
+> all. Confirmed on 2026-08-25 by predicting a counter from the formula and
+> matching the served value exactly. The real `invalid x-api-key` failures
+> visible in Loki appear nowhere in `llm_router_errors_total`.
+>
+> Do not diagnose from these numbers and do not alert on them. The `aiqg_*`
+> family on `/aiqg/metrics` is genuine and is what the availability alerts use.
 
 ## Dependency failure effects
 
