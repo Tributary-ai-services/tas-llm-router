@@ -999,6 +999,9 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// package and cannot import the middleware — can read them. Nil is a no-op.
 	if ctrl := middleware.ResolvedControls(reqCtx); ctrl != nil {
 		reqCtx = routing.WithControls(reqCtx, ctrl)
+		// Thread the tenant so the breaker can key its state per tenant when
+		// isolation is on; a no-op for the shared default.
+		reqCtx = routing.WithBreakerTenant(reqCtx, middleware.ResolvedTenantFromContext(reqCtx))
 		ctxChanged = true
 	}
 	// The failover chain and the tenant's constraints. Attached even when only

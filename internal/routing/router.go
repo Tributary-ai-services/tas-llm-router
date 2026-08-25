@@ -146,6 +146,15 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 		r.lastHealthCheck = time.Now()
 	}
 
+	// Under breaker isolation, read this tenant's ejected providers from the
+	// store once, up front, and carry the verdict on the context so every
+	// per-candidate isProviderHealthy check downstream is a map read rather than
+	// a store round-trip. No-op (nil) for the shared path and when the breaker
+	// is off, which is the ~all-traffic case.
+	if ej := r.computeIsolatedEjected(ctx); ej != nil {
+		ctx = WithIsolatedEjected(ctx, ej)
+	}
+
 	// Determine routing strategy
 	strategy := r.determineStrategy(req)
 
@@ -253,7 +262,7 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 		// every in-flight request retries at once and the retries become the
 		// load that keeps it down.
 		if attempt > 1 && r.breakerEnabled(ctx) {
-			if !r.breakerFor(ctx).AllowRetry(ctx, breaker.Target(decision.SelectedProvider, req.Model)) {
+			if !r.breakerFor(ctx).AllowRetry(ctx, r.breakerKeyPrefix(ctx)+breaker.Target(decision.SelectedProvider, req.Model)) {
 				lastError = fmt.Errorf("retry budget exhausted for provider %s", decision.SelectedProvider)
 				r.logger.WithField("provider", decision.SelectedProvider).
 					Warn("Retry suppressed: budget exhausted")
@@ -262,7 +271,7 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 		}
 
 		// Check provider health before retry
-		if !r.isProviderHealthy(decision.SelectedProvider) {
+		if !r.isProviderHealthy(ctx, decision.SelectedProvider) {
 			lastError = fmt.Errorf("provider %s is not healthy", decision.SelectedProvider)
 			r.logger.WithField("provider", decision.SelectedProvider).Warn("Provider unhealthy during retry")
 			continue
@@ -319,7 +328,7 @@ func (r *Router) routeWithFallback(ctx context.Context, req *types.ChatRequest, 
 		}
 
 		// Check health
-		if !r.isProviderHealthy(providerName) {
+		if !r.isProviderHealthy(ctx, providerName) {
 			r.logger.WithField("provider", providerName).Debug("Skipping unhealthy fallback provider")
 			metadata.FailedProviders = append(metadata.FailedProviders, providerName)
 			continue
@@ -500,7 +509,7 @@ func (r *Router) routeToSpecificProvider(ctx context.Context, req *types.ChatReq
 	provider := r.providers[providerName]
 
 	// Check if provider is healthy
-	if !r.isProviderHealthy(providerName) {
+	if !r.isProviderHealthy(ctx, providerName) {
 		return nil, nil, fmt.Errorf("provider %s is not healthy", providerName)
 	}
 
@@ -517,7 +526,7 @@ func (r *Router) routeToSpecificProvider(ctx context.Context, req *types.ChatReq
 		EstimatedCost:        costEst.TotalCost,
 		EstimatedLatency:     r.estimateLatency(providerName),
 		FeatureCompatibility: r.checkFeatureCompatibility(provider, req),
-		FallbackChain:        r.buildFallbackChain(providerName, req),
+		FallbackChain:        r.buildFallbackChain(ctx, providerName, req),
 		RoutingContext:       r.buildRoutingContext("specific", req, []string{providerName}),
 	}
 
@@ -526,7 +535,7 @@ func (r *Router) routeToSpecificProvider(ctx context.Context, req *types.ChatReq
 
 // routeByCost routes to the most cost-effective provider
 func (r *Router) routeByCost(ctx context.Context, req *types.ChatRequest) (*RoutingDecision, providers.LLMProvider, error) {
-	candidates := r.getHealthyProviders()
+	candidates := r.getHealthyProviders(ctx)
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no healthy providers available")
 	}
@@ -599,7 +608,7 @@ func (r *Router) routeByCost(ctx context.Context, req *types.ChatRequest) (*Rout
 		EstimatedCost:        selected.cost,
 		EstimatedLatency:     r.estimateLatency(selected.name),
 		FeatureCompatibility: r.checkFeatureCompatibility(selected.provider, req),
-		FallbackChain:        r.buildFallbackChain(selected.name, req),
+		FallbackChain:        r.buildFallbackChain(ctx, selected.name, req),
 		RoutingContext:       r.buildRoutingContextWithCosts("cost_optimized", req, candidates, costComparison),
 	}
 
@@ -608,7 +617,7 @@ func (r *Router) routeByCost(ctx context.Context, req *types.ChatRequest) (*Rout
 
 // routeByPerformance routes to the fastest provider
 func (r *Router) routeByPerformance(ctx context.Context, req *types.ChatRequest) (*RoutingDecision, providers.LLMProvider, error) {
-	candidates := r.getHealthyProviders()
+	candidates := r.getHealthyProviders(ctx)
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no healthy providers available")
 	}
@@ -650,7 +659,7 @@ func (r *Router) routeByPerformance(ctx context.Context, req *types.ChatRequest)
 		EstimatedCost:        costEst.TotalCost,
 		EstimatedLatency:     r.estimateLatency(selected),
 		FeatureCompatibility: r.checkFeatureCompatibility(provider, req),
-		FallbackChain:        r.buildFallbackChain(selected, req),
+		FallbackChain:        r.buildFallbackChain(ctx, selected, req),
 		RoutingContext:       r.buildRoutingContextWithPerformance("performance", req, candidates, performanceComparison),
 	}
 
@@ -659,7 +668,7 @@ func (r *Router) routeByPerformance(ctx context.Context, req *types.ChatRequest)
 
 // routeRoundRobin routes using round-robin strategy
 func (r *Router) routeRoundRobin(ctx context.Context, req *types.ChatRequest) (*RoutingDecision, providers.LLMProvider, error) {
-	candidates := r.getHealthyProviders()
+	candidates := r.getHealthyProviders(ctx)
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no healthy providers available")
 	}
@@ -689,7 +698,7 @@ func (r *Router) routeRoundRobin(ctx context.Context, req *types.ChatRequest) (*
 		EstimatedCost:        costEst.TotalCost,
 		EstimatedLatency:     r.estimateLatency(selected),
 		FeatureCompatibility: r.checkFeatureCompatibility(provider, req),
-		FallbackChain:        r.buildFallbackChain(selected, req),
+		FallbackChain:        r.buildFallbackChain(ctx, selected, req),
 		RoutingContext:       r.buildRoutingContext("round_robin", req, candidates),
 	}
 
@@ -697,10 +706,10 @@ func (r *Router) routeRoundRobin(ctx context.Context, req *types.ChatRequest) (*
 }
 
 // getHealthyProviders returns a list of healthy provider names
-func (r *Router) getHealthyProviders() []string {
+func (r *Router) getHealthyProviders(ctx context.Context) []string {
 	var healthy []string
 	for name := range r.providers {
-		if r.isProviderHealthy(name) {
+		if r.isProviderHealthy(ctx, name) {
 			healthy = append(healthy, name)
 		}
 	}
@@ -714,8 +723,8 @@ func (r *Router) getHealthyProviders() []string {
 // A provider ejected by the breaker is excluded here so it is never SELECTED,
 // which is different from being admitted — see admit(), which owns the
 // half-open probe and is called once against the final choice.
-func (r *Router) isProviderHealthy(name string) bool {
-	if r.isEjected(name) {
+func (r *Router) isProviderHealthy(ctx context.Context, name string) bool {
+	if r.isEjected(ctx, name) {
 		return false
 	}
 	r.healthMu.RLock()
@@ -732,11 +741,26 @@ func (r *Router) isProviderHealthy(name string) bool {
 // ProviderHealthy is the exported form of the router's health verdict, for
 // callers outside this package that must respect health before proposing a
 // provider — notably affinity, which must never offer an ejected target.
-func (r *Router) ProviderHealthy(name string) bool { return r.isProviderHealthy(name) }
+func (r *Router) ProviderHealthy(ctx context.Context, name string) bool {
+	return r.isProviderHealthy(ctx, name)
+}
 
-// isEjected reports the cached breaker verdict for a provider-level target.
-// Reads the cache rather than the store: this runs per candidate per request.
-func (r *Router) isEjected(name string) bool {
+// isEjected reports the breaker verdict for a provider on THIS request.
+//
+// Three cases, in order:
+//   - the request's effective breaker is off → not filtered at all. This is
+//     what keeps a cooldown-off (or force-off) tenant unaffected by another
+//     tenant's failures, and why nothing changes when no tenant runs cooldown.
+//   - isolation on → read the tenant's own verdict, computed once at the top of
+//     Route (a map read, not a per-candidate store round-trip).
+//   - shared (default) → read the fleet-wide background cache, as before.
+func (r *Router) isEjected(ctx context.Context, name string) bool {
+	if !r.breakerEnabled(ctx) {
+		return false
+	}
+	if r.breakerIsolated(ctx) {
+		return IsolatedEjectedFrom(ctx)[name]
+	}
 	r.ejectedMu.RLock()
 	defer r.ejectedMu.RUnlock()
 	return r.ejected[breaker.Target(name, "")] == breaker.Open
@@ -758,6 +782,41 @@ func (r *Router) SetBreakerDefaultEnabled(enabled bool) { r.breakerDefaultEnable
 func (r *Router) breakerEnabled(ctx context.Context) bool {
 	return r.breaker != nil && r.breaker.Enabled() &&
 		ControlsFrom(ctx).BreakerEnabledOr(r.breakerDefaultEnabled)
+}
+
+// breakerIsolated reports whether THIS request keys the breaker per tenant.
+// Isolation defaults off (shared, fleet-wide) — there is no env default to fold
+// over, it is purely a per-tenant opt-in — and needs a resolved tenant to key on.
+func (r *Router) breakerIsolated(ctx context.Context) bool {
+	return ControlsFrom(ctx).BreakerIsolatedOr(false) && BreakerTenantFrom(ctx) != ""
+}
+
+// breakerKeyPrefix namespaces the breaker's store keys for THIS request:
+// "<tenant>/" under isolation, "" (shared) otherwise. The empty prefix keeps
+// the default keyspace byte-for-byte what it was before isolation existed.
+func (r *Router) breakerKeyPrefix(ctx context.Context) string {
+	if r.breakerIsolated(ctx) {
+		return BreakerTenantFrom(ctx) + "/"
+	}
+	return ""
+}
+
+// computeIsolatedEjected reads the tenant's ejected providers from the store
+// once per request, so the per-candidate isProviderHealthy checks stay map
+// reads. Returns nil for the shared path (which uses the fleet-wide cache) or
+// when the breaker is off. Bounded by the provider count (a handful).
+func (r *Router) computeIsolatedEjected(ctx context.Context) map[string]bool {
+	if !r.breakerEnabled(ctx) || !r.breakerIsolated(ctx) {
+		return nil
+	}
+	prefix := r.breakerKeyPrefix(ctx)
+	ejected := make(map[string]bool, len(r.providerNames))
+	for _, name := range r.providerNames {
+		if st, err := r.breaker.Status(ctx, prefix+breaker.Target(name, "")); err == nil && st.State == breaker.Open {
+			ejected[name] = true
+		}
+	}
+	return ejected
 }
 
 // Breaker returns the attached breaker, or nil.
@@ -795,10 +854,11 @@ func (r *Router) RecordOutcome(ctx context.Context, provider, model string, outc
 	if !r.breakerEnabled(ctx) {
 		return
 	}
+	prefix := r.breakerKeyPrefix(ctx)
 	br := r.breakerFor(ctx)
-	br.Record(ctx, breaker.Target(provider, ""), outcome)
+	br.Record(ctx, prefix+breaker.Target(provider, ""), outcome)
 	if model != "" {
-		br.Record(ctx, breaker.Target(provider, model), outcome)
+		br.Record(ctx, prefix+breaker.Target(provider, model), outcome)
 	}
 }
 
@@ -901,8 +961,8 @@ func (r *Router) checkFeatureCompatibility(provider providers.LLMProvider, req *
 }
 
 // buildFallbackChain creates a fallback chain for the request
-func (r *Router) buildFallbackChain(primary string, req *types.ChatRequest) []string {
-	candidates := r.getHealthyProviders()
+func (r *Router) buildFallbackChain(ctx context.Context, primary string, req *types.ChatRequest) []string {
+	candidates := r.getHealthyProviders(ctx)
 	var fallbacks []string
 
 	for _, name := range candidates {
@@ -1085,7 +1145,7 @@ func (r *Router) routeWithPin(ctx context.Context, req *types.ChatRequest, strat
 	if !ok {
 		return r.escapePin(ctx, req, strategy, chain, "pinned provider "+pin+" is not configured")
 	}
-	if !r.isProviderHealthy(pin) {
+	if !r.isProviderHealthy(ctx, pin) {
 		return r.escapePin(ctx, req, strategy, chain, "pinned provider "+pin+" unhealthy")
 	}
 
@@ -1117,7 +1177,7 @@ func (r *Router) admitOrReselect(ctx context.Context, req *types.ChatRequest, de
 	// A matched route rule may tighten or loosen the thresholds for THIS
 	// request. The counters stay shared — see Breaker.Override.
 	br := r.breakerFor(ctx)
-	target := breaker.Target(decision.SelectedProvider, req.Model)
+	target := r.breakerKeyPrefix(ctx) + breaker.Target(decision.SelectedProvider, req.Model)
 	ok, state := br.Admit(ctx, target)
 	if ok {
 		if state == breaker.HalfOpen {
@@ -1129,14 +1189,14 @@ func (r *Router) admitOrReselect(ctx context.Context, req *types.ChatRequest, de
 
 	// Denied. Look for any other healthy provider.
 	for _, name := range r.providerNames {
-		if name == decision.SelectedProvider || !r.isProviderHealthy(name) {
+		if name == decision.SelectedProvider || !r.isProviderHealthy(ctx, name) {
 			continue
 		}
 		alt, exists := r.providers[name]
 		if !exists {
 			continue
 		}
-		if admitted, _ := br.Admit(ctx, breaker.Target(name, req.Model)); !admitted {
+		if admitted, _ := br.Admit(ctx, r.breakerKeyPrefix(ctx)+breaker.Target(name, req.Model)); !admitted {
 			continue
 		}
 		r.logger.WithFields(logrus.Fields{
@@ -1200,7 +1260,7 @@ func (r *Router) constrainedStrategy(ctx context.Context, req *types.ChatRequest
 	}
 	denied := dec.SelectedProvider
 	for _, name := range r.providerNames {
-		if name == denied || !chain.AllowedTarget(name) || !r.isProviderHealthy(name) {
+		if name == denied || !chain.AllowedTarget(name) || !r.isProviderHealthy(ctx, name) {
 			continue
 		}
 		if alt, ok := r.providers[name]; ok {
