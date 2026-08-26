@@ -72,14 +72,21 @@ flowchart LR
   lr --> oai[OpenAI API]
   aiqg --> anth
   aiqg --> oai
-  lr -.telemetry.-> kafka[(kafka-shared)]
-  aiqg -.telemetry.-> kafka
-  aiqg -.policy.-> dash[aiqg-dashboard-be]
-  lr -.cache.-> redis[(redis-shared)]
-  lr -.spend.-> pg[(postgres-shared)]
-  keycloak[Keycloak] -.tenant identity.-> lr
-  keycloak -.tenant identity.-> aiqg
+  lr ==required at startup==> kafka[(kafka-shared)]
+  aiqg ==required at startup==> kafka
+  aiqg ==auth + policy, every request==> dash[aiqg-dashboard-be]
+  lr -.cache, lazy.-> redis[(redis-shared)]
+  lr -.configured, unused at runtime.-> pg[(postgres-shared)]
+  keycloak[Keycloak] --> dash
 ```
+
+**Edge weight is the point of this diagram.** The thick edges are hard
+dependencies whose loss stops the service: without Kafka the process will not
+start, and without `aiqg-dashboard-be` every authenticated request fails closed.
+The dotted edges are tolerated at runtime by an already-running pod. Keycloak
+connects to the dashboard, not to the router — the router holds no Keycloak
+configuration at all. All of this was measured on 2026-08-26; see "Dependency
+failure effects".
 
 `llm-router` serves internal TAS traffic. `llm-router-aiqg` serves external AIQG
 gateway customers. They are separate deployments, separate services, separate
@@ -106,7 +113,14 @@ the models themselves, the prompts (callers build those), tenant identity
 The sentence worth keeping: **both deployments are stateless request proxies —
 losing a pod loses the requests in flight through it and nothing else.** Nothing
 durable lives in the pod; there is no queue to drain and no local state to
-recover, so restarting is cheap and is rarely the wrong move.
+recover, so a restart cannot corrupt anything.
+
+The one caveat to that, and it is the exception worth carrying alongside the
+rule: a restart is cheap only when the dependencies a pod needs *to start* are
+up. Kafka must be reachable or the process exits, and the init containers block
+until Redis and Postgres answer. During an outage of any of those three, a
+running pod may be serving fine while a replacement could not start at all — so
+restarting is the one thing not to reach for. See "Dependency failure effects".
 
 ## How it works end to end
 
@@ -328,13 +342,23 @@ The shape matters more than the count. Errors naming a provider health check are
 noise at any of the volumes above; the same volume of `All completion attempts
 failed` is an outage.
 
-**5. Is it this service or a dependency?** The distinguishing signal is *where*
-the error text points. Errors naming `api.anthropic.com` or `api.openai.com` are
-provider or egress problems and the router is behaving correctly by reporting
-them. Errors naming `redis-shared`, `postgres-shared`, `kafka-shared`,
-`aiqg-dashboard-be`, or Keycloak are TAS-internal dependency failures — see the
-dependency table below. A pod that is `CrashLoopBackOff` or failing its probe is
-the router itself.
+**5. Is it this service or a dependency?** Work from the observed state, not from
+a string search — two of the internal dependencies log nothing at all when they
+fail, so searching for their names finds silence and proves nothing.
+
+| What you observe | Where the fault is |
+|---|---|
+| Errors naming `api.anthropic.com` or `api.openai.com` | The provider or egress. The router is behaving correctly by reporting it. |
+| `CrashLoopBackOff`, with a startup line naming `NewKafkaEmitter` and `run out of available brokers` | **Kafka.** Not a bad image — see the dependency section before rolling back. |
+| `CrashLoopBackOff` with any other startup error | The router or its image. |
+| Callers get `503` / `token_resolver_unavailable` while pods look Ready | `aiqg-dashboard-be`. Not the caller's token. |
+| Callers get `401` / `path_a_auth_required` | The caller's token, not a dependency. |
+| Pods Ready, requests succeeding, nothing in the logs | Redis or Postgres could still be down — they fail silently. Check their pods directly. |
+
+A `CrashLoopBackOff` is **not** by itself evidence that the router is at fault;
+that is the single most misleading state on this service. Read the startup line
+before concluding anything. The dependency section below carries the full
+signatures.
 
 **Metrics.** Scraping either metrics path **through the ingress returns one
 random replica**, so counters appear to jump between values on consecutive curls
@@ -583,25 +607,99 @@ it appears in a label listing but not in a live scrape.
 
 Which dependency failures look like the router failing, and what each one does.
 
-| Dependency | Address | Effect when it fails |
-|---|---|---|
-| Anthropic / OpenAI | `api.anthropic.com`, `api.openai.com` | Completions fail with provider error text. The router is reporting correctly, not failing. Fallback moves to the next provider in the tenant's list if one is configured. |
-| Keycloak | Cluster identity service | Tenant resolution and caller authentication. Symptom is unconfirmed — see the note below. |
-| `redis-shared` | `redis-shared.tas-shared:6379` | Response cache and request-correlation state. Effect on request success is unconfirmed. |
-| `postgres-shared` | `postgres-shared.tas-shared:5432` | Spend attribution. Effect on request success is unconfirmed. |
-| `kafka-shared` | `kafka-shared.tas-shared:9092` | Telemetry and audit events. Effect on request success is unconfirmed. |
-| `aiqg-dashboard-be` | `aiqg-dashboard-be.aiqg:8095` | Policy lookup for the AIQG deployment only. Effect on request success is unconfirmed. |
+**These were measured, not inferred.** On 2026-08-26 each dependency was pointed
+at a dead port in turn, on an isolated scratch deployment
+(`llm-router-depprobe`): the same image as the internal `llm-router`
+(`aiqg-v5.75`) with the same `llm-router-config` and `llm-router-secret`, but no
+Service, no Ingress, and no traffic. Its init containers were removed so the
+application itself reached the broken dependency rather than parking in init.
+Production was untouched throughout — both deployments held 0 restarts and
+unchanged pod ages, and both gateway hosts answered `/health` with `200`. The
+probe was deleted afterwards.
 
-> [!UNVERIFIED] No internal-dependency failure was observed in the Loki window
-> used to build this document, so no literal error text is available for any row
-> marked unconfirmed, and whether each failure blocks a request or degrades
-> silently was not determined. Do not assume "fails closed" extends to these —
-> it is documented only for the scan-and-route path. Confirm with the service
-> owner before relying on any of these rows during an incident.
+That method bounds what the findings cover. They establish what happens at
+**startup** and what the pod reports, on a deployment receiving no traffic. Where
+a row says the effect on live requests is undetermined, that is why.
 
-**What to do when you have no signature to match.** Because the symptoms are
-unknown, work from the dependency's own health rather than from the router's
-logs. Check the dependency directly before spending time in the router:
+| Dependency | Address | Blocks startup? | Blocks requests? | Pod still Ready? | Signature |
+|---|---|---|---|---|---|
+| `kafka-shared` | `kafka-shared.tas-shared:9092` | **Yes — fatal** | Yes, totally | **No.** The pod never reaches Ready, its restart count climbs, and it settles into `CrashLoopBackOff` | `Failed to create application: ... failed to build AIQG emitter: ... kafka: client has run out of available brokers to talk to: dial tcp ...: connect: connection refused` |
+| `aiqg-dashboard-be` | `aiqg-dashboard-be.aiqg.svc.cluster.local:8095` | No | **Yes — every authenticated request**, fails closed after ~2s | **Yes.** Looks perfectly healthy | Client gets `503 {"error":{"code":"token_resolver_unavailable","message":"AIQG token resolver is temporarily unavailable; retry"}}` |
+| Anthropic / OpenAI | `api.anthropic.com`, `api.openai.com` | No | Completions only | Yes | Provider error text — the router is reporting correctly, not failing. Fallback moves to the next provider if the tenant has one configured. |
+| `redis-shared` | `redis-shared.tas-shared:6379` | No | Undetermined — see below | Yes | **None.** Logs the dead address at `info` as though enabled; zero error lines |
+| `postgres-shared` | `postgres-shared.tas-shared:5432` | No | Undetermined — see below | Yes | **None.** Zero log lines mention postgres, the database, or the dead port |
+| Keycloak | — | No | No | Yes | Not a dependency of the router at all — see below |
+
+**Kafka is a hard dependency, and it does not look like one.** The container exits
+1 during startup and enters `CrashLoopBackOff`. A Kafka outage is therefore a
+**total gateway outage, not a degradation** — and it presents exactly like a bad
+image or a broken build, which is the trap. Before you roll back a deployment
+that is crash-looping, read the startup line: if it names `NewKafkaEmitter` and
+`run out of available brokers`, the image is fine and Kafka is down. Rolling back
+will not help, because every previous image has the same dependency.
+
+**The dashboard being down is distinguishable from a bad token, and the
+distinction saves an incident.** Token resolution goes through `DashboardResolver`,
+an HTTP client of `aiqg-dashboard-be` — confirmed by the startup line
+`"msg":"AIQG token resolver: DashboardResolver (HTTP client of aiqg-dashboard-be)"` —
+not through the mounted token file. So `aiqg-dashboard-be` sits on the
+authentication path for **every** request. Read the status code:
+
+| What you see | What it means |
+|---|---|
+| `503` with code `token_resolver_unavailable` | The auth backend is down. The caller's credential is irrelevant. Do not chase the token. |
+| `401` with code `path_a_auth_required` / `reason: token_unknown` | The token really is bad or unknown. Chase the token. |
+
+The log line behind the `503`, at level `error` with `"event":"aiqg.token_resolve_error"`:
+
+```bash
+{"error":"tokens.DashboardResolver: do: Post \"http://aiqg-dashboard-be.aiqg.svc.cluster.local:8095/internal/auth/validate\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)","event":"aiqg.token_resolve_error","level":"error","msg":"AIQG token resolver returned unexpected error"}
+```
+
+Note this is the one dependency failure where `kubectl get pods` actively misleads
+you: the pod keeps reporting itself Ready (`1/1`) while every completion fails.
+
+**Redis and Postgres fail silently — searching the logs will mislead you.** A dead
+Redis address produces a reassuring startup line at `info`, not an error:
+
+```bash
+{"level":"info","msg":"AIQG prompt-cache probe enabled (P0 measure-only: reports prefix reuse, changes no requests)","redis_addr":"redis-shared.tas-shared:6399","ttl":300000000000}
+```
+
+The `6399` there is the dead port the experiment set — the router reported the
+cache "enabled" against an address nothing was listening on, because the client
+connects lazily. Postgres was quieter still: `DATABASE_URL` is configured in
+`llm-router-config`, but with it pointed at a dead port the router logged
+**nothing at all**, `/health` returned `200`, and the pod stayed Ready. The
+running router does not appear to connect to Postgres during normal operation.
+
+> [!UNVERIFIED] The **request-path** effect of a Redis or Postgres outage is not
+> established. The probe could not run an authenticated completion, because token
+> resolution requires a token registered with the dashboard. What is known is that
+> startup is silent, readiness is unaffected, and nothing is logged. Whether a
+> live request degrades, slows, or fails is undetermined — do not read the silence
+> as proof that it is harmless.
+
+**Keycloak is not a dependency of this service.** There is no Keycloak
+configuration of any kind in `llm-router-config`, in `llm-router-secret`, or in
+either deployment's environment. Its relevance is indirect: it gates the dashboard
+API that *issues* the tokens (see triage step 2) and `aiqg-dashboard-be`'s own
+authentication. A Keycloak outage does not stop the router from serving a token it
+already accepts; it stops new tokens being issued.
+
+> [!IMPORTANT] **Do not restart or scale either deployment during a Redis or
+> Postgres outage.** A *running* pod tolerates both being down — that is findings 3
+> and 4 above. But the init containers `wait-for-postgres` and `wait-for-redis`
+> block on `nc -z` until those services answer, so **no new pod can start**.
+> Restarting converts a silent degradation into a hard outage: the replacement
+> parks in `Init:0/2`, and with `maxUnavailable: 0` on `llm-router-aiqg` you keep
+> the old pods only for as long as you never terminate them. This is the same
+> `Init:0/2` stall described under "Restart a deployment" — that section tells you
+> what a stalled rollout looks like; this one tells you not to start one.
+
+**Check the dependency directly — do not start from the router's logs.** Two of
+the five failures above log nothing at all, so a log search is the wrong first
+move. Ask the dependencies whether they are up:
 
 ```bash
 kubectl get pods -n tas-shared -l 'app in (redis-shared,postgres-shared,kafka-shared)'
@@ -615,10 +713,12 @@ redis-shared-85c7875cfd-rnng4   0/1     Completed   1 (288d ago)   342d
 
 All three healthy on 2026-08-25. The `Completed` rows are old Redis ReplicaSets
 that have already terminated — ignore them and read only the `Running` ones.
+`aiqg-dashboard-be` is not in this namespace; check it with
+`kubectl get pods -n aiqg`.
 
-Then, rather than searching for an error string you do not have, look at what the
-router logged around the failure without a level filter — an unknown failure mode
-may not be logged at `error` at all:
+Only then search the router's logs, and search without a level filter — the
+Kafka signature is a startup line and the resolver signature is at `error`, but
+neither is guaranteed to be where you look first:
 
 ```bash
 curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query_range' \
@@ -627,19 +727,25 @@ curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query_range' \
 {"status":"success","data":{"resultType":"streams","result":[],"stats":{...}}}
 ```
 
-`"result":[]` was the 2026-08-25 result and is the healthy state: the router is
-not complaining about any shared dependency. Any hit here is worth reading in
-full, because this document has no recorded signature to match it against — you
-are looking at something new, and it belongs in the escalation notes.
+`"result":[]` was the 2026-08-25 result. **Read an empty result carefully: it
+rules out Kafka, and it rules out nothing else.** A Kafka failure would match
+here loudly. A Redis or Postgres failure logs nothing, so silence is exactly what
+a dead Redis looks like — the table above is the authority, not this query. If
+you suspect either, check the dependency's own pods rather than searching for a
+string that will never appear.
 
-Two things are known and worth acting on. Postgres and Redis are hard *startup*
-dependencies for `llm-router-aiqg`: its init containers block until both accept a
-connection, so if either is down a restarting pod never starts, whatever the
-runtime effect turns out to be. And a request that completes proves the whole
-scan-and-route path worked, so the real-completion check in triage step 2
-distinguishes "a dependency is degrading something" from "requests are failing"
-faster than reading logs does. If you do determine a signature during an
-incident, record it — that is the gap this note exists to close.
+**When writing Loki queries against this namespace, the pod-name label is
+`instance`, not `pod`.** A query written as `{namespace="tas-llm-router",
+pod="..."}` returns zero streams and reads as "no logs" rather than as an error.
+Use `{namespace="tas-llm-router", instance="llm-router-aiqg-77c574cc9b-l9xhn"}`
+to scope to one replica.
+
+The fastest discriminator remains the real-completion check in triage step 2: a
+request that completes proves the whole path worked, including Kafka, the token
+resolver, and scan-and-route. A `503` naming `token_resolver_unavailable` points
+at `aiqg-dashboard-be`; a `CrashLoopBackOff` points at Kafka; a healthy-looking
+pod serving successful requests while something feels slow is the case the table
+above still marks undetermined.
 
 ## Common operations
 
