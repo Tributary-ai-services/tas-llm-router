@@ -1,478 +1,281 @@
-# LLM Router WAF
+---
+doc_type: readme
+audience: "Engineer who has just landed on this repository and is deciding whether it does what they need, and how to make one call against it"
+assumes: ["HTTP APIs and curl", "what an OpenAI-style chat completion request looks like", "kubectl basics, if you want to read the deployment"]
+answers:
+  - "What does this service do, and what does it deliberately not do?"
+  - "Is this finished software or a prototype?"
+  - "How do I make one working call, end to end?"
+  - "Where do I get a token, and which header does it go in?"
+  - "Why did my request come back 401?"
+  - "Which host do I call — the internal one or the customer-facing one?"
+  - "What does it depend on, and what stops it from starting?"
+  - "Which settings change behaviour, and where do the secrets live?"
+verified_against: "tas-llm-router@eee4b24, 2026-08-26"
+depth: standard
+---
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](.)
-[![Security](https://img.shields.io/badge/Security-Enterprise%20Grade-green.svg)](docs/security-guide.md)
+# TAS LLM Router
 
-> **Enterprise-grade LLM routing and security layer with zero feature loss**
+One HTTP endpoint that speaks both the OpenAI chat-completions dialect and the
+Anthropic messages dialect, picks a provider and model for each request, and
+records who spent what. It is the AI Quality Gateway (AIQG) ingress: the
+customer-facing deployment is literally named `llm-router-aiqg`, and every
+governance behaviour below — token authentication, prompt scanning, spend
+attribution, event emission — happens on the way through it.
 
-The LLM Router WAF is a production-ready Web Application Firewall and intelligent router for Large Language Model APIs. It provides seamless access to multiple LLM providers (OpenAI, Anthropic, etc.) while maintaining enterprise security, cost optimization, and comprehensive monitoring.
+> **Verified 2026-08-26 against `tas-llm-router@eee4b24`** and live probes
+> against `gateway.air-ops.net`. Every command and response below was executed
+> on that date. Image tags move; re-check before trusting a version number.
 
-## Features
+## What this is
 
-### Core Routing
-- **Multi-Provider Support**: OpenAI, Anthropic (Claude), with extensible architecture
-- **Intelligent Routing**: Cost-optimized, performance-based, round-robin, and specific provider routing
-- **Zero Feature Loss**: Full native API compatibility with provider-specific features
-- **Health Monitoring**: Automatic provider health checks with failover
-- **Cost Estimation**: Real-time cost calculation and optimization
+Point a client at this gateway instead of at `api.openai.com` or
+`api.anthropic.com`, and you get four things the vendor endpoint does not
+give you: one credential instead of per-vendor keys, a routing decision that
+can pick a cheaper model than the one you asked for, a scan of the prompt
+before it leaves the cluster, and a priced event per call attributed to a
+tenant. Requests and responses stay in the vendor's own wire format, so most
+clients need only a changed base URL and a changed key.
 
-### Advanced Features
-- **Function Calling**: Full support for OpenAI function calling and Anthropic tool use
-- **Vision Support**: Image analysis capabilities where supported
-- **Streaming**: Real-time response streaming
-- **Structured Output**: JSON schema validation (OpenAI)
-- **Batch Processing**: Bulk request handling (OpenAI)
-- **Assistants API**: OpenAI Assistants integration
+It is not a model host — every completion is served by Anthropic or OpenAI over
+the network, and the gateway holds no weights. It is not an agent framework and
+has no memory between calls; each request stands alone. The historic name in
+this repository is "LLM Router WAF" — a web application firewall (WAF) — and
+that framing is misleading: the scanning layer inspects prompt and response
+content for policy findings, and does not filter by network attributes the way
+a firewall does.
 
-### Production Ready
-- **Configuration Management**: YAML config with environment variable overrides
-- **Comprehensive Logging**: Structured JSON logging with configurable levels
-- **HTTP Server**: Production-grade server with middleware and CORS
-- **Graceful Shutdown**: Clean shutdown handling
-- **Health Checks**: Built-in health monitoring endpoints
+## Status & scope
 
-## Quick Start
+**As of 2026-08-26**, two deployments run in namespace `tas-llm-router`, on
+independent image tags that routinely skew:
 
-### 1. Set Environment Variables
+| Deployment | Image tag today | Reached at | Auth |
+|---|---|---|---|
+| `llm-router` | `aiqg-v5.75` | `llm-router.tas.scharber.com`, in-cluster `llm-router.tas-llm-router:8086` | permissive — serves completions with no credential |
+| `llm-router-aiqg` | `aiqg-v5.86` | `gateway.aiqg.tas.scharber.com`, publicly `gateway.air-ops.net` | strict — `AIQG_STRICT=true`, no token means 401 |
+
+Both are `2/2` ready and both answered live probes on the verification date.
+The permissive deployment exists because internal callers predate the token
+scheme; `aether-be` and `tas-agent-builder` still point at it by cluster
+address. The public hostname for it, `llm.air-ops.net`, sits behind a
+Cloudflare Access policy, so the unauthenticated path is not reachable from
+the open internet — but it is reachable from anywhere inside the cluster or on
+the cluster's network.
+
+Three subsystems that older copies of this file listed as unstarted are
+running in production and have been for months: request and cost metrics with
+OpenTelemetry export (`OTEL_EXPORTER_OTLP_ENDPOINT` points at
+`otel-collector-shared.tas-shared:4317`), response caching
+(`AIQG_RESPONSE_CACHE_ENABLED=true`, ten-minute time-to-live, plus a semantic
+cache against a dedicated Redis), and routing beyond round-robin
+(`FEATURE_ADVANCED_ROUTING=true`, `FEATURE_CIRCUIT_BREAKER=true`). Treat this
+repository as a load-bearing production service, not an early prototype.
+
+Genuinely unfinished or in flight, stated plainly:
+
+- **The `/metrics` rebuild is merged but not deployed.** Commit `b6070a0`
+  replaced an exporter that derived counters from wall-clock time with a real
+  Prometheus registry and deleted eight series that had no data source.
+  Scraping either running pod on the verification date still returned the old
+  series (`llm_router_security_score`, `llm_router_threat_level`,
+  `llm_router_active_api_keys`), and the new `llm_router_request_duration_seconds`
+  was absent from both. Until a rollout carries `eee4b24` or later, numbers on
+  the router dashboards are not measurements.
+- **The semantic cache runs in shadow.** `AIQG_SEMCACHE_SHADOW=true` on
+  `llm-router-aiqg`, so near-miss hits are recorded and scored but not served
+  unless a tenant's own cache configuration opts in.
+- **`make build` does not work from a standalone clone.** See
+  [Build and test](#build-and-test) — this repository needs three sibling
+  repositories on disk.
+
+## Quick start
+
+Every completion route on the customer-facing gateway needs a gateway token.
+Tokens are self-serve: sign in to the AIQG dashboard (`aiqg.air-ops.net`
+publicly, `aiqg.tas.scharber.com` internally), open its Tokens page, and issue
+one. The same thing over HTTP is `/api/v1/account/tokens` on
+`https://api.aiqg.tas.scharber.com`, authenticated with your Keycloak-issued
+JSON Web Token (JWT); the tenant comes from your login, and the plaintext token
+is shown once at creation and never again. Tokens carry the prefix
+`tas_qg_live_`, and the gateway accepts one in any of three headers —
+`TAS-Auth`, `Authorization: Bearer`, or `x-api-key` — because a stock vendor
+SDK can only populate its own credential slot. All three are lifted onto the
+same path at `internal/middleware/aiqg.go:153`.
+
+Call it without one and you get the failure you are most likely to hit first:
 
 ```bash
-export OPENAI_API_KEY="your-openai-api-key"
-export ANTHROPIC_API_KEY="your-anthropic-api-key"
+curl -sS https://gateway.air-ops.net/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"ping"}],"max_tokens":5}'
+{"error":{"code":"path_a_auth_required","message":"AIQG ingress requires both TAS-Auth and Authorization headers; TAS-Auth is missing","missing_header":"TAS-Auth","docs":"https://docs.tas.scharber.com/aiqg/auth"}}
 ```
 
-### 2. Run with Default Configuration
+A token the gateway does not recognise fails differently — `"reason":"token_unknown"`
+with the same 401 status — which distinguishes "I sent nothing" from "I sent
+something stale". With a token in the environment, the OpenAI dialect:
 
 ```bash
-go run cmd/llm-router/main.go
+export TAS_TOKEN=tas_qg_live_...   # issued from the dashboard; never commit it
+curl -sS https://gateway.air-ops.net/v1/chat/completions \
+  -H "Authorization: Bearer $TAS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":16}'
+{"id":"msg_011CeSAMLLwRFJhbT7KMiE9K","object":"chat.completion","created":1787783906,"model":"claude-haiku-4-5-20251001","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":5,"total_tokens":20},"router_metadata":{"provider":"anthropic","model":"claude-haiku-4-5-20251001","routing_reason":["expected_cost abstained: no usable measurements; priced at max_tokens as before"],"estimated_cost":0.0000704,"processing_time":22843,"request_id":"chatcmpl-1787783905997651971","attempt_count":1,"fallback_used":false}}
 ```
 
-### 3. Run with Custom Configuration
+That `router_metadata` block is the part no vendor endpoint returns: which
+provider actually served, why the router chose it, and what the call cost.
+The Anthropic dialect works the same way, with the token in `x-api-key`, and
+answers in Anthropic's own response shape:
 
 ```bash
-go run cmd/llm-router/main.go --config configs/config.yaml
+curl -sS https://gateway.air-ops.net/v1/messages \
+  -H "x-api-key: $TAS_TOKEN" \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":16,"messages":[{"role":"user","content":"Reply with the single word: pong"}]}'
+{"id":"msg_011CeSAV9Ahvtkbz9QBVX2Vq","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":15,"output_tokens":5}}
 ```
 
-### 4. Test the Router
+Four read-only routes answer with no credential at all, which is the fastest
+way to confirm you are talking to the right thing before you have a token:
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-3.5-turbo",
-    "messages": [
-      {"role": "user", "content": "Hello, world!"}
-    ],
-    "optimize_for": "cost"
-  }'
+curl -sS https://gateway.air-ops.net/v1/providers
+{"count":2,"providers":["openai","anthropic"]}
 ```
 
-## API Endpoints
+`/v1/models` lists the six model identifiers the router will accept,
+`/v1/capabilities` gives context windows and per-thousand-token prices per
+model, and `/health` reports per-provider status and the last check time.
 
-### Chat Completions
-- `POST /v1/chat/completions` - OpenAI compatible chat completions
-- `POST /v1/messages` - Anthropic compatible messages
+## How it fits
 
-### Management
-- `GET /v1/providers` - List registered providers
-- `GET /v1/providers/{name}` - Get provider details
-- `GET /v1/health` - Overall system health
-- `GET /v1/health/{name}` - Provider-specific health
-- `GET /v1/capabilities` - Provider capabilities
-- `POST /v1/routing/decision` - Get routing decision without execution
+The router is the single egress path from TAS to commercial model providers,
+which is why the credentials live here and not in each caller.
 
-### Health Check
-- `GET /health` - Simple health check
+```mermaid
+flowchart LR
+  A[aether-be] --> R[llm-router<br/>permissive]
+  B[tas-agent-builder] --> R
+  C[Customers / SDKs] --> G[llm-router-aiqg<br/>strict]
+  R --> P[Anthropic / OpenAI]
+  G --> P
+  G -->|validate token| D[aiqg-dashboard-be]
+  G -->|events| K[Kafka tas.aiqg.events.v1]
+  G -->|cache| RD[Redis: response + semantic]
+  G -->|spend, config| PG[Postgres shared]
+```
+
+Both deployments listen on container port **8086**, which is also the service
+port. The code's own default is **8080** (`internal/config/config.go:370`); the
+deployment overrides it with `LLM_ROUTER_PORT=8086` from the `llm-router-config`
+ConfigMap. If you run the binary locally without that variable, it listens on
+8080 — that is the only place the two numbers legitimately disagree.
+
+Dependency strength varies, and the difference matters when something is down.
+**Kafka is a hard startup dependency**: with `AIQG_EMITTER_TYPE=both`, the
+emitter is constructed at `internal/server/server.go:383`, a broker failure
+there aborts server construction, and the process exits 1 at
+`cmd/llm-router/main.go:301` rather than degrading. A pod with no reachable
+broker crash-loops. Redis and Postgres are quieter: a running pod tolerates
+losing them, but both `wait-for-postgres` and `wait-for-redis` init containers
+block every *new* pod, so an outage in either freezes rollouts and restarts.
+`aiqg-dashboard-be` sits on the authentication path of every strict-gateway
+request, because tokens are stored hashed and validated remotely — when it is
+unreachable, valid tokens stop being recognised.
 
 ## Configuration
 
-### Environment Variables
+Configuration comes from a YAML file (`config.example.yaml` shows the full
+shape) overlaid by environment variables, and in the cluster it is almost
+entirely environment: the `llm-router-config` ConfigMap in `tas-llm-router`
+carries 55 keys and `llm-router-secret` supplies the rest. These are the ones
+that change behaviour rather than tune it:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | OpenAI API key | Required for OpenAI |
-| `ANTHROPIC_API_KEY` | Anthropic API key | Required for Anthropic |
-| `LLM_ROUTER_PORT` | Server port | 8080 |
-| `LLM_ROUTER_LOG_LEVEL` | Log level | info |
-| `LLM_ROUTER_LOG_FORMAT` | Log format (json/text) | json |
-| `LLM_ROUTER_DEFAULT_STRATEGY` | Default routing strategy | cost_optimized |
+| Setting | Effect | Default in code | What runs in production |
+|---|---|---|---|
+| `LLM_ROUTER_PORT` | Listen port | `8080` | `8086` on both deployments |
+| `AIQG_ENABLED` | Turns the governance layer on | off | `true` |
+| `AIQG_STRICT` | No token means 401 instead of pass-through | `false` | `true` on `llm-router-aiqg` only |
+| `AIQG_EMITTER_TYPE` | Where priced events go | `log` | `both` — log and Kafka, making Kafka required |
+| `GATEKEEPER_ENABLED` / `GATEKEEPER_FAIL_OPEN` | Prompt scanning, and what happens when the scanner errors | off | `true` / `true` — a scanner failure lets the request through |
+| `AIQG_RESPONSE_CACHE_ENABLED` | Exact-match response cache | off | `true`, `AIQG_RESPONSE_CACHE_TTL=10m` |
+| `AIQG_SEMCACHE_ENABLED` / `AIQG_SEMCACHE_SHADOW` | Semantic cache, and whether it serves or only observes | off / `true` | `true` / `true` — observing |
+| `LLM_ROUTER_DEFAULT_STRATEGY` | Routing when the request does not name a model | `cost_optimized` | `cost_optimized` |
 
-### Configuration File
+Secrets are referenced here by location only. Provider keys and the internal
+dashboard token live in the `llm-router-secret` Opaque secret in namespace
+`tas-llm-router`, under the key names `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+and `AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN` among sixteen. The bootstrap token
+file is the `llm-router-aiqg-tokens` secret in the same namespace, key
+`aiqg-tokens.yaml`, mounted at the path in `AIQG_TOKENS_FILE`; it is a fallback
+only, since the running gateway resolves tokens through `aiqg-dashboard-be`.
+For local work, the untracked env files under
+`aether-secrets/apps/tas-llm-router/` hold provider keys and a test gateway
+token. Nothing in this repository should ever contain a token value.
 
-Create a `configs/config.yaml` file (see `config.example.yaml` for full example):
+## Build and test
 
-```yaml
-server:
-  port: "8080"
-  read_timeout: 30s
-  write_timeout: 30s
+This repository does not build standalone. `go.mod` carries four `replace`
+directives pointing at sibling checkouts — `../Gatekeeper` and three modules
+under `../aether-shared/` — so a clone on its own fails with
+`replacement directory ../Gatekeeper does not exist`. Clone it inside the TAS
+monorepo alongside those, or vendor them yourself.
 
-router:
-  default_strategy: "cost_optimized"
-  health_check_interval: 30s
-  max_cost_threshold: 1.0
-
-providers:
-  openai:
-    api_key: "${OPENAI_API_KEY}"
-    models:
-      - name: "gpt-4o"
-        provider_model_id: "gpt-4o"
-        input_cost_per_1k: 0.005
-        output_cost_per_1k: 0.015
-
-logging:
-  level: "info"
-  format: "json"
-  output: "stdout"
-```
-
-## Routing Strategies
-
-### Cost Optimized (default)
-Routes to the provider with the lowest estimated cost for the request.
-
-```json
-{
-  "optimize_for": "cost",
-  "model": "gpt-3.5-turbo"
-}
-```
-
-### Performance Optimized
-Routes to the provider with the best performance characteristics.
-
-```json
-{
-  "optimize_for": "performance",
-  "model": "gpt-4o"
-}
-```
-
-### Round Robin
-Distributes requests evenly across healthy providers.
-
-```json
-{
-  "optimize_for": "round_robin"
-}
-```
-
-### Specific Provider
-Routes to a specific provider based on model prefix.
-
-```json
-{
-  "model": "gpt-4o"  // Routes to OpenAI
-}
-```
-
-```json
-{
-  "model": "claude-3-5-sonnet-20241022"  // Routes to Anthropic
-}
-```
-
-## Advanced Usage
-
-### Function Calling
-
-```json
-{
-  "model": "gpt-4o",
-  "messages": [
-    {"role": "user", "content": "What's the weather like?"}
-  ],
-  "tools": [
-    {
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "Get current weather",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {"type": "string"}
-          }
-        }
-      }
-    }
-  ]
-}
-```
-
-### Vision Support
-
-```json
-{
-  "model": "gpt-4o",
-  "messages": [
-    {
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "What's in this image?"},
-        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
-      ]
-    }
-  ]
-}
-```
-
-### Streaming
-
-```json
-{
-  "model": "gpt-4o",
-  "messages": [
-    {"role": "user", "content": "Tell me a story"}
-  ],
-  "stream": true
-}
-```
-
-## Building and Deployment
-
-### Build Binary
+Even inside the monorepo, the default build binds the Hyperscan scanning engine
+through cgo, which needs `libhyperscan-dev` and `pkg-config` on the machine:
 
 ```bash
-go build -o llm-router cmd/llm-router/main.go
+go build -o llm-router ./cmd/llm-router
+github.com/flier/gohs/internal/hs: exec: "pkg-config": executable file not found in $PATH
 ```
 
-### Docker Development
-
-#### Standalone Mode
-To run the full development stack with observability:
+The `nohs` build tag swaps in Go's `regexp` instead, which is what `make test`
+uses and what a contributor without the library wants. The production image
+builds the Hyperscan path (`docker/Dockerfile`), so a locally built binary and
+the deployed one differ in matcher implementation.
 
 ```bash
-cd docker
-docker-compose -f docker-compose.dev.yml up -d
+go build -tags nohs -o llm-router ./cmd/llm-router
+./llm-router --version
+LLM Router WAF v1.0.0
+Build Date: 2026-08-26
 ```
-
-This starts:
-- Redis for caching and rate limiting
-- Prometheus for metrics collection  
-- Grafana for dashboards (admin/admin)
-- Jaeger for distributed tracing
-- OpenTelemetry Collector
-- PostgreSQL for analytics
-- Vault for secrets management
-- LLM Router application (optional, with `--profile full-stack`)
-
-Access the services:
-- LLM Router: http://localhost:8085
-- Grafana: http://localhost:3002
-- Prometheus: http://localhost:9091
-- Jaeger: http://localhost:16686
-
-#### Aether Shared Infrastructure Integration
-To run LLM Router integrated with shared TAS infrastructure:
 
 ```bash
-cd docker
-./start-aether-shared.sh start
+go test -tags nohs ./... 2>&1 | grep -c FAIL
+0
 ```
 
-This mode uses shared infrastructure services from aether-shared:
-- Shared Redis, PostgreSQL, Prometheus, Grafana
-- Shared Keycloak for authentication
-- Shared Kafka for messaging  
-- Shared MinIO for object storage
+Thirty packages carried tests and all passed on the verification date. The
+version string above is hardcoded in `cmd/llm-router/main.go` and does not
+track the image tag; the tag stamped into emitted events is set by
+`make docker-build`.
 
-Access the services:
-- LLM Router: http://localhost:8086
-- Shared Grafana: http://localhost:3000
-- Shared Prometheus: http://localhost:9090
+## Where to go next
 
-**Prerequisites:** Ensure aether-shared infrastructure is running:
-```bash
-cd ../aether-shared
-docker-compose -f docker-compose.shared-infrastructure.yml up -d
-```
+Two documents go deeper, and both were refreshed alongside this one, so prefer
+them over anything else in `docs/`:
 
-### Docker Deployment
+- **[Operations](docs/ops/llm-router.md)** — for on-call. Health signals,
+  restart and rollback procedures with their blast radius, failure modes with
+  the literal error strings to search Loki for, and escalation.
+- **[Developer guide](docs/dev/llm-router-api.md)** — for integrating or
+  extending. Every route, the complete error set with retry guidance, what
+  changes when you point a stock vendor SDK at the gateway, and why the design
+  took this shape.
 
-```dockerfile
-FROM golang:1.23-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o llm-router cmd/llm-router/main.go
+Beyond those: [`docs/openapi.yaml`](docs/openapi.yaml) is the machine-readable
+contract, also served as a browsable page at `docs.air-ops.net`;
+[`docs/`](docs/README.md) holds the AIQG design and analysis notes, including
+the caching and semantic-caching write-ups; [`k8s/`](k8s/) has the deployment
+manifests; and the [repository working rules](./CLAUDE.md) record local
+conventions. Router dashboards live in Grafana at `grafana.tas.scharber.com` —
+read the caveat in [Status & scope](#status--scope) before trusting their
+numbers.
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
-COPY --from=builder /app/llm-router .
-COPY --from=builder /app/configs/config.yaml ./configs/config.yaml
-CMD ["./llm-router", "--config", "configs/config.yaml"]
-```
-
-### Kubernetes Deployment
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: llm-router
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: llm-router
-  template:
-    metadata:
-      labels:
-        app: llm-router
-    spec:
-      containers:
-      - name: llm-router
-        image: llm-router:latest
-        ports:
-        - containerPort: 8080
-        env:
-        - name: OPENAI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: llm-router-secrets
-              key: openai-api-key
-        - name: ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: llm-router-secrets
-              key: anthropic-api-key
-```
-
-## Testing
-
-### Run Tests
-
-```bash
-go test ./...
-```
-
-### Run Integration Tests
-
-```bash
-go test ./internal/integration
-```
-
-### Run Benchmarks
-
-```bash
-go test -bench=. ./internal/integration
-```
-
-## Monitoring
-
-### Health Checks
-
-The router provides comprehensive health monitoring:
-
-```bash
-# Overall health
-curl http://localhost:8080/health
-
-# Provider-specific health
-curl http://localhost:8080/v1/health/openai
-```
-
-### Metrics
-
-All requests are logged with structured data including:
-- Provider selection reasoning
-- Cost estimates
-- Response times
-- Routing metadata
-
-### Debugging
-
-Enable debug logging for detailed routing decisions:
-
-```bash
-LLM_ROUTER_LOG_LEVEL=debug go run cmd/llm-router/main.go
-```
-
-## Architecture
-
-### Project Structure
-
-```
-├── cmd/llm-router/          # Main application entry point
-├── internal/
-│   ├── config/              # Configuration management
-│   ├── providers/           # Provider implementations
-│   │   ├── interfaces.go    # Provider interfaces
-│   │   ├── openai/         # OpenAI provider
-│   │   └── anthropic/      # Anthropic provider
-│   ├── routing/            # Routing engine
-│   ├── server/             # HTTP server
-│   ├── types/              # Shared types
-│   └── integration/        # Integration tests
-├── config.example.yaml     # Example configuration
-└── README.md              # This file
-```
-
-### Key Components
-
-1. **Providers**: Implement the `LLMProvider` interface with full API compatibility
-2. **Router**: Intelligent request routing with multiple strategies
-3. **Server**: HTTP server with OpenAI/Anthropic compatible endpoints
-4. **Config**: Flexible configuration with defaults and validation
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License.
-
-## 📚 Documentation
-
-| Document | Description |
-|----------|-------------|
-| **[📖 Complete Documentation](docs/)** | Full documentation hub |
-| **[👤 User Guide](docs/user-guide.md)** | API usage, examples, SDK integration |
-| **[🔧 Admin Guide](docs/admin-guide.md)** | Installation, configuration, deployment |
-| **[👩‍💻 Developer Guide](docs/developer-guide.md)** | Development setup, contributing |
-| **[🔐 Security Guide](docs/security-guide.md)** | Security features and best practices |
-| **[📋 API Reference](docs/api-reference.md)** | Complete API documentation |
-
-## 📊 Current Status
-
-### ✅ **Implemented - Day 1 (Core Infrastructure)**
-- [x] HTTP server with middleware architecture
-- [x] Provider abstraction layer  
-- [x] OpenAI provider (complete API support)
-- [x] Anthropic provider (Claude support)
-- [x] Intelligent routing engine with multiple strategies
-- [x] Configuration management with environment overrides
-- [x] Health checks and provider monitoring
-
-### ✅ **Implemented - Day 2 Task 1 (Security & Authentication)**
-- [x] JWT and API key authentication with permissions
-- [x] Advanced rate limiting with token bucket algorithm
-- [x] Comprehensive request validation and sanitization
-- [x] Security audit logging with structured events
-- [x] Security middleware stack with CORS support
-- [x] Server integration with graceful shutdown
-
-### 🚧 **In Progress - Day 2 (Advanced Features)**
-- [ ] Advanced routing & load balancing algorithms
-- [ ] Observability & monitoring (Prometheus, OpenTelemetry)
-- [ ] Caching & performance optimization  
-- [ ] Data pipeline & analytics
-- [ ] Advanced provider features
-- [ ] Configuration management & deployment automation
-- [ ] Comprehensive testing & quality assurance
-
-## 🆘 Support & Community
-
-- **📖 Documentation**: [docs/](docs/)
-- **🐛 Bug Reports**: [GitHub Issues](https://github.com/tributary-ai/llm-router-waf/issues)
-- **💬 Discussions**: [GitHub Discussions](https://github.com/tributary-ai/llm-router-waf/discussions)
-- **📧 Security**: security@tributary.ai
-- **💼 Enterprise**: enterprise@tributary.ai
+Licensing terms are in [LICENSE](LICENSE).

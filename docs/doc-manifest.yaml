@@ -31,3 +31,30 @@ documents:
       - "internal/routing/**"
       - "pkg/aiqg/breaker/**"
       - "docs/openapi.yaml"
+
+  # READMEs are orientation, not reference, and they rot differently: the status
+  # section goes stale on its own, without any commit touching the README. So the
+  # watches are deliberately broad — any substantial source change is a reason to
+  # re-check whether the front page still describes what ships.
+  - path: README.md
+    doc_type: readme
+    owner: "@jscharber"
+    watches:
+      - "internal/**"
+      - "cmd/**"
+      - "k8s/**"
+      - "configs/**"
+      - "docs/openapi.yaml"
+
+  - path: docs/README.md
+    doc_type: readme
+    owner: "@jscharber"
+    watches:
+      # The docs index goes stale when the document set changes, not when code does.
+      - "docs/**"
+
+  - path: cmd/demo-traffic/README.md
+    doc_type: readme
+    owner: "@jscharber"
+    watches:
+      - "cmd/demo-traffic/**"
