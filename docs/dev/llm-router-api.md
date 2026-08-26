@@ -273,34 +273,66 @@ through untouched (`internal/server/server.go:188`–`191`). Both live in namesp
 says otherwise; the same binary serves both, so the wire contract is identical
 and only the auth posture differs.
 
-**Getting a token.** You do not self-serve. Tokens are provisioned by ops into
-the Kubernetes Secret `llm-router-aiqg-tokens` in namespace `tas-llm-router`,
-which the binary reads through the `AIQG_TOKENS_FILE` environment variable
-(`k8s/deployment-aiqg-strict.yaml:85`, loaded at
-`internal/config/config.go:840`). The Secret in this repository ships empty on
-purpose and carries the provisioning note: ops applies the populated version
-out-of-band from a vault, or via one of the secret-encryption tools the note
-names — sealed-secrets, external-secrets, or `sops`
-(`k8s/secret-aiqg-tokens.yaml:1`–`6`). Each entry binds a token to a
-`tenant_id`, an `aiqg_account_id`, a `source_app` string, and a `suspended` flag
-(`k8s/secret-aiqg-tokens.yaml:10`–`16`) — which is the mechanism behind "tenant
-scoping is implicit and carried by the token" below. To request one, ask the AIQG
-owners for an entry naming your `source_app`; the values themselves live only in
-`aether-secrets` and in the cluster Secret, never in this repository and never in
-this document.
+**Getting a token — you self-serve.** Issuance does not live in this repository
+and is not an ops ticket. It is a first-class API on the AIQG dashboard backend
+(the `aiqg-dashboard-be` repository), hosted at `https://api.aiqg.tas.scharber.com`
+and surfaced in the dashboard user interface (UI) at `/tokens`. Three routes —
+list (GET), issue (POST), and revoke (DELETE):
 
-> [!UNVERIFIED] No self-service provisioning API, request form, or named owner
-> for token issuance appears anywhere in this repository — only the Secret and
-> the note that ops applies it out-of-band. The escalation path is therefore
-> stated as "ask the AIQG owners" rather than as a procedure. Confirm the current
-> route with the service owner.
+| Route | Does |
+|---|---|
+| `GET /api/v1/account/tokens` | List your tenant's tokens (metadata only — never the secret) |
+| `POST /api/v1/account/tokens` | Issue one; body carries `source_app` and `label` |
+| `DELETE /api/v1/account/tokens/:id` | Revoke one |
+
+These are authenticated with a Keycloak JSON Web Token (JWT), not with a gateway
+token, and **the tenant is taken from your JWT** — you issue for your own tenant and cannot issue
+for anyone else's. The fastest route is the dashboard UI: sign in, open
+`/tokens`, create one naming your `source_app`, and copy the value.
+
+`POST` returns `201` with the plaintext token in the response body, and that is
+**the only time it is ever shown**. It is not retrievable afterwards through
+`GET`, which returns metadata only; a lost value can only be revoked and
+reissued. Put it into your secret store on first receipt rather than into a
+scratch buffer. Issued tokens match `^tas_qg_live_[0-9a-f]{40}$`, which is what
+makes the gateway's prefix check work
+(`internal/middleware/aiqg_headers.go:141`). Issuance writes an audit entry
+recording the actor, the `source_app`, and the token prefix.
+
+Unauthenticated calls are rejected before anything else, which is a quick way to
+confirm you are hitting the right host. Verified on 2026-08-26:
+
+```bash
+curl -sS -k https://api.aiqg.tas.scharber.com/api/v1/account/tokens
+{"error":{"code":"missing_header","message":"Authorization header missing"}}
+```
+
+Note the error shape differs from the gateway's — `missing_header` here versus
+`path_a_auth_required` at the gateway. If you see the former, you are talking to
+the token API; the latter means the gateway.
+
+**Nothing in *this* repository describes issuance, and that distinction matters
+when you are debugging a `401`.** The gateway only ever *consumes* tokens. It
+reads them from the Kubernetes Secret `llm-router-aiqg-tokens` in namespace
+`tas-llm-router` via the `AIQG_TOKENS_FILE` environment variable
+(`k8s/deployment-aiqg-strict.yaml:85`, loaded at
+`internal/config/config.go:840`), and the copy checked into this repository ships
+empty on purpose (`k8s/secret-aiqg-tokens.yaml:1`–`6`). Each entry binds a token
+to a `tenant_id`, an `aiqg_account_id`, a `source_app` string, and a `suspended`
+flag (`k8s/secret-aiqg-tokens.yaml:10`–`16`) — the mechanism behind "tenant
+scoping is implicit and carried by the token" below. So a token that the
+dashboard issued successfully can still fail at the gateway if the gateway's
+copy of the list has not caught up. Token values live only in the issuing
+service and in `aether-secrets`, never in this repository and never in this
+document.
 
 **A gotcha that will mislead you in a non-production cluster.** When the token
 list is empty, the AIQG middleware runs a permissive no-resolver path: any
 `tas_qg_live_`-shaped bearer is accepted and events are emitted with empty tenant
 fields (`k8s/secret-aiqg-tokens.yaml:18`–`21`). So a made-up token can appear to
 work, right up until the list is populated and the same token starts returning
-`401`. If your token was never issued to you by a person, assume it is not real.
+`401`. If your token did not come from the token API above, assume it is not
+real — a value that "works" against an empty list proves nothing.
 
 Expect your first failure to be an authentication one, and expect it to be
 confusing: the gateway validates token *shape* before it authenticates, so a
@@ -769,6 +801,14 @@ charge, not a free correction.
 | `500` | `internal/server/server.go:1669`, `internal/server/server.go:1796` | `Completion failed: …` — the attempt, **including every fallback hop**, failed | **Yes, potentially several times** | Only deliberately. Each prior attempt that reached a vendor may already be billed |
 | `413` | `internal/server/anthropic_messages.go:581` | Request entity too large | Unclear — see below | No. Shrink the request |
 | `429` | `internal/server/anthropic_messages.go:583` | Rate limited | Unclear — see below | Yes, with backoff |
+
+**Every row above assumes a status was sent at all.** Streaming responses commit
+to `200` before the first chunk, so none of this table applies to them: a vendor
+that dies mid-stream produces no status, no error body, and a normal stream
+terminator. The only signal available to a streaming client is the
+`finish_reason` (OpenAI) or `stop_reason` (Anthropic) on the final chunk —
+treat absent or empty as a failure. See "Streaming has no error channel" below
+for why, and note that this gap is tracked as issue #172 rather than settled.
 
 **`503` and `500` are the pair people get backwards, and the doc used to as
 well.** `503 Routing failed` comes from `s.router.Route()` returning an error

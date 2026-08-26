@@ -193,18 +193,51 @@ document tells you to use one are its own recovery-confirmation step and the
 evidence you attach when escalating, so acquiring it mid-incident is the worst
 time.
 
-Where they live, by location only — never paste a token into a ticket, a chat
-message, or this document:
+**Issue one yourself — you do not need ops for this.** The AIQG dashboard has a
+self-serve token API, and it is the intended path:
 
-| Location | What is there |
-|---|---|
-| Secret `llm-router-aiqg-tokens` in namespace `tas-llm-router`, key `aiqg-tokens.yaml` | The gateway's own token roster. Mounted into the pod at `/app/secrets/aiqg/aiqg-tokens.yaml` via `AIQG_TOKENS_FILE`. This is the authoritative list of what the running gateway will accept. |
-| The `aether-secrets` repository | The source of record the cluster secret is populated from, and where a token is provisioned or rotated. |
+- Sign in to the AIQG dashboard and go to **`/tokens`**, the screen that front-ends
+  this API. Creating a token there is the whole procedure.
+- Programmatically, the same endpoint is
+  `https://api.aiqg.tas.scharber.com/api/v1/account/tokens`: a `GET` lists your
+  tokens, a `POST` creates one, and a delete request against `.../:id` revokes
+  one. It is authenticated with the Keycloak-issued JSON Web Token you already
+  hold once signed in, and the tenant is read from that token, so you can only
+  ever issue tokens for your own tenant.
+- Creating a token returns `201` with the plaintext value **in that response
+  only**. It is not retrievable afterwards. Save it somewhere you control at the
+  moment you create it, or issue a new one.
 
-Reading the cluster secret requires `get secret` in `tas-llm-router`, which is a
-higher privilege than the rest of this document assumes. If you do not have it,
-that is an escalation — ask the owner for a token rather than working around the
-gap, and note in the ticket that you could not run the real-completion check.
+The service is reachable and rejects unauthenticated calls as expected:
+
+```bash
+curl -sS -k -o /dev/null -w '%{http_code}\n' https://api.aiqg.tas.scharber.com/health
+200
+curl -sS -k -w '\nHTTP %{http_code}\n' https://api.aiqg.tas.scharber.com/api/v1/account/tokens
+{"error":{"code":"missing_header","message":"Authorization header missing"}}
+HTTP 401
+```
+
+Both captured on 2026-08-26. That `401` is the healthy unauthenticated response,
+not an outage. This API lives in the `aiqg-dashboard-be` repository rather than
+this one, so its behaviour is described here in prose rather than cited to a
+source line.
+
+**Do not confuse the two layers when auth misbehaves.** Issuing is one thing;
+what the gateway accepts is another:
+
+| Layer | What it is | When you touch it |
+|---|---|---|
+| The token API above (`aiqg-dashboard-be`) | Where tokens are **issued and revoked**, per tenant, self-serve | You need a token, or you want to revoke one |
+| Secret `llm-router-aiqg-tokens` in namespace `tas-llm-router`, key `aiqg-tokens.yaml` | What the running gateway **reads and accepts**, mounted at `/app/secrets/aiqg/aiqg-tokens.yaml` via `AIQG_TOKENS_FILE` | A token that should work is being rejected and you are checking whether the gateway knows about it |
+
+A token that the dashboard issued but the gateway rejects means those two layers
+have diverged, which is an escalation rather than something to fix by editing the
+Secret. Reading that Secret needs `get secret` in `tas-llm-router`, a higher
+privilege than the rest of this document assumes; if you do not have it, say so
+in the ticket rather than working around it.
+
+Never paste a token into a ticket, a chat message, or this document.
 
 **3. Are the pods actually running?**
 
@@ -851,16 +884,28 @@ rollout restart is required after the secret changes. Secrets live in the
 Confirm the rotation took effect with `/health` **and** the real-completion check
 in step 2 of triage, not by reading the secret back.
 
-> [!UNVERIFIED] The end-to-end rotation procedure — which secret object, which
-> key, and who authorizes the change — is not documented here and was not
-> confirmed. This is the highest-likelihood 3am page (see the standing issue
-> below) and the gap is the most operationally significant one in this document.
+> [!UNVERIFIED] **No end-to-end rotation procedure is written down anywhere.**
+> Which secret object holds the provider credential, which key within it, and who
+> authorizes the change are all unrecorded, and this pass did not establish them.
+> This remains the most significant procedural gap in the document, and it is the
+> highest-likelihood reason you were paged (see the standing issue below).
+>
+> **What to do:** email **john@scharber.com**, who owns the service and can
+> authorize and perform the rotation. You are not stranded — the contact is known
+> and is the same address the platform's alerts already deliver to. What is
+> missing is a procedure you could execute yourself, so do not attempt to
+> reconstruct one from the deployment spec under time pressure. If you carry out a
+> rotation with the owner, write the steps down afterwards; that is what closes
+> this gap.
 
 ## Failure modes
 
 Sourced from Loki over the 48 hours preceding 2026-08-24. Four distinct error
-signatures were observed. Alerting at the time covered only semantic-cache spend,
-not availability (see escalation).
+signatures were observed. **Note the date when reading this table:** at the time
+it was built, alerting covered only semantic-cache spend and no alert could reach
+a human, so these signatures were all found by looking rather than by being
+notified. Both of those have since changed — see escalation — so a failure of
+this kind today may well page you first.
 
 | Symptom | Literal error text | Cause | Fix | Confirm |
 |---|---|---|---|---|
@@ -966,31 +1011,77 @@ second usually means a caller changed their client; it is their fix, not yours.
 **Owner:** John Scharber. This is a single-maintainer service; there is no
 rotation and no second on-call.
 
-> [!UNVERIFIED] No contact channel, response-time expectation, or fallback
-> contact is recorded. At 3am this document cannot tell you how to reach the one
-> person who can authorize a credential rotation — which is also the most likely
-> reason you were paged. Fill this in before relying on this document for an
-> out-of-hours incident.
+**Contact:** email **john@scharber.com**. That is the same address the platform's
+own alerts are delivered to (see the alerting note below), so it is a channel
+already known to reach a human rather than a second, untested one.
 
-> [!IMPORTANT] **Alerting covers cost, not availability.** As of 2026-08-24 the
-> only alerts touching this service were `AIQGSemCacheJudgeBudgetExhausted` and
-> `AIQGSemCacheJudgeBudgetNearCap` — both semantic-cache spend governance.
-> Nothing paged on the service being down, on error rate, or on provider health,
-> so every triage step in this document assumed you already knew something was
-> wrong. Five availability and quality alerts were added on 2026-08-24 and are
-> **live and evaluating** (`llm_router_availability` group in the
-> `prometheus-shared-rules` ConfigMap): LLMRouterAllReplicasDown,
-> LLMRouterReplicaDown, AIQGRequestTierDegraded, AIQGEventEmissionFailing,
-> AIQGEmitLatencyHigh.
+No response-time commitment and no secondary contact are recorded. Treat an
+out-of-hours email as best-effort: it will arrive, but nothing in this
+documentation promises when it will be read, and there is nobody else to fall
+back to. If an incident needs an answer within a bounded time, say so explicitly
+in the subject line rather than assuming urgency is inferred.
+
+> [!IMPORTANT] **Alerting now reaches a human inbox.** Until 2026-08-24 the only
+> alerts touching this service were `AIQGSemCacheJudgeBudgetExhausted` and
+> `AIQGSemCacheJudgeBudgetNearCap` — both semantic-cache spend governance —
+> and nothing paged on the service being down. Five availability and quality
+> alerts were added on 2026-08-24 and are **live and evaluating**
+> (`llm_router_availability` group in the `prometheus-shared-rules` ConfigMap):
+> LLMRouterAllReplicasDown, LLMRouterReplicaDown, AIQGRequestTierDegraded,
+> AIQGEventEmissionFailing, AIQGEmitLatencyHigh.
 >
-> **They still will not reach you.** Alertmanager routes every alert to
-> `http://127.0.0.1:5001/`, the upstream example receiver. Nothing listens on
-> that port in the alertmanager pod (it serves only 9093/9094, single container,
-> no webhook sidecar), and the mail (SMTP) config points at `localhost:587` with a
-> placeholder `tas.yourdomain.com` sender. Email and Slack receivers are present
-> but commented out. A firing alert is therefore detected, grouped, and dropped.
-> Configuring a real receiver is the remaining half of the production blocker —
-> until then, detection exists and notification does not.
+> **Delivery was fixed on 2026-08-25.** Alertmanager previously routed everything
+> to `http://127.0.0.1:5001/`, the upstream example receiver, where firing alerts
+> were detected, grouped, and dropped. It now routes to a receiver named
+> `email-ops` that mails **john@scharber.com** with `send_resolved: true`, over
+> the Brevo relay `smtp-relay.brevo.com:587` from `aiqg@air-ops.net`. The relay
+> password is mounted from the `alertmanager-smtp` secret in `tas-shared` and read
+> via `smtp_auth_password_file` — it is never inline in the ConfigMap, and it does
+> not appear in this document.
+>
+> Timing: the default route uses `repeat_interval: 12h`, and a `severity="critical"`
+> route notifies faster and repeats harder at `group_wait: 10s` /
+> `repeat_interval: 2h`. Of the five rules above, `LLMRouterAllReplicasDown` is
+> the one labelled critical.
+>
+> **What this changes for you: alert silence is evidence again.** Under the old
+> configuration you could not infer anything from not having been paged, and every
+> triage step in this document assumed you already knew something was wrong. That
+> assumption no longer holds — if `LLMRouterAllReplicasDown` has not mailed you,
+> the scrape targets were up. Confirm the wiring rather than trusting this
+> paragraph:
+>
+> ```bash
+> curl -sS -k -G 'https://prometheus.tas.scharber.com/api/v1/query' \
+>   --data-urlencode 'query=alertmanager_notifications_total{integration="email"}' | \
+>   python3 -c "import sys,json
+> for s in json.load(sys.stdin)['data']['result']:
+>     print(s['metric']['instance'], s['value'][1])"
+> alertmanager-shared.tas-shared.svc:9093 0
+> alertmanager-shared:9093 0
+> ```
+>
+> **The series existing is the pass condition; the value is not.** `0` when
+> captured on 2026-08-26 means no alert has fired since Alertmanager last
+> restarted, which is the healthy state — not a broken pipeline. Compare against
+> `alertmanager_notifications_failed_total{integration="email"}`, also `0` on
+> that date: a
+> rising failure count there is delivery breaking, and it is the only signal that
+> would tell you, since a mail that never arrives looks exactly like an alert that
+> never fired. Slack remains commented out in the ConfigMap; email is the only
+> delivery path.
+>
+> > [!UNVERIFIED] A caveat reported separately, which this pass could not
+> > confirm: that the pod cannot persist its notification log and silences,
+> > leaving deduplication state non-durable across restarts — which would mean a
+> > restart can re-notify for an alert already sent, and that silences you set may
+> > not survive. What was checked: the `alertmanager-shared-pvc` claim is `Bound`
+> > (10Gi, `local-path`) as of 2026-08-26, it is mounted at `/alertmanager` matching
+> > `--storage.path`, and a `fix-data-permissions` init container chowns it to
+> > uid 65534 at startup. No persistence error appears in Loki, though the
+> > alertmanager container's own logs were not retrievable there, so absence of
+> > evidence is weak here. Treat duplicate notifications after a restart as
+> > plausible rather than alarming, and confirm with the owner.
 >
 > This cluster runs Prometheus as a plain Deployment, **not** the Prometheus
 > Operator. There is no `PrometheusRule` custom resource definition (CRD) — `kubectl get prometheusrules`
@@ -1041,10 +1132,12 @@ rotation and no second on-call.
 Internal-only failures with a known transient cause and a flat error rate do not
 warrant an out-of-hours page.
 
-**Attach when escalating:** the Loki query and the exact time window you used,
-`kubectl get pods -n tas-llm-router -o wide` output, the image tag of the
-affected deployment, whether the failure reproduces against both ingress hosts
-or only one, and the result of the real-completion check.
+**Attach when escalating,** in an email to **john@scharber.com**: the Loki query
+and the exact time window you used, `kubectl get pods -n tas-llm-router -o wide`
+output, the image tag of the affected deployment, whether the failure reproduces
+against both ingress hosts or only one, and the result of the real-completion
+check. If an alert mail brought you here, forward it rather than retyping it —
+it already carries the alert name, severity, and start time.
 
 **Do not attempt alone:** rotating provider credentials (it affects every tenant
 at once and there is no staged rollout), and scaling either deployment beyond
