@@ -32,6 +32,25 @@ documents:
       - "pkg/aiqg/breaker/**"
       - "docs/openapi.yaml"
 
+  - path: docs/concept/routing.md
+    doc_type: concept
+    owner: "@jscharber"
+    watches:
+      # The selection subsystem itself, plus everything that can change WHICH
+      # provider a request reaches: the handler that resolves policy onto the
+      # request context and walks the fallback chain, the policy client that
+      # fetches route rules, the provider adapters whose model tables and
+      # EstimateCost decide candidacy, the compiled-in model defaults, and the
+      # circuit breaker that can eject a candidate mid-decision.
+      - "internal/routing/**"
+      - "internal/server/**"
+      - "internal/middleware/**"
+      - "internal/providers/**"
+      - "internal/config/**"
+      - "pkg/aiqg/policy/**"
+      - "pkg/aiqg/affinity/**"
+      - "pkg/aiqg/breaker/**"
+
   # READMEs are orientation, not reference, and they rot differently: the status
   # section goes stale on its own, without any commit touching the README. So the
   # watches are deliberately broad — any substantial source change is a reason to
