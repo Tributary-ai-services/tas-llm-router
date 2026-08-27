@@ -59,7 +59,7 @@ func main() {
 		insecure   = flag.Bool("insecure", true, "skip TLS verification (TAS Loki uses the internal tas-ca-issuer CA)")
 
 		target     = flag.String("target", "loki", "loki | gateway | flows (enterprise reduction/caching demo flows) | fingerprint-eval (untagged distinct-toolset personas → measure inferred attribution accuracy)")
-		flowIDs    = flag.String("flow", "", "comma-separated demo flow ids for --target=flows (default: all six). See --print-catalog")
+		flowIDs    = flag.String("flow", "", "comma-separated demo flow ids for --target=flows (default: all seven). See --print-catalog")
 		printCat   = flag.Bool("print-catalog", false, "print the demo flow catalog as JSON and exit")
 		cacheBust  = flag.Bool("cache-bust", false, "append a per-run nonce to every prompt so --target=flows starts from a cold cache (otherwise a re-run inside the C1 TTL hits on everything, including the seed)")
 		gatewayURL = flag.String("gateway-url", "http://localhost:8086", "gateway base URL for --target=gateway (chat at /v1/chat/completions)")
