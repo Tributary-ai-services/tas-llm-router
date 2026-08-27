@@ -8,7 +8,7 @@
 // (pkg/aiqg/semcache/verify.go: scope · freshness · negation ·
 // entity_number_date).
 //
-// Why these six, and why some of them lose:
+// Why these seven, and why some of them lose:
 //
 // Reduction and semantic caching fire under different preconditions.
 // Reduction wants input-heavy, few-turn (uncached), MCP-routed traffic whose
@@ -134,7 +134,7 @@ func f64(v float64) *float64 { return &v }
 // zeroTemp is shared by every flow: cache eligibility requires it.
 var zeroTemp = f64(0)
 
-// ---- The six committed flows --------------------------------------------
+// ---- The seven committed flows --------------------------------------------
 
 var flowCatalog = []demoFlow{
 	// F1 — dual-lever canonical. Modeled ~37% reduction, ~55% cache.
