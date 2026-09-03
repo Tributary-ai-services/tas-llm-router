@@ -311,3 +311,41 @@ func TestOpenAIStreamEncoder_UnchangedFraming(t *testing.T) {
 		}
 	}
 }
+
+// #172: a mid-stream failure must be representable on the wire in each dialect.
+func TestStreamEncoders_WriteError(t *testing.T) {
+	se := &types.StreamError{Message: "vendor exploded", Type: "upstream_stream_error"}
+
+	// OpenAI dialect: an error frame, then the [DONE] sentinel, no named events.
+	rec := httptest.NewRecorder()
+	(&openAIStreamEncoder{w: rec}).writeError(se)
+	out := rec.Body.String()
+	if !strings.Contains(out, `"error"`) || !strings.Contains(out, "vendor exploded") {
+		t.Errorf("openai error frame missing:\n%s", out)
+	}
+	if !strings.Contains(out, "[DONE]") {
+		t.Errorf("openai error must still terminate with [DONE]:\n%s", out)
+	}
+	if strings.Contains(out, "event: ") {
+		t.Errorf("openai must not use named events:\n%s", out)
+	}
+
+	// Anthropic dialect: a native `error` event, never [DONE].
+	rec2 := httptest.NewRecorder()
+	newAnthropicStreamEncoder(rec2, nil, &types.ChatRequest{Model: "claude"}, nil).writeError(se)
+	out2 := rec2.Body.String()
+	if !strings.Contains(out2, "event: error") || !strings.Contains(out2, "vendor exploded") {
+		t.Errorf("anthropic error event missing:\n%s", out2)
+	}
+	if strings.Contains(out2, "[DONE]") {
+		t.Errorf("anthropic must not emit [DONE]:\n%s", out2)
+	}
+	for _, line := range strings.Split(out2, "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			var v interface{}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &v); err != nil {
+				t.Errorf("invalid JSON data line %q: %v", line, err)
+			}
+		}
+	}
+}

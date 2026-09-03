@@ -542,6 +542,15 @@ func (e *responsesStreamEncoder) done() {
 	e.emit("response.completed", map[string]interface{}{"response": env})
 }
 
+// writeError emits a Responses-API terminal error event so an SDK consuming the
+// typed event stream sees a failure rather than a stream that simply stops
+// before `response.completed`.
+func (e *responsesStreamEncoder) writeError(se *types.StreamError) {
+	e.emit("error", map[string]interface{}{
+		"type": "error", "code": se.Code, "message": se.Message, "param": nil,
+	})
+}
+
 // responseEnvelope builds the response object embedded in response.created /
 // response.completed events. The full output list is only materialized on
 // completion; the created event carries an empty output list.

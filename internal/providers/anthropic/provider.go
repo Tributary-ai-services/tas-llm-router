@@ -161,6 +161,11 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 			err := message.Accumulate(event)
 			if err != nil {
 				p.logger.WithError(err).Error("Failed to accumulate streaming event")
+				select {
+				case chunks <- &types.ChatChunk{Error: &types.StreamError{
+					Message: err.Error(), Type: "upstream_stream_error"}}:
+				case <-ctx.Done():
+				}
 				return
 			}
 
@@ -191,6 +196,11 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 
 		if stream.Err() != nil {
 			p.logger.WithError(stream.Err()).Error("Anthropic streaming error")
+			select {
+			case chunks <- &types.ChatChunk{Error: &types.StreamError{
+				Message: stream.Err().Error(), Type: "upstream_stream_error"}}:
+			case <-ctx.Done():
+			}
 			return
 		}
 

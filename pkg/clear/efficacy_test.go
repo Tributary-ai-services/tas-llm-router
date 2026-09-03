@@ -13,6 +13,7 @@ func TestScoreEfficacy_FinishReasonMap(t *testing.T) {
 		{"function_call", 100},
 		{"length", 60},
 		{"content_filter", 0},
+		{"error", 0}, // stream died mid-completion — truncated, unusable
 
 		// Anthropic vocabulary (normalized onto the same table)
 		{"end_turn", 100},

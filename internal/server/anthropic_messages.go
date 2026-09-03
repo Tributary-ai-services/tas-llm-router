@@ -599,6 +599,9 @@ func anthropicErrorType(status int) string {
 // keeping AIQG stamping in one place regardless of output format.
 type streamEncoder interface {
 	writeChunk(*types.ChatChunk)
+	// writeError renders a terminal error event in the encoder's wire dialect.
+	// It is terminal: the handler must not call done() afterward.
+	writeError(*types.StreamError)
 	done()
 }
 
@@ -650,6 +653,25 @@ func (e *openAIStreamEncoder) writeChunk(c *types.ChatChunk) {
 }
 
 func (e *openAIStreamEncoder) done() {
+	fmt.Fprint(e.w, "data: [DONE]\n\n")
+	if e.flusher != nil {
+		e.flusher.Flush()
+	}
+}
+
+// writeError emits an OpenAI-style error frame followed by the [DONE] sentinel,
+// so an SDK iterating `data:` frames sees a terminal error object rather than a
+// clean end. The error shape mirrors OpenAI's own streaming errors.
+func (e *openAIStreamEncoder) writeError(se *types.StreamError) {
+	typ := se.Type
+	if typ == "" {
+		typ = "upstream_error"
+	}
+	payload := map[string]interface{}{"error": map[string]interface{}{
+		"message": se.Message, "type": typ, "code": se.Code, "param": nil}}
+	if data, err := json.Marshal(payload); err == nil {
+		fmt.Fprintf(e.w, "data: %s\n\n", data)
+	}
 	fmt.Fprint(e.w, "data: [DONE]\n\n")
 	if e.flusher != nil {
 		e.flusher.Flush()
@@ -860,4 +882,18 @@ func (e *anthropicStreamEncoder) done() {
 		"usage": map[string]interface{}{"output_tokens": e.outputTokens},
 	})
 	e.emit("message_stop", map[string]interface{}{"type": "message_stop"})
+}
+
+// writeError emits Anthropic's native `error` named event. Anthropic permits an
+// error event at any point in the stream, so this is valid whether or not any
+// content blocks were opened — the client treats it as terminal.
+func (e *anthropicStreamEncoder) writeError(se *types.StreamError) {
+	typ := se.Type
+	if typ == "" {
+		typ = "api_error"
+	}
+	e.emit("error", map[string]interface{}{
+		"type":  "error",
+		"error": map[string]interface{}{"type": typ, "message": se.Message},
+	})
 }
