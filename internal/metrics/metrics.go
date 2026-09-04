@@ -116,9 +116,12 @@ var (
 		[]string{"provider", "error_type"},
 	)
 
-	// AuthAttemptsTotal counts gateway authentication outcomes. Result is
-	// "success", "malformed" (token failed the shape check before any lookup),
-	// or "unknown" (well-formed but unrecognized).
+	// AuthAttemptsTotal counts gateway (Path A) authentication outcomes. Result:
+	//   success   — token resolved (or opaque-proceed on the permissive path)
+	//   malformed — token failed the tas_qg_live_ shape check before any lookup
+	//   unknown   — well-formed token, not recognized by the resolver
+	//   suspended — token resolved to a suspended account (403)
+	//   missing   — strict ingress, no credential presented (401)
 	AuthAttemptsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "llm_router_auth_attempts_total",
@@ -170,7 +173,7 @@ func init() {
 // (#170). Seeding makes the honest zero observable from pod start. Counters with
 // unbounded label values (error_type) are seeded only for the known combinations.
 func seed() {
-	for _, result := range []string{"accepted", "rejected"} {
+	for _, result := range []string{"success", "malformed", "unknown", "suspended", "missing"} {
 		AuthAttemptsTotal.WithLabelValues(result).Add(0)
 	}
 	RateLimitHitsTotal.WithLabelValues("default").Add(0)

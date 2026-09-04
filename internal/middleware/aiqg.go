@@ -202,6 +202,9 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 			"path":           r.URL.Path,
 		}).Warn("TAS-Workflow value not in enum; falling through to heuristic")
 	default:
+		if errors.Is(err, ErrAuthMalformed) {
+			routermetrics.AuthAttemptsTotal.WithLabelValues("malformed").Inc()
+		}
 		writeValidationError(cfg.Logger, w, r, err)
 		return
 	}
@@ -231,7 +234,7 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 	}
 
 	// Auth succeeded (resolved, or opaque-proceed on the permissive path).
-	routermetrics.AuthAttemptsTotal.WithLabelValues("accepted").Inc()
+	routermetrics.AuthAttemptsTotal.WithLabelValues("success").Inc()
 
 	// Enter AIQG mode: attach collector + headers + routing sidecar +
 	// resolved token, stamp Received, arrange for StampComplete + event
@@ -1001,7 +1004,7 @@ func writeAnthropicWireError(w http.ResponseWriter, status int, errType, message
 // dashboards can break out genuine misconfigurations from "auth header
 // missing" failures.
 func rejectTokenUnknown(log *logrus.Logger, w http.ResponseWriter, r *http.Request) {
-	routermetrics.AuthAttemptsTotal.WithLabelValues("rejected").Inc()
+	routermetrics.AuthAttemptsTotal.WithLabelValues("unknown").Inc()
 	log.WithFields(logrus.Fields{
 		"event":  "aiqg.path_a_auth_rejected",
 		"reason": "token_unknown",
@@ -1024,7 +1027,7 @@ func rejectTokenUnknown(log *logrus.Logger, w http.ResponseWriter, r *http.Reque
 // recognize the token; we reject the request before forwarding. The
 // resolved token info is logged for support to triage.
 func rejectAccountSuspended(log *logrus.Logger, w http.ResponseWriter, r *http.Request, tok *tokens.Token) {
-	routermetrics.AuthAttemptsTotal.WithLabelValues("rejected").Inc()
+	routermetrics.AuthAttemptsTotal.WithLabelValues("suspended").Inc()
 	fields := logrus.Fields{
 		"event":  "aiqg.account_suspended",
 		"path":   r.URL.Path,
@@ -1120,7 +1123,7 @@ func (w *statusCapturingResponseWriter) Flush() {
 // response body names the missing header so customers can self-diagnose
 // without contacting support (per §7.3 mitigation).
 func rejectPathA(log *logrus.Logger, w http.ResponseWriter, r *http.Request, missing string) {
-	routermetrics.AuthAttemptsTotal.WithLabelValues("rejected").Inc()
+	routermetrics.AuthAttemptsTotal.WithLabelValues("missing").Inc()
 	log.WithFields(logrus.Fields{
 		"event":          "aiqg.path_a_auth_rejected",
 		"missing_header": missing,
