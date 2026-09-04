@@ -1666,6 +1666,7 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 	resp, err := s.completeWithFallback(r, req, provider, metadata)
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("Chat completion failed")
+		routermetrics.ErrorsTotal.WithLabelValues(metadata.Provider, "completion_failed").Inc()
 		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
 		return
 	}
@@ -1793,6 +1794,7 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	resp, err = s.attemptCompletionWithRetryAndFallback(r.Context(), req, initialProvider, metadata)
 	if err != nil {
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("All completion attempts failed")
+		routermetrics.ErrorsTotal.WithLabelValues(metadata.Provider, "completion_failed").Inc()
 		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
 		return
 	}
