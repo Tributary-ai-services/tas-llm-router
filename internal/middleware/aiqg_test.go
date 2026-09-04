@@ -127,9 +127,16 @@ func TestAIQG_StrictRejectsMissingTASAuth(t *testing.T) {
 // proceeds; the vendor key is resolved after routing (stored credential / TAS
 // shared key / 402) in server.applyBYOKKey, not gated here.
 func TestAIQG_TASAuthWithoutAuthorization_Proceeds(t *testing.T) {
+	// A resolver that recognizes the token — the realistic deployment shape.
+	// (Without a resolver a strict ingress now fails closed; see
+	// TestAIQG_StrictNoResolverFailsClosed. This test isolates the
+	// "Authorization optional under BYOK" behavior from that.)
+	resolver := tokens.NewMapResolver([]tokens.ConfigToken{
+		{Token: "tas_qg_live_abc", TenantID: "t1", AIQGAccountID: "a1"},
+	})
 	for _, strict := range []bool{true, false} {
 		next := &echoHandler{}
-		mw := NewAIQG(AIQGConfig{Strict: strict, Logger: silentLogger()})
+		mw := NewAIQG(AIQGConfig{Strict: strict, Logger: silentLogger(), Resolver: resolver})
 
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -145,11 +152,45 @@ func TestAIQG_TASAuthWithoutAuthorization_Proceeds(t *testing.T) {
 	}
 }
 
+// #173: a strict, customer-facing ingress with NO token resolver (empty token
+// list, no dashboard resolver) must FAIL CLOSED — a prefix-shaped bearer is not
+// accepted with blank tenant identity.
+func TestAIQG_StrictNoResolverFailsClosed(t *testing.T) {
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger()}) // no Resolver
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("strict + no resolver must 401, got %d", rec.Code)
+	}
+	if next.called {
+		t.Fatal("downstream must not run when failing closed")
+	}
+}
+
+// The permissive (incremental-rollout) path is unchanged: without a resolver,
+// a non-strict ingress still proceeds with an opaque token.
+func TestAIQG_PermissiveNoResolverProceeds(t *testing.T) {
+	next := &echoHandler{}
+	mw := NewAIQG(AIQGConfig{Strict: false, Logger: silentLogger()}) // no Resolver
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+
+	if !next.called || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("permissive + no resolver should proceed (code=%d called=%v)", rec.Code, next.called)
+	}
+}
+
 // Happy path: both headers present, validation passes, downstream runs
 // with AIQG state attached.
 func TestAIQG_HappyPathAttachesContextAndStamps(t *testing.T) {
 	next := &echoHandler{}
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger()})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc123")
@@ -256,7 +297,7 @@ func TestAIQG_AuthMalformedReturns400(t *testing.T) {
 // Soft error (unknown workflow): logged, field cleared, request proceeds.
 func TestAIQG_UnknownWorkflowFallsThrough(t *testing.T) {
 	next := &echoHandler{}
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger()})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -286,10 +327,11 @@ func TestAIQG_EmitsPairedEvents(t *testing.T) {
 	em := &events.MemoryEmitter{}
 	next := &echoHandler{}
 	mw := NewAIQG(AIQGConfig{
-		Strict:  true,
-		Logger:  silentLogger(),
-		Emitter: em,
-		Region:  "us-east",
+		Strict:   true,
+		Resolver: acceptAllResolver{},
+		Logger:   silentLogger(),
+		Emitter:  em,
+		Region:   "us-east",
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions?stream=true", nil)
@@ -501,6 +543,16 @@ func TestAIQG_SuspendedAccountReturns403(t *testing.T) {
 }
 
 // Resolver errors (e.g. backend store unavailable) → 503, no emit.
+// acceptAllResolver resolves any bearer to a fixed test tenant. Emission /
+// stamping tests use it so they exercise a realistic (non-nil) resolver — the
+// production shape — without caring about the exact token. (A nil resolver in
+// strict mode now fails closed; see TestAIQG_StrictNoResolverFailsClosed, #173.)
+type acceptAllResolver struct{}
+
+func (acceptAllResolver) Resolve(_ context.Context, _ string) (*tokens.Token, error) {
+	return &tokens.Token{TokenID: "tk", TenantID: "t1", AIQGAccountID: "a1"}, nil
+}
+
 type errResolver struct{ err error }
 
 func (e errResolver) Resolve(_ context.Context, _ string) (*tokens.Token, error) {
@@ -528,10 +580,13 @@ func TestAIQG_ResolverErrorReturns503(t *testing.T) {
 
 // No-resolver config (incremental rollout) accepts any TAS-Auth as
 // opaque; events emit with empty tenant fields.
-func TestAIQG_NoResolverAcceptsAnyToken(t *testing.T) {
+// In the PERMISSIVE (incremental-rollout) path, no resolver means tokens stay
+// opaque and the emitted event carries empty tenant fields. In STRICT mode this
+// same shape fails closed instead (TestAIQG_StrictNoResolverFailsClosed, #173).
+func TestAIQG_PermissiveNoResolverEmitsEmptyTenant(t *testing.T) {
 	em := &events.MemoryEmitter{}
 	mw := NewAIQG(AIQGConfig{
-		Strict:   true,
+		Strict:   false, // permissive rollout path
 		Logger:   silentLogger(),
 		Emitter:  em,
 		Resolver: nil, // no resolver configured
@@ -544,7 +599,7 @@ func TestAIQG_NoResolverAcceptsAnyToken(t *testing.T) {
 	mw(&echoHandler{}).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d want=200 (no-resolver path should accept)", rec.Code)
+		t.Fatalf("code=%d want=200 (permissive no-resolver path should accept)", rec.Code)
 	}
 	if em.Len() != 1 {
 		t.Fatalf("emit count=%d want=1", em.Len())
@@ -568,7 +623,7 @@ func TestAIQG_TokenUsageStampedReachesEventAndCost(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -611,7 +666,7 @@ func TestAIQG_GatekeeperFindingsStampedReachEventAndAssurance(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -647,7 +702,7 @@ func TestAIQG_CleanScanEmitsExplicitCounts(t *testing.T) {
 		StampGatekeeperFindings(r.Context(), GatekeeperDirectionOutbound, map[string]int{})
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
 	req.Header.Set("Authorization", "Bearer sk")
@@ -678,7 +733,7 @@ func TestAIQG_AssuranceCountsSumFindings(t *testing.T) {
 		StampGatekeeperFindings(r.Context(), GatekeeperDirectionOutbound, map[string]int{"high": 1})
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
 	req.Header.Set("Authorization", "Bearer sk")
@@ -703,7 +758,7 @@ func TestAIQG_CleanScanScoresAssurance100(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
 	req.Header.Set("Authorization", "Bearer sk")
@@ -730,7 +785,7 @@ func TestAIQG_NoScanLeavesAssuranceNil(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
 	req.Header.Set("Authorization", "Bearer sk")
@@ -754,7 +809,7 @@ func TestAIQG_FinishReasonStampedReachesEventAndEfficacy(t *testing.T) {
 		StampFinishReason(r.Context(), "stop")
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -779,7 +834,7 @@ func TestAIQG_ContentFilterScoresEfficacy0(t *testing.T) {
 		StampFinishReason(r.Context(), "content_filter")
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -802,7 +857,7 @@ func TestAIQG_RetryMetadataStampedReachesReliability(t *testing.T) {
 		StampRetryMetadata(r.Context(), 1, false) // clean first try
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -823,7 +878,7 @@ func TestAIQG_RetryWithFallbackDegradesReliability(t *testing.T) {
 		StampRetryMetadata(r.Context(), 2, true) // 1 retry + fallback = 50
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -850,9 +905,10 @@ func TestAIQG_VendorModelStampedReachEmittedEvent(t *testing.T) {
 	})
 
 	mw := NewAIQG(AIQGConfig{
-		Strict:  true,
-		Logger:  silentLogger(),
-		Emitter: em,
+		Strict:   true,
+		Resolver: acceptAllResolver{},
+		Logger:   silentLogger(),
+		Emitter:  em,
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -884,9 +940,10 @@ func TestAIQG_EmittedEventCarriesCLEARScores(t *testing.T) {
 	em := &events.MemoryEmitter{}
 	next := &echoHandler{}
 	mw := NewAIQG(AIQGConfig{
-		Strict:  true,
-		Logger:  silentLogger(),
-		Emitter: em,
+		Strict:   true,
+		Resolver: acceptAllResolver{},
+		Logger:   silentLogger(),
+		Emitter:  em,
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
@@ -932,7 +989,7 @@ func TestAIQG_EmittedEventCarriesCLEARScores(t *testing.T) {
 // Nil emitter must default to NoopEmitter (no panic, request succeeds).
 func TestAIQG_NilEmitterDefaultsToNoop(t *testing.T) {
 	next := &echoHandler{}
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: nil})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: nil, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("TAS-Auth", "tas_qg_live_abc")
@@ -970,7 +1027,7 @@ func TestAIQG_PassThroughDoesNotEmit(t *testing.T) {
 func TestAIQG_StrictRejectionDoesNotEmit(t *testing.T) {
 	em := &events.MemoryEmitter{}
 	next := &echoHandler{}
-	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em})
+	mw := NewAIQG(AIQGConfig{Strict: true, Logger: silentLogger(), Emitter: em, Resolver: acceptAllResolver{}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	rec := httptest.NewRecorder()

@@ -410,7 +410,18 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			logger.WithField("token_count", mr.Len()).
 				Info("AIQG token resolver: MapResolver (K8s Secret) — set aiqg.dashboard_url to switch to the dashboard-be HTTP resolver")
 		default:
-			logger.Info("AIQG token resolver: none — events emit with empty tenant fields")
+			if config.AIQG.Strict {
+				// #173: strict + no resolver is a misconfiguration, not a
+				// rollout state. Say so loudly — the ingress will now fail
+				// closed (401) on every request until the token Secret is
+				// populated or a dashboard resolver is configured.
+				logger.Error("AIQG token resolver: NONE while strict mode is ON — " +
+					"the token list is empty and no dashboard_url is set. The ingress " +
+					"will reject ALL requests with 401 until you populate the token " +
+					"Secret or set aiqg.dashboard_url. (Failing closed by design.)")
+			} else {
+				logger.Info("AIQG token resolver: none — events emit with empty tenant fields")
+			}
 		}
 
 		// Phase 4.0 — build the policy bundle resolver alongside the
