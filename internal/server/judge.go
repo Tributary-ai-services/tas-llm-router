@@ -17,6 +17,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/judge"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
 )
 
@@ -129,51 +130,133 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 	if expID != "" && variant == "control" && jr.experiments != nil && jr.shadowSampled(eventID) {
 		msgs := append([]types.Message(nil), req.Messages...) // snapshot for the goroutine
 		baseModel := req.Model
-		go jr.shadowEval(eventID, tenantID, expID, workflow, promptText, responseText, msgs, baseModel)
+		// Carry control's own cap and usage: the cap so the variant is judged
+		// under the same limit (#182), the usage so the recorded comparison is
+		// a paired cost sample rather than a preference with no price (#183).
+		go jr.shadowEval(eventID, tenantID, expID, workflow, promptText, responseText, msgs, baseModel,
+			cloneIntPtr(req.MaxTokens), resp.Usage)
 	}
 }
 
+// replayResult is what one variant replay produced: the text the judge
+// compares, and the economics of the call that produced it.
+//
+// The economics are not a byproduct. A shadow replay is a live, billed call on
+// the customer's own prompt, so its token counts are the cleanest cost
+// evidence available anywhere in the system — a paired sample against control
+// on identical input, which no windowed aggregate can match. Before #183 they
+// were read for the text and dropped on the floor.
+type replayResult struct {
+	Text         string
+	Model        string // what the variant actually resolved to after the override
+	Usage        *types.Usage
+	FinishReason string
+	Truncated    bool // the provider stopped at the cap — the comparison is suspect
+}
+
 // shadowEval replays the control prompt through each non-control variant and
-// pairwise-judges control vs variant, recording a per-variant preference.
-// Best-effort; off the hot path.
-func (jr *judgeRunner) shadowEval(eventID, tenantID, expID, workflow, prompt, controlResp string, msgs []types.Message, baseModel string) {
+// pairwise-judges control vs variant, recording a per-variant preference and
+// the measured cost of both arms. Best-effort; off the hot path.
+func (jr *judgeRunner) shadowEval(eventID, tenantID, expID, workflow, prompt, controlResp string, msgs []types.Message, baseModel string, controlMaxTokens *int, controlUsage *types.Usage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	variants := jr.experiments.NonControlOverrides(ctx, tenantID, expID)
 	for _, v := range variants {
-		variantResp, err := jr.replay(ctx, msgs, baseModel, v.Override)
-		if err != nil || strings.TrimSpace(variantResp) == "" {
+		rr, err := jr.replay(ctx, msgs, baseModel, controlMaxTokens, v.Override)
+		// Count the spend before anything can discard the result: an abstaining
+		// judge costs exactly what an agreeing one does, and a spend figure
+		// that counts only successes understates the bill in the one direction
+		// nobody notices.
+		jr.countReplay(rr)
+		if err != nil || strings.TrimSpace(rr.Text) == "" {
+			metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowReplayFailed).Inc()
 			jr.log.WithError(err).Debug("aiqg shadow-eval: replay failed")
 			continue
 		}
 		// Randomize A/B order per the bias control (§6.6).
 		variantFirst := crc32.ChecksumIEEE([]byte(eventID+":"+v.Key))%2 == 0
-		pw, err := jr.judge.ScorePairwise(ctx, workflow, prompt, controlResp, variantResp, variantFirst)
-		if err != nil || pw.Abstain {
+		pw, err := jr.judge.ScorePairwise(ctx, workflow, prompt, controlResp, rr.Text, variantFirst)
+		if err != nil {
+			metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowJudgeFailed).Inc()
 			continue
 		}
-		if err := jr.recorder.recordPairwise(ctx, tenantID, eventID, expID, v.Key, workflow, pw); err != nil {
-			jr.log.WithError(err).Debug("aiqg shadow-eval: record failed")
+		if pw.Abstain {
+			metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowJudgeAbstain).Inc()
+			continue
 		}
+		if err := jr.recorder.recordPairwise(ctx, tenantID, eventID, expID, v.Key, workflow, pw, rr, controlUsage); err != nil {
+			metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowRecordFailed).Inc()
+			jr.log.WithError(err).Debug("aiqg shadow-eval: record failed")
+			continue
+		}
+		metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowRecorded).Inc()
+	}
+}
+
+// countReplay records what a replay billed, whatever becomes of its result.
+func (jr *judgeRunner) countReplay(rr replayResult) {
+	if rr.Usage != nil {
+		metrics.ShadowTokensTotal.WithLabelValues("input").Add(float64(rr.Usage.PromptTokens))
+		metrics.ShadowTokensTotal.WithLabelValues("output").Add(float64(rr.Usage.CompletionTokens))
+	}
+	if rr.Truncated {
+		metrics.ShadowTruncatedTotal.Inc()
 	}
 }
 
 // replay runs the control prompt through a variant's override offline and
-// returns the variant's response text. Uses the configured provider key (no
-// customer key) and bypasses the AIQG middleware, same as the judge call.
-func (jr *judgeRunner) replay(ctx context.Context, msgs []types.Message, baseModel string, override json.RawMessage) (string, error) {
-	maxTokens := 256
-	req := &types.ChatRequest{Model: baseModel, Messages: msgs, MaxTokens: &maxTokens}
+// returns the variant's response together with its usage. Uses the configured
+// provider key (no customer key) and bypasses the AIQG middleware, same as the
+// judge call — see tas-llm-router#184 for the accounting and key-selection
+// consequences of that bypass, which this function does not resolve.
+func (jr *judgeRunner) replay(ctx context.Context, msgs []types.Message, baseModel string, controlMaxTokens *int, override json.RawMessage) (replayResult, error) {
+	// Mirror the control request's cap rather than imposing one of our own
+	// (#182). Control answered under the caller's limit; a variant capped at
+	// some constant of ours is cut off mid-thought and then judged against a
+	// COMPLETE control response — so the comparison measures our replay cap,
+	// and measures it worse the more verbose the candidate model is, which is
+	// backwards when the point is to find a cheaper model that still holds.
+	// A nil cap stays nil: the provider default is what control got too.
+	//
+	// A variant's own override may still set max_tokens below, and should win
+	// — a declared parameter is part of what the experiment is testing.
+	req := &types.ChatRequest{Model: baseModel, Messages: msgs, MaxTokens: cloneIntPtr(controlMaxTokens)}
 	applyExperimentOverride(req, override) // swaps model / params to the variant
 	_, provider, err := jr.router.Route(ctx, req)
 	if err != nil {
-		return "", err
+		return replayResult{}, err
 	}
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
-		return "", err
+		return replayResult{}, err
 	}
-	return extractResponseContent(resp), nil
+	out := replayResult{
+		Text:         extractResponseContent(resp),
+		Model:        req.Model,
+		Usage:        resp.Usage,
+		FinishReason: finishReasonOf(resp),
+	}
+	out.Truncated = out.FinishReason == "length"
+	return out, nil
+}
+
+// cloneIntPtr copies a caller-owned pointer so the replay cannot alias — and
+// therefore cannot be mutated through — a request the client still holds.
+func cloneIntPtr(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// finishReasonOf returns the first choice's finish reason, which is what
+// distinguishes "the model stopped" from "we cut it off".
+func finishReasonOf(resp *types.ChatResponse) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	return resp.Choices[0].FinishReason
 }
 
 // promptFromMessages flattens the request's user/system turns to text for the
@@ -245,8 +328,40 @@ func (jr *judgeRecorder) record(ctx context.Context, tenantID, eventID, experime
 }
 
 // recordPairwise posts a shadow-eval result (signal_type=judge_pairwise,
-// value=variant preference 0/0.5/1) attributed to the NON-control variant.
-func (jr *judgeRecorder) recordPairwise(ctx context.Context, tenantID, eventID, experimentID, variant, workflow string, pw judge.PairwiseResult) error {
+// value=variant preference 0/0.5/1) attributed to the NON-control variant,
+// together with the economics of both arms (#183).
+//
+// The preference alone answers "which answer is better?" and cannot answer
+// "was it cheaper?" — even though the replay just measured exactly that. The
+// two arms answered an identical prompt, so these token counts are a paired
+// sample: the strongest cost comparison obtainable, and one that a windowed
+// average over differently-shaped requests cannot reproduce.
+//
+// `variant_truncated` travels with it so a comparison distorted by a token cap
+// can be excluded downstream rather than quietly averaged in.
+func (jr *judgeRecorder) recordPairwise(ctx context.Context, tenantID, eventID, experimentID, variant, workflow string, pw judge.PairwiseResult, rr replayResult, controlUsage *types.Usage) error {
+	shadow := map[string]any{
+		"variant_model":         rr.Model,
+		"variant_finish_reason": rr.FinishReason,
+		"variant_truncated":     rr.Truncated,
+	}
+	if rr.Usage != nil {
+		shadow["variant_input_tokens"] = rr.Usage.PromptTokens
+		shadow["variant_output_tokens"] = rr.Usage.CompletionTokens
+		if rr.Usage.CacheReadTokens > 0 {
+			shadow["variant_cache_read_tokens"] = rr.Usage.CacheReadTokens
+		}
+		if rr.Usage.CacheCreationTokens > 0 {
+			shadow["variant_cache_creation_tokens"] = rr.Usage.CacheCreationTokens
+		}
+	}
+	if controlUsage != nil {
+		shadow["control_input_tokens"] = controlUsage.PromptTokens
+		shadow["control_output_tokens"] = controlUsage.CompletionTokens
+		if controlUsage.CacheReadTokens > 0 {
+			shadow["control_cache_read_tokens"] = controlUsage.CacheReadTokens
+		}
+	}
 	return jr.post(ctx, map[string]any{
 		"signal_type":        "judge_pairwise",
 		"tenant_id":          tenantID,
@@ -256,6 +371,7 @@ func (jr *judgeRecorder) recordPairwise(ctx context.Context, tenantID, eventID, 
 		"workflow":           workflow,
 		"overall":            pw.VariantPreference,
 		"rubric_version":     pw.RubricVersion,
+		"shadow":             shadow,
 	})
 }
 
