@@ -227,6 +227,16 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 			return
 		}
 		resolvedToken = tok
+	} else if cfg.Strict {
+		// Fail closed (#173). A strict, customer-facing ingress with no token
+		// resolver — an empty/unpopulated token Secret and no dashboard
+		// resolver — must NOT accept a prefix-shaped bearer with blank tenant
+		// identity. Serving it would attribute spend, policy resolution, and
+		// per-tenant enforcement to empty identity, and the made-up token would
+		// "work" only until the Secret is populated. An empty credential store
+		// fails closed, not open.
+		rejectNoResolver(cfg.Logger, w, r)
+		return
 	}
 
 	// Enter AIQG mode: attach collector + headers + routing sidecar +
@@ -1018,6 +1028,27 @@ func rejectTokenUnknown(log *logrus.Logger, w http.ResponseWriter, r *http.Reque
 // to a suspended account. Per spec request-event.md §564 we still
 // recognize the token; we reject the request before forwarding. The
 // resolved token info is logged for support to triage.
+// rejectNoResolver emits 401 when a strict ingress has no token resolver
+// configured (empty token list, no dashboard resolver). It fails closed rather
+// than accepting prefix-shaped tokens with blank identity (#173).
+func rejectNoResolver(log *logrus.Logger, w http.ResponseWriter, r *http.Request) {
+	log.WithFields(logrus.Fields{
+		"event":  "aiqg.path_a_auth_rejected",
+		"reason": "no_resolver_configured",
+		"path":   r.URL.Path,
+		"method": r.Method,
+	}).Error("Path A auth rejected — strict mode with no token resolver (empty token list); failing closed")
+
+	w.Header().Set("WWW-Authenticate", `TAS realm="aiqg"`)
+	if isAnthropicWirePath(r) {
+		writeAnthropicWireError(w, http.StatusUnauthorized, "authentication_error", "AIQG ingress is not accepting tokens (no token resolver configured)")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`{"error":{"code":"path_a_auth_required","message":"AIQG ingress is not accepting tokens (no token resolver configured)","reason":"no_resolver_configured","docs":"https://docs.tas.scharber.com/aiqg/auth"}}`))
+}
+
 func rejectAccountSuspended(log *logrus.Logger, w http.ResponseWriter, r *http.Request, tok *tokens.Token) {
 	fields := logrus.Fields{
 		"event":  "aiqg.account_suspended",
