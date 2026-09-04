@@ -31,8 +31,11 @@ func TestOpenAIProvider_GetCapabilities(t *testing.T) {
 		t.Error("OpenAI should support functions")
 	}
 
-	if !caps.SupportsVision {
-		t.Error("OpenAI should support vision")
+	// #174: /v1/capabilities reports the gateway's EFFECTIVE capability. The
+	// request translation layer has no arm for multimodal image content, so
+	// vision does not work end-to-end and SupportsVision must be false.
+	if caps.SupportsVision {
+		t.Error("OpenAI SupportsVision should be false: gateway translation layer carries no image content")
 	}
 
 	if !caps.SupportsStreaming {
@@ -187,9 +190,11 @@ func TestOpenAIProvider_Interfaces(t *testing.T) {
 		t.Error("OpenAI should support parallel functions")
 	}
 
-	// Test VisionProvider interface
-	if !provider.SupportsVision() {
-		t.Error("OpenAI should support vision")
+	// Test VisionProvider interface. #174: SupportsVision reports the
+	// gateway's effective capability, which is false until the translation
+	// layer carries image content.
+	if provider.SupportsVision() {
+		t.Error("OpenAI SupportsVision should be false: gateway translation layer carries no image content")
 	}
 
 	formats := provider.GetSupportedImageFormats()
