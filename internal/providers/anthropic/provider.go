@@ -80,13 +80,19 @@ func (p *AnthropicProvider) GetCapabilities() types.ProviderCapabilities {
 		SupportedModels:           p.config.Models,
 		SupportsFunctions:         true,  // Tool use
 		SupportsParallelFunctions: false, // Claude doesn't support parallel tool calls
-		SupportsVision:            true,
-		SupportsStructuredOutput:  false, // No strict JSON schema mode
-		SupportsStreaming:         true,
-		SupportsAssistants:        false,  // No assistants API
-		SupportsBatch:             false,  // No batch API yet
-		MaxContextWindow:          200000, // Claude-3.5 Sonnet context window
-		SupportedImageFormats:     []string{"png", "jpeg", "webp", "gif"},
+		// EFFECTIVE (gateway) capability, not the vendor's: the request
+		// translation layer has no arm for multimodal image content, so vision
+		// does not work end-to-end through the gateway even though Claude
+		// supports it. Reporting the vendor flag here misleads an integrator who
+		// checks /v1/capabilities before building (#174). Flip to true only when
+		// the translation layer carries image content.
+		SupportsVision:           false,
+		SupportsStructuredOutput: false, // No strict JSON schema mode
+		SupportsStreaming:        true,
+		SupportsAssistants:       false,  // No assistants API
+		SupportsBatch:            false,  // No batch API yet
+		MaxContextWindow:         200000, // Claude-3.5 Sonnet context window
+		SupportedImageFormats:    []string{"png", "jpeg", "webp", "gif"},
 		CostPer1KTokens: types.CostStructure{
 			InputCostPer1K:  0.003, // Default Claude-3.5 Sonnet pricing
 			OutputCostPer1K: 0.015,
@@ -386,7 +392,9 @@ func (p *AnthropicProvider) SupportsParallelFunctions() bool {
 
 // SupportsVision implements VisionProvider
 func (p *AnthropicProvider) SupportsVision() bool {
-	return true
+	// Effective gateway capability: the translation layer does not carry image
+	// content (#174). Not the vendor's raw flag.
+	return false
 }
 
 // GetSupportedImageFormats implements VisionProvider
