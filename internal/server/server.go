@@ -1747,12 +1747,66 @@ func setRouterMetadataHeaders(w http.ResponseWriter, metadata *types.RouterMetad
 	}
 }
 
+// streamChunks pumps the provider's chunk channel to the wire-format encoder,
+// stamping AIQG token-usage + finish_reason metadata as it goes.
+//
+// A terminal error frame (chunk.Error != nil — a vendor death or upstream break
+// mid-stream) is turned into a wire-level error event via enc.writeError, and
+// finish_reason is stamped "error" so the AIQG event (and CLEAR efficacy) records
+// a failure rather than reading a truncated stream as a clean completion. On the
+// error path done() is NOT called — the error event is terminal. Shared by both
+// streaming handlers so the two dialects and both stay in lockstep.
+func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-chan *types.ChatChunk, provider, model string) {
+	failed := false
+	var lastUsage *types.Usage
+	for chunk := range chunks {
+		if chunk.Error != nil {
+			middleware.StampFinishReason(ctx, "error")
+			s.logger.WithField("provider", provider).
+				WithField("detail", chunk.Error.Message).
+				Warn("streaming completion failed mid-stream")
+			enc.writeError(chunk.Error)
+			failed = true
+			break
+		}
+		if chunk.Usage != nil {
+			middleware.StampTokenUsage(ctx, chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
+			lastUsage = chunk.Usage
+		}
+		for _, c := range chunk.Choices {
+			if c.FinishReason != "" {
+				middleware.StampFinishReason(ctx, c.FinishReason)
+				break
+			}
+		}
+		enc.writeChunk(chunk)
+	}
+	if !failed {
+		enc.done()
+	}
+	// #171: streaming must feed tokens/cost too, or llm_router_cost_total
+	// under-reports by the streaming share on a gateway whose purpose is cost
+	// attribution — requests_total counts streams, cost_total did not. Same
+	// numbers as the AIQG token stamp and the billing record, so they cannot
+	// disagree. Recorded even on a truncated stream: those tokens were generated
+	// and billed.
+	if lastUsage != nil {
+		routermetrics.ObserveTokens(provider, lastUsage.PromptTokens, lastUsage.CompletionTokens)
+		if cost, ok := clear.DollarCost(provider, model, lastUsage.PromptTokens, lastUsage.CompletionTokens); ok {
+			routermetrics.ObserveCost(provider, model, cost)
+		}
+	}
+}
+
 // handleStreamingCompletion handles streaming chat completions
 func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, provider providers.LLMProvider, metadata *types.RouterMetadata) {
 	chunks, err := provider.StreamCompletion(r.Context(), req)
 	if err != nil {
-		// Fall back to non-streaming if the provider doesn't support streaming
+		// Fall back to non-streaming if the provider doesn't support streaming.
+		// The client asked for SSE and is getting a single JSON body instead, so
+		// signal the mode change in a header rather than changing it silently.
 		s.logger.WithError(err).WithField("provider", metadata.Provider).Warn("Streaming not supported, falling back to non-streaming")
+		w.Header().Set("X-TAS-Stream-Fallback", "true")
 		s.handleNonStreamingCompletion(w, r, req, provider, metadata)
 		return
 	}
@@ -1781,19 +1835,7 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 	// named-event SSE for /v1/messages). Token-usage + finish_reason stamping
 	// stays here so both formats feed the AIQG event pipeline identically.
 	enc := s.newStreamEncoder(w, r, req)
-	for chunk := range chunks {
-		if chunk.Usage != nil {
-			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
-		}
-		for _, c := range chunk.Choices {
-			if c.FinishReason != "" {
-				middleware.StampFinishReason(r.Context(), c.FinishReason)
-				break
-			}
-		}
-		enc.writeChunk(chunk)
-	}
-	enc.done()
+	s.streamChunks(r.Context(), enc, chunks, metadata.Provider, metadata.Model)
 }
 
 // handleNonStreamingCompletionWithRetry handles non-streaming completions with retry/fallback
@@ -2360,19 +2402,7 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 	// named-event SSE for /v1/messages). Token-usage + finish_reason stamping
 	// stays here so both formats feed the AIQG event pipeline identically.
 	enc := s.newStreamEncoder(w, r, req)
-	for chunk := range chunks {
-		if chunk.Usage != nil {
-			middleware.StampTokenUsage(r.Context(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
-		}
-		for _, c := range chunk.Choices {
-			if c.FinishReason != "" {
-				middleware.StampFinishReason(r.Context(), c.FinishReason)
-				break
-			}
-		}
-		enc.writeChunk(chunk)
-	}
-	enc.done()
+	s.streamChunks(r.Context(), enc, chunks, metadata.Provider, metadata.Model)
 }
 
 // attemptCompletionWithRetryAndFallback performs completion with retry and fallback logic

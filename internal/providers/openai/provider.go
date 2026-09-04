@@ -175,8 +175,17 @@ func (p *OpenAIProvider) StreamCompletion(ctx context.Context, req *types.ChatRe
 		for {
 			response, err := stream.Recv()
 			if err != nil {
+				// EOF is the normal end of stream. Any other error is a
+				// mid-stream failure: emit a terminal error frame so the gateway
+				// can signal it on the wire, rather than closing silently (which
+				// is byte-indistinguishable from a complete response).
 				if err.Error() != "EOF" {
 					p.logger.WithError(err).Error("Error receiving stream chunk")
+					select {
+					case chunks <- &types.ChatChunk{Error: &types.StreamError{
+						Message: err.Error(), Type: "upstream_stream_error"}}:
+					case <-ctx.Done():
+					}
 				}
 				return
 			}

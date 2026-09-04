@@ -39,7 +39,11 @@ func scoreEfficacy(in Input) *Score {
 		v = 100
 	case "length":
 		v = 60
-	case "content_filter":
+	case "content_filter", "error":
+		// content_filter: vendor blocked output. error: the stream died
+		// mid-completion (vendor death / upstream break) — a truncated,
+		// unusable response. Both are hard non-completions and score 0,
+		// undiluted, so a broken stream is not read as efficacious.
 		v = 0
 	default:
 		// Unknown finish_reason after normalization — return nil so

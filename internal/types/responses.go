@@ -56,6 +56,17 @@ type TopLogprob struct {
 	Bytes   []int   `json:"bytes,omitempty"`
 }
 
+// StreamError is a terminal error frame carried on the internal chunk stream
+// when a vendor dies mid-stream (or the upstream connection breaks). A provider
+// emits one final ChatChunk with Error set instead of silently closing the
+// channel; the streaming handler renders it as the wire dialect's error event so
+// a truncated stream is no longer byte-indistinguishable from a complete one.
+type StreamError struct {
+	Message string `json:"message"`
+	Type    string `json:"type,omitempty"`
+	Code    string `json:"code,omitempty"`
+}
+
 // Streaming response
 type ChatChunk struct {
 	ID                string        `json:"id"`
@@ -65,6 +76,11 @@ type ChatChunk struct {
 	Choices           []ChoiceChunk `json:"choices"`
 	Usage             *Usage        `json:"usage,omitempty"`
 	SystemFingerprint string        `json:"system_fingerprint,omitempty"`
+
+	// Error, when non-nil, marks this as a terminal error frame rather than a
+	// content chunk. It is consumed by the streaming handler (which turns it
+	// into a wire-level error event) and is never itself marshaled as a chunk.
+	Error *StreamError `json:"-"`
 
 	// Routing metadata (added by router)
 	RouterMetadata *RouterMetadata `json:"router_metadata,omitempty"`
