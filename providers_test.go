@@ -30,12 +30,12 @@ func TestOpenAIProvider(t *testing.T) {
 		APIKey: apiKey,
 		Models: []types.ModelInfo{
 			{
-				Name:              "gpt-3.5-turbo",
-				ProviderModelID:   "gpt-3.5-turbo",
-				InputCostPer1K:    0.0015,
-				OutputCostPer1K:   0.002,
-				MaxContextWindow:  16385,
-				MaxOutputTokens:   4096,
+				Name:             "gpt-3.5-turbo",
+				ProviderModelID:  "gpt-3.5-turbo",
+				InputCostPer1K:   0.0015,
+				OutputCostPer1K:  0.002,
+				MaxContextWindow: 16385,
+				MaxOutputTokens:  4096,
 			},
 		},
 		Timeout: 30 * time.Second,
@@ -69,9 +69,9 @@ func TestOpenAIProvider(t *testing.T) {
 		assert.Greater(t, response.Usage.TotalTokens, 0)
 
 		t.Logf("OpenAI Response: %s", response.Choices[0].Message.Content)
-		t.Logf("Usage: %d prompt + %d completion = %d total tokens", 
-			response.Usage.PromptTokens, 
-			response.Usage.CompletionTokens, 
+		t.Logf("Usage: %d prompt + %d completion = %d total tokens",
+			response.Usage.PromptTokens,
+			response.Usage.CompletionTokens,
 			response.Usage.TotalTokens)
 	})
 
@@ -85,7 +85,10 @@ func TestOpenAIProvider(t *testing.T) {
 		capabilities := provider.GetCapabilities()
 		assert.Equal(t, "openai", capabilities.ProviderName)
 		assert.True(t, capabilities.SupportsFunctions)
-		assert.True(t, capabilities.SupportsVision)
+		// #174: capabilities report the gateway's EFFECTIVE support. The
+		// translation layer carries no image content, so vision is false
+		// end-to-end even though OpenAI supports it.
+		assert.False(t, capabilities.SupportsVision)
 		assert.True(t, capabilities.SupportsStreaming)
 	})
 }
@@ -106,12 +109,12 @@ func TestAnthropicProvider(t *testing.T) {
 		APIKey: apiKey,
 		Models: []types.ModelInfo{
 			{
-				Name:              "claude-3-haiku-20240307",
-				ProviderModelID:   "claude-3-haiku-20240307",
-				InputCostPer1K:    0.00025,
-				OutputCostPer1K:   0.00125,
-				MaxContextWindow:  200000,
-				MaxOutputTokens:   4096,
+				Name:             "claude-3-haiku-20240307",
+				ProviderModelID:  "claude-3-haiku-20240307",
+				InputCostPer1K:   0.00025,
+				OutputCostPer1K:  0.00125,
+				MaxContextWindow: 200000,
+				MaxOutputTokens:  4096,
 			},
 		},
 		Timeout: 30 * time.Second,
@@ -145,9 +148,9 @@ func TestAnthropicProvider(t *testing.T) {
 		assert.Greater(t, response.Usage.TotalTokens, 0)
 
 		t.Logf("Anthropic Response: %s", response.Choices[0].Message.Content)
-		t.Logf("Usage: %d prompt + %d completion = %d total tokens", 
-			response.Usage.PromptTokens, 
-			response.Usage.CompletionTokens, 
+		t.Logf("Usage: %d prompt + %d completion = %d total tokens",
+			response.Usage.PromptTokens,
+			response.Usage.CompletionTokens,
 			response.Usage.TotalTokens)
 	})
 
@@ -161,7 +164,10 @@ func TestAnthropicProvider(t *testing.T) {
 		capabilities := provider.GetCapabilities()
 		assert.Equal(t, "anthropic", capabilities.ProviderName)
 		assert.True(t, capabilities.SupportsFunctions)
-		assert.True(t, capabilities.SupportsVision)
+		// #174: capabilities report the gateway's EFFECTIVE support. The
+		// translation layer carries no image content, so vision is false
+		// end-to-end even though Claude supports it.
+		assert.False(t, capabilities.SupportsVision)
 		assert.True(t, capabilities.SupportsStreaming)
 	})
 }
@@ -169,7 +175,7 @@ func TestAnthropicProvider(t *testing.T) {
 func TestBothProvidersComparison(t *testing.T) {
 	openaiKey := os.Getenv("OPENAI_API_KEY")
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
-	
+
 	if openaiKey == "" || anthropicKey == "" {
 		t.Skip("Both OPENAI_API_KEY and ANTHROPIC_API_KEY environment variables required")
 	}
@@ -232,11 +238,11 @@ func TestBothProvidersComparison(t *testing.T) {
 		require.NoError(t, err)
 
 		// Compare responses
-		t.Logf("OpenAI Response: %s (tokens: %d)", 
-			openaiResponse.Choices[0].Message.Content, 
+		t.Logf("OpenAI Response: %s (tokens: %d)",
+			openaiResponse.Choices[0].Message.Content,
 			openaiResponse.Usage.TotalTokens)
-		t.Logf("Anthropic Response: %s (tokens: %d)", 
-			anthropicResponse.Choices[0].Message.Content, 
+		t.Logf("Anthropic Response: %s (tokens: %d)",
+			anthropicResponse.Choices[0].Message.Content,
 			anthropicResponse.Usage.TotalTokens)
 
 		// Both should provide responses
