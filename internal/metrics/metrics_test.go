@@ -236,3 +236,32 @@ func TestObserveTokensSkipsZero(t *testing.T) {
 		t.Errorf("output tokens = %v, want 34", got)
 	}
 }
+
+// #170/#175: counters with known label sets must export a zero-valued series
+// from process start, so a fresh pod reads 0 rather than an absent ("No data")
+// panel. seed() runs in init().
+func TestSeededCountersExportZeroSeries(t *testing.T) {
+	if n := testutil.CollectAndCount(AuthAttemptsTotal); n < 2 {
+		t.Errorf("auth_attempts_total series=%d, want >=2 (accepted+rejected seeded)", n)
+	}
+	if n := testutil.CollectAndCount(RateLimitHitsTotal); n < 1 {
+		t.Errorf("rate_limit_hits_total series=%d, want >=1 (default seeded)", n)
+	}
+	if n := testutil.CollectAndCount(ErrorsTotal); n < 2 {
+		t.Errorf("errors_total series=%d, want >=2 (known providers seeded)", n)
+	}
+	// Seeded values are zero, not absent.
+	if got := testutil.ToFloat64(AuthAttemptsTotal.WithLabelValues("rejected")); got != 0 {
+		t.Errorf("seeded auth rejected=%v, want 0", got)
+	}
+}
+
+// The wired increment fires on a real event (delta-based so it's insensitive to
+// other tests touching the shared counter).
+func TestAuthAttemptsWiredIncrements(t *testing.T) {
+	before := testutil.ToFloat64(AuthAttemptsTotal.WithLabelValues("accepted"))
+	AuthAttemptsTotal.WithLabelValues("accepted").Inc()
+	if after := testutil.ToFloat64(AuthAttemptsTotal.WithLabelValues("accepted")); after != before+1 {
+		t.Errorf("accepted counter did not increment: before=%v after=%v", before, after)
+	}
+}

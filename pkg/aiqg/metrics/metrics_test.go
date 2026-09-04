@@ -129,3 +129,11 @@ func TestRecordEvent_NilSafety(t *testing.T) {
 	RecordEvent(events.ResponseEnvelope{Data: events.ResponseEvent{}})
 	// Should bump RequestsTotal but nothing else.
 }
+
+// #175: scan-finding series must exist (value 0) for every direction × severity
+// from pod start, so a blank panel reads "zero findings", not "not recorded".
+func TestScanFindingsSeededZeroSeries(t *testing.T) {
+	if n := testutil.CollectAndCount(ScanFindingsTotal); n < 8 {
+		t.Errorf("aiqg_scan_findings_total series=%d, want >=8 (2 directions x 4 severities seeded)", n)
+	}
+}

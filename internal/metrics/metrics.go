@@ -160,6 +160,23 @@ func init() {
 		RateLimitHitsTotal,
 		BlockedRequestsTotal,
 	)
+	seed()
+}
+
+// seed pre-initializes zero-valued series for counters whose label sets are
+// known and bounded. A CounterVec child is exported only once it is touched, so
+// without this a freshly restarted pod serves scrapes with these series ABSENT
+// — and a blank panel reads as "no data", dangerously close to "zero events"
+// (#170). Seeding makes the honest zero observable from pod start. Counters with
+// unbounded label values (error_type) are seeded only for the known combinations.
+func seed() {
+	for _, result := range []string{"accepted", "rejected"} {
+		AuthAttemptsTotal.WithLabelValues(result).Add(0)
+	}
+	RateLimitHitsTotal.WithLabelValues("default").Add(0)
+	for _, provider := range []string{"openai", "anthropic"} {
+		ErrorsTotal.WithLabelValues(provider, "completion_failed").Add(0)
+	}
 }
 
 // healthCollector reports provider health by asking the router at scrape time

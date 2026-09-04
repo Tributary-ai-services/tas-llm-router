@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	routermetrics "github.com/tributary-ai/llm-router-waf/internal/metrics"
 )
 
 // RateLimiter defines the interface for rate limiting
@@ -272,6 +274,7 @@ func RateLimitMiddleware(rateLimiter RateLimiter, keyExtractor func(*http.Reques
 			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(result.ResetTime.Unix(), 10))
 
 			if !result.Allowed {
+				routermetrics.RateLimitHitsTotal.WithLabelValues("default").Inc()
 				w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
