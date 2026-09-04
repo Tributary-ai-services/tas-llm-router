@@ -16,10 +16,13 @@ data:
   REDIS_URL: "redis://redis-shared.tas-shared:6379"
   REDIS_DB: "0"
 
-  # PostgreSQL Configuration (Shared)
-  DATABASE_URL: "postgres://tasuser:taspassword@postgres-shared.tas-shared:5432/tas_shared"
-  DATABASE_MAX_CONNECTIONS: "20"
-  DATABASE_TIMEOUT: "30s"
+  # PostgreSQL: intentionally omitted. The router does not connect to
+  # Postgres (no DATABASE_URL/DATABASE_PASSWORD consumer anywhere in the Go
+  # tree), so these keys were vestigial — and DATABASE_URL embedded the
+  # password in plaintext in a ConfigMap, which is readable by anything with
+  # namespace read access. Removed to close that exposure (#177). If a
+  # Postgres dependency is ever added, source the full URL from
+  # Secret/llm-router-secret at runtime, never inline it here.
 
   # Monitoring & Observability
   PROMETHEUS_URL: "http://prometheus-shared.tas-shared:9090"
