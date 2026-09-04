@@ -157,7 +157,10 @@ func buildAIQGEmitter(cfg *AIQGServerConfig, logger *logrus.Logger) (events.Emit
 	case "kafka":
 		ke, err := events.NewKafkaEmitter(cfg.Kafka.Brokers, cfg.Kafka.Topic)
 		if err != nil {
-			return nil, err
+			// Do NOT fail construction: a telemetry backend outage must not take
+			// down the serving path (#176). Degrade to the log emitter.
+			degradeToLogEmitter(logger, cfg, err, "kafka")
+			return logEmitter, nil
 		}
 		logger.WithFields(logrus.Fields{
 			"brokers": cfg.Kafka.Brokers,
@@ -168,7 +171,8 @@ func buildAIQGEmitter(cfg *AIQGServerConfig, logger *logrus.Logger) (events.Emit
 	case "both":
 		ke, err := events.NewKafkaEmitter(cfg.Kafka.Brokers, cfg.Kafka.Topic)
 		if err != nil {
-			return nil, err
+			degradeToLogEmitter(logger, cfg, err, "both")
+			return logEmitter, nil
 		}
 		logger.WithFields(logrus.Fields{
 			"brokers": cfg.Kafka.Brokers,
@@ -181,6 +185,25 @@ func buildAIQGEmitter(cfg *AIQGServerConfig, logger *logrus.Logger) (events.Emit
 			Warn("unknown AIQG emitter_type; falling back to log emitter")
 		return logEmitter, nil
 	}
+}
+
+// degradeToLogEmitter handles a Kafka emitter that could not be built at
+// startup (broker unreachable). The gateway must keep serving — a telemetry
+// backend outage taking down the completion path is the failure #176 fixes — so
+// it drops to the log emitter, warns loudly, and raises aiqg_emitter_degraded=1
+// for alerting. Events go to stdout (captured by the log collector) instead of
+// Kafka until a restart reconnects; the spend/telemetry stream degrades, the
+// serving path does not.
+func degradeToLogEmitter(logger *logrus.Logger, cfg *AIQGServerConfig, err error, configured string) {
+	metrics.EmitterDegraded.Set(1)
+	logger.WithError(err).WithFields(logrus.Fields{
+		"brokers":            cfg.Kafka.Brokers,
+		"topic":              cfg.Kafka.Topic,
+		"configured_emitter": configured,
+		"metric":             "aiqg_emitter_degraded=1",
+	}).Error("AIQG Kafka emitter unavailable at startup — DEGRADING to the log emitter so the gateway keeps serving. " +
+		"Events go to stdout (captured by log collection) instead of Kafka until a restart reconnects. " +
+		"A Kafka outage costs telemetry, not availability.")
 }
 
 // AIQGServerConfig configures the AIQG ingress wire-up.

@@ -142,6 +142,18 @@ const (
 	ShadowRecordFailed = "record_failed"
 )
 
+// EmitterDegraded is 1 when the configured Kafka event emitter could not be
+// built at startup and the gateway degraded to the log emitter, 0 otherwise.
+// A Gauge exports 0 from process start (no seeding needed), so a healthy gateway
+// reads 0 and the degraded state is alertable. Serving continues either way —
+// a Kafka outage costs telemetry, not availability (#176).
+var EmitterDegraded = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Name: "aiqg_emitter_degraded",
+		Help: "1 when the Kafka event emitter fell back to the log emitter at startup, else 0.",
+	},
+)
+
 func init() {
 	Registry.MustRegister(
 		EventsEmittedTotal,
@@ -152,6 +164,7 @@ func init() {
 		ShadowReplaysTotal,
 		ShadowTokensTotal,
 		ShadowTruncatedTotal,
+		EmitterDegraded,
 	)
 	seed()
 }
