@@ -774,6 +774,12 @@ func (r *Router) SetBreaker(b *breaker.Breaker) { r.breaker = b }
 // control folds over. Set once at construction from AIQG_BREAKER_ENABLED.
 func (r *Router) SetBreakerDefaultEnabled(enabled bool) { r.breakerDefaultEnabled = enabled }
 
+// BreakerDefaultEnabled reports the gateway-wide default — the third term of
+// the per-request gate (see breakerEnabled). This, not "is the breaker
+// constructed", is what decides whether ejection acts for a request carrying no
+// tenant control, so it is what a fleet-wide status surface must report.
+func (r *Router) BreakerDefaultEnabled() bool { return r.breakerDefaultEnabled }
+
 // breakerEnabled reports whether the breaker should act for THIS request: the
 // breaker must be constructed (a store attached) AND the effective flag — the
 // tenant control folded over the gateway default — must be on. A request with

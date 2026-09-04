@@ -22,13 +22,38 @@ import (
 // tenant data: it is provider-fleet metadata, identical for every caller.
 func (s *Server) handleBreakerStatus(w http.ResponseWriter, r *http.Request) {
 	b := s.router.Breaker()
-	if b == nil || !b.Enabled() {
-		// Distinguish "enabled and nothing ejected" from "not running at all".
-		// Reporting an empty list for both would let a disabled breaker read
-		// as a perfectly healthy one.
+	constructed := b != nil && b.Enabled()
+	// The breaker is now constructed unconditionally (a store is always
+	// attached), so b.Enabled() — object existence — is permanently true in
+	// production and cannot answer "is ejection actually in effect?". The value
+	// that decides for a request carrying no tenant control is the gateway-wide
+	// default, the third term of router.breakerEnabled. Report THAT as
+	// `enabled`, so the health panel's `!enabled` "not running" branch is
+	// reachable again when the default is off (issue #185).
+	defaultEnabled := s.router.BreakerDefaultEnabled()
+
+	// `state` carries the finer distinction the panel wants, which a single
+	// boolean cannot:
+	//   unavailable — no store attached; the breaker cannot act for anyone.
+	//   off         — constructed but off by default. An empty target list here
+	//                 is NOT a clean bill of health: nothing is watched for a
+	//                 tenant that has not forced cooldown on.
+	//   on          — constructed and on by default, fleet-wide.
+	state := "unavailable"
+	if constructed {
+		if defaultEnabled {
+			state = "on"
+		} else {
+			state = "off"
+		}
+	}
+
+	if !constructed {
 		writeBreakerJSON(w, map[string]interface{}{
-			"enabled": false,
-			"targets": []breaker.Status{},
+			"enabled":     false,
+			"constructed": false,
+			"state":       state,
+			"targets":     []breaker.Status{},
 		})
 		return
 	}
@@ -44,8 +69,16 @@ func (s *Server) handleBreakerStatus(w http.ResponseWriter, r *http.Request) {
 
 	cfg := b.Config()
 	writeBreakerJSON(w, map[string]interface{}{
-		"enabled": true,
-		"targets": statuses,
+		// `enabled` is the effective default, not object existence. `targets`
+		// and `config` are still reported when constructed — a tenant that
+		// forces cooldown on gets ejection even when the default is off, and
+		// those ejections belong in the surface — but `enabled`/`state` now tell
+		// the operator whether the empty case means "watched, nothing ejected"
+		// or "not watched by default".
+		"enabled":     defaultEnabled,
+		"constructed": true,
+		"state":       state,
+		"targets":     statuses,
 		// The effective config travels with the state so the panel can explain
 		// a decision in terms of the thresholds that produced it, rather than
 		// making the operator cross-reference a deployment manifest.
