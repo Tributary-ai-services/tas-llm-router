@@ -18,10 +18,11 @@ type stubProvider struct {
 	name       string
 	healthErr  error
 	checkCount int32
+	models     []types.ModelInfo // advertised models; nil = none (empty caps)
 }
 
 func (s *stubProvider) GetCapabilities() types.ProviderCapabilities {
-	return types.ProviderCapabilities{}
+	return types.ProviderCapabilities{SupportedModels: s.models}
 }
 func (s *stubProvider) GetProviderName() string { return s.name }
 func (s *stubProvider) ChatCompletion(ctx context.Context, req *types.ChatRequest) (*types.ChatResponse, error) {

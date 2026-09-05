@@ -477,6 +477,27 @@ func (r *Router) getProviderForModel(model string) (string, bool) {
 	return "", false
 }
 
+// providerServesModel reports whether prov advertises model in its
+// capabilities, using the same Name/ProviderModelID match as
+// getProviderForModel. An EMPTY model list is treated as "cannot tell" and
+// returns true: some provider configs leave SupportedModels unpopulated and
+// rely on passthrough, and a pin must not be dropped on the basis of a list
+// that was never filled in — that would regress working pins rather than fix
+// the opaque-500 case (#151), which is specifically a NON-empty list that
+// excludes the model.
+func providerServesModel(prov providers.LLMProvider, model string) bool {
+	models := prov.GetCapabilities().SupportedModels
+	if len(models) == 0 {
+		return true
+	}
+	for _, m := range models {
+		if m.Name == model || m.ProviderModelID == model {
+			return true
+		}
+	}
+	return false
+}
+
 // routeByStrategy routes the request using the specified strategy
 func (r *Router) routeByStrategy(ctx context.Context, req *types.ChatRequest, strategy RoutingStrategy) (*RoutingDecision, providers.LLMProvider, error) {
 	// A matched rule may replace the configured strategy for this request.
@@ -1153,6 +1174,16 @@ func (r *Router) routeWithPin(ctx context.Context, req *types.ChatRequest, strat
 	}
 	if !r.isProviderHealthy(ctx, pin) {
 		return r.escapePin(ctx, req, strategy, chain, "pinned provider "+pin+" unhealthy")
+	}
+	// The third way a pin can be unusable: the provider is configured and
+	// healthy but does not serve the requested model. provider_override is set
+	// independently of model, so a rule can pin a vendor for traffic whose model
+	// it cannot answer — and without this check the request routed anyway and
+	// surfaced as an opaque upstream 404 → 500 (#151). Degrade like the other
+	// two cases so the reason is on the decision, not lost in a bare 500.
+	if !providerServesModel(prov, req.Model) {
+		return r.escapePin(ctx, req, strategy, chain,
+			"pinned provider "+pin+" does not serve model "+req.Model)
 	}
 
 	costEst, err := prov.EstimateCost(req)
