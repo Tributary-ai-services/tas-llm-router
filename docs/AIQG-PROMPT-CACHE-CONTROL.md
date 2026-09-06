@@ -403,8 +403,8 @@ infra gap.
 | | Stage | Contents | Gate |
 |---|---|---|---|
 | **P0** ✅ | **Measure (no request changes)** — *implemented, pending deploy* | `pkg/aiqg/promptcache` (probe, 5m sliding window, tenant-scoped, `aiqg:pcp:` namespace) + `cachePrefixHash` (`internal/server/server.go`) + `StampCachePrefixHash` + `probePromptCache` in the AIQG middleware's deferred path. Emits `msg="aiqg prompt-cache probe"` with `prefix_seen`, `model`, `prompt_tokens`. Zero risk, zero vendor change. | Reuse ≥ 2 on some route |
-| **P1** | **Passthrough + `off`** | `cache_control` on `ContentPart`/system/tool types; thread to the Anthropic provider; `TAS-Prompt-Cache` header; `prompt_cache_mode` on events (**tag it `json:"prompt_cache_mode,omitempty"` — the first tagged-wire field this feature adds; a wrong/missing tag fails silently, §8**). Unblocks origins that already do it right. | — |
-| **P2** | **`auto`** | §4 placement, per-route enable on the routes P0 identified. Savings metric + zero-hit alert. | Measured savings > write premium |
+| **P1** ✅ | **Passthrough + `off`** | Done: `cache_control` on `ContentPart`/system/tool types threaded to the Anthropic provider (all four surfaces, PR #197, incl. the `omitzero` serialize fix); `TAS-Prompt-Cache` header + gateway-wide `prompt_cache.default_mode` (PR #198); `prompt_cache_mode`/`prompt_cache_breakpoints` on events. | — |
+| **P2** ◑ | **`auto`** | Done: §4.1 (system) + §4.2 (last complete turn) placement + §4.5 model-minimum gate + OpenAI no-op (`Available(auto)`=true, `Apply(auto)` places); savings metric + zero-hit alert scaffold (PR #199). **Remaining: §4.3 lookback fillers** (intermediate breakpoint every ~15 blocks in a long agentic turn); per-route enable on P0-identified routes. | Measured savings > write premium |
 | **P3** | **Router-aware** | Model-stickiness within a conversation (§5.1); cache-state in the routing cost model; failover-cold-write visibility. | — |
 | **P4** | **SDK upgrade** | v1.7.0 → v1.58.x for 1h TTL. Its own project. | — |
 

@@ -116,25 +116,26 @@ func TestParseTTLAcceptsOnlyWhatTheAPITakes(t *testing.T) {
 	}
 }
 
-// auto is accepted by the control surface but the placement engine is P2.
-// Reporting passthrough is what stops the event claiming a placement that never
-// happened — the same silent-failure shape this whole feature exists to end.
-func TestAutoIsNotYetAvailableAndSaysSo(t *testing.T) {
-	if Available(ModeAuto) {
-		t.Fatal("auto reported available before the placement engine exists")
+// auto is now available and actively places (§4). Detailed placement behaviour
+// lives in place_test.go; here we assert only the mode-layer contract: auto is
+// available, and Apply(auto) REPLACES the caller's breakpoints (§3) rather than
+// honouring them.
+func TestAutoIsAvailableAndReplacesClientBreakpoints(t *testing.T) {
+	if !Available(ModeAuto) || !Available(ModePassthrough) || !Available(ModeOff) {
+		t.Fatal("every mode should be available now that the placement engine has landed")
 	}
-	if !Available(ModePassthrough) || !Available(ModeOff) {
-		t.Fatal("an implemented mode reported unavailable")
-	}
-	r := reqWith(true, false, false)
+	r := reqWith(true, false, false) // client breakpoint on the system message; model unset
 	applied, n := Apply(r, ModeAuto)
-	if applied != ModePassthrough {
-		t.Fatalf("applied = %v; auto must not claim to have placed anything", applied)
+	if applied != ModeAuto {
+		t.Fatalf("applied = %v, want auto", applied)
 	}
-	// The caller's own breakpoints survive — discarding them would leave the
-	// request with no caching at all, which is worse than doing nothing.
-	if n != 1 || r.Messages[0].CacheControl == nil {
-		t.Fatal("auto discarded the caller's breakpoints instead of honouring them")
+	// Model is unset (non-Anthropic) so placement is a no-op — and the caller's
+	// breakpoint must be gone regardless, because auto replaces, not honours.
+	if n != 0 {
+		t.Fatalf("placed %d breakpoints on a non-Anthropic model; want 0 (no-op)", n)
+	}
+	if r.Messages[0].CacheControl != nil {
+		t.Fatal("auto did not strip the caller's breakpoint; it must replace, not honour")
 	}
 }
 

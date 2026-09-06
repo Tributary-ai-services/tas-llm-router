@@ -116,11 +116,10 @@ func Resolve(routeDefault Mode, header string) Mode {
 
 // Available reports whether a mode can actually be applied today.
 //
-// ModeAuto is accepted by the control surface but the placement engine is P2.
-// Rather than silently behaving as passthrough — which is exactly the
-// pay-full-price-and-never-know failure this whole feature exists to end — an
-// unavailable mode is reported so the caller and the event can say so.
-func Available(m Mode) bool { return m != ModeAuto }
+// The auto placement engine (§4.1/§4.2) has landed, so every mode is now
+// available. Kept as a function because callers and the event still ask, and a
+// future mode could reintroduce an unavailable state.
+func Available(m Mode) bool { return true }
 
 // Apply enforces the mode over a request's breakpoints and reports how many
 // survive, for the event.
@@ -133,12 +132,16 @@ func Apply(req *types.ChatRequest, m Mode) (applied Mode, breakpoints int) {
 		strip(req)
 		return ModeOff, 0
 	case ModeAuto:
-		// P2 will place here. Until then the caller's own breakpoints are
-		// honoured unchanged — the conservative choice, since discarding them
-		// would leave the request with no caching at all — and the applied
-		// mode is reported as passthrough so the event never claims a
-		// placement that did not happen.
-		return ModePassthrough, count(req)
+		// Auto REPLACES whatever the client sent (§3): strip first so a caller's
+		// breakpoints cannot combine with the gateway's placement into more than
+		// four, and so the gateway's judgement — not the origin's — decides.
+		strip(req)
+		n := placeAuto(req)
+		// Report auto honestly, including the no-op count. A non-Anthropic model
+		// or a prefix below the minimum yields 0 breakpoints: the event then
+		// shows mode=auto with 0, which is the truth (auto ran and placed
+		// nothing) rather than a passthrough that never happened.
+		return ModeAuto, n
 	default:
 		return ModePassthrough, count(req)
 	}

@@ -61,11 +61,14 @@ func (s *Server) applyPromptCacheMode(r *http.Request, req *types.ChatRequest) {
 		breakpoints = promptcache.MaxBreakpoints
 	}
 
-	if mode == promptcache.ModeAuto && !promptcache.Available(mode) {
-		// Asked for placement we cannot yet do. Saying so is the difference
-		// between "we did nothing" and "we did nothing and told you we did
-		// something".
-		s.logger.Debug("TAS-Prompt-Cache: auto requested; placement engine not yet available, honouring caller breakpoints")
+	if mode == promptcache.ModeAuto && breakpoints == 0 {
+		// Auto ran but placed nothing: a non-Anthropic model (OpenAI caches
+		// automatically) or a prefix below the model's silent minimum. Not an
+		// error — but worth a debug line so "auto is on yet no reads" is
+		// explicable rather than mysterious. The event still carries mode=auto,
+		// breakpoints=0, which the zero-hit alert keys on.
+		s.logger.WithField("model", req.Model).
+			Debug("TAS-Prompt-Cache: auto placed no breakpoints (non-Anthropic model or prefix below the model minimum)")
 	}
 
 	middleware.StampPromptCache(r.Context(), string(applied), breakpoints)
