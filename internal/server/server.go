@@ -83,6 +83,12 @@ type Server struct {
 	// judging is disabled.
 	judge *judgeRunner
 
+	// promptCacheDefault is the gateway-wide default prompt-cache mode, parsed
+	// once from config at construction so applyPromptCacheMode never re-parses
+	// (and never re-warns) on the hot path. Empty means "no configured default"
+	// → the built-in DefaultMode (passthrough).
+	promptCacheDefault promptcache.Mode
+
 	// respCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
 	// Nil when disabled — every cache branch is a no-op in that case.
 	respCache    responsecache.Cache
@@ -123,6 +129,20 @@ type ServerConfig struct {
 	Security       *middleware.SecurityMiddlewareConfig `yaml:"security"`
 	Validation     *middleware.ValidationConfig         `yaml:"validation"`
 	AIQG           *AIQGServerConfig                    `yaml:"aiqg"`
+	PromptCache    *PromptCacheConfig                   `yaml:"prompt_cache"`
+}
+
+// PromptCacheConfig sets the gateway-wide default for vendor prompt-cache
+// behaviour (docs/AIQG-PROMPT-CACHE-CONTROL.md §3). It is the "global default"
+// the request-boundary resolver folds a per-request TAS-Prompt-Cache header
+// over — the header always wins, and an explicit `off` from the caller wins
+// over everything. Absent or empty leaves the built-in default (passthrough)
+// in effect, so omitting this block changes nothing.
+type PromptCacheConfig struct {
+	// DefaultMode is "passthrough", "auto", or "off". An unrecognised value is
+	// logged once at construction and ignored (falls back to passthrough)
+	// rather than silently applying a mode nobody configured.
+	DefaultMode string `yaml:"default_mode"`
 }
 
 // aiqgMetricsAdapter implements events.EmitMetricsRecorder by
@@ -352,6 +372,19 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		router: router,
 		logger: logger,
 		config: config,
+	}
+
+	// Parse the gateway-wide prompt-cache default once. An unrecognised value
+	// is warned about here — at boot, where an operator will see it — rather
+	// than on every request; it then falls back to the built-in default.
+	if config.PromptCache != nil && config.PromptCache.DefaultMode != "" {
+		if mode, ok := promptcache.ParseMode(config.PromptCache.DefaultMode, ""); ok {
+			server.promptCacheDefault = mode
+			logger.WithField("default_mode", string(mode)).Info("Prompt-cache default mode configured")
+		} else {
+			logger.WithField("default_mode", config.PromptCache.DefaultMode).
+				Warn("Unrecognised prompt_cache.default_mode; using the built-in default (passthrough)")
+		}
 	}
 
 	// llm_router_provider_health reads the router at scrape time rather than

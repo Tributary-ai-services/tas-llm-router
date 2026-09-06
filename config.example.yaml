@@ -10,6 +10,14 @@ server:
     spec_path: "docs/openapi.yaml"
     strict_mode: false
 
+  # Vendor prompt-cache default (docs/AIQG-PROMPT-CACHE-CONTROL.md §3).
+  # Gateway-wide default that a per-request TAS-Prompt-Cache header folds over:
+  # the header always wins, and an explicit `off` from the caller wins over
+  # everything. One of: passthrough (default) | auto | off. Omit this block to
+  # leave the built-in passthrough default unchanged.
+  prompt_cache:
+    default_mode: passthrough
+
 router:
   default_strategy: "cost_optimized"
   health_check_interval: 30s
