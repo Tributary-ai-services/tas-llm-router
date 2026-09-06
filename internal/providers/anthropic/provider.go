@@ -476,6 +476,14 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 		if err != nil {
 			return nil, err
 		}
+		// Honour a message-level breakpoint on a non-system message. Before #100
+		// only the system block's cache_control was threaded; a cache_control on
+		// a user/assistant/tool message reached the type and was then dropped,
+		// so passthrough silently failed for exactly the agentic turns where it
+		// pays most.
+		if msg.CacheControl != nil {
+			markLastBlockCached(&anthropicMsg)
+		}
 		messages = append(messages, anthropicMsg)
 	}
 
@@ -495,7 +503,7 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 			// the wrong TTL is still far better than dropping it, which is
 			// what happened before this existed. Upgrading the SDK is tracked
 			// separately (docs/AIQG-PROMPT-CACHE-CONTROL.md §7).
-			block.CacheControl = anthropic.CacheControlEphemeralParam{}
+			block.CacheControl = ephemeralCacheControl()
 		}
 		anthropicReq.System = []anthropic.TextBlockParam{block}
 	}
@@ -536,6 +544,13 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 				)
 				if tool.Function.Description != "" {
 					anthropicTool.OfTool.Description = anthropic.String(tool.Function.Description)
+				}
+				// A breakpoint on a tool caches the whole tool block (tools
+				// render first), the cheapest large win for agent traffic whose
+				// tool definitions are big and identical every turn. Threaded
+				// per #100; before this it was dropped like the message blocks.
+				if tool.CacheControl != nil {
+					anthropicTool.OfTool.CacheControl = ephemeralCacheControl()
 				}
 				tools = append(tools, anthropicTool)
 			}
@@ -625,7 +640,13 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 		var blocks []anthropic.ContentBlockParamUnion
 		for _, part := range content {
 			if part.Type == "text" {
-				blocks = append(blocks, anthropic.NewTextBlock(part.Text))
+				blk := anthropic.NewTextBlock(part.Text)
+				// Per-block breakpoint (#100 passthrough): a cache_control on
+				// this specific content part caches the prefix through it.
+				if part.CacheControl != nil {
+					setBlockCacheControl(&blk)
+				}
+				blocks = append(blocks, blk)
 			}
 			// Skip image parts for now - would need base64 conversion
 		}
@@ -645,6 +666,52 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 			return anthropic.NewAssistantMessage(anthropic.NewTextBlock(contentStr)), nil
 		}
 	}
+}
+
+// setBlockCacheControl marks one content block as a vendor prompt-cache
+// breakpoint, on whichever block variant the union actually holds.
+//
+// The pinned SDK's CacheControlEphemeralParam carries Type only — no TTL field
+// — so a caller's 1h request cannot be expressed and lands at the 5m default
+// (SDK upgrade tracked in docs/AIQG-PROMPT-CACHE-CONTROL.md §7). Honouring the
+// breakpoint at the wrong TTL is far better than dropping it, which is what the
+// gateway did before #100 for every breakpoint that was not on the system
+// block.
+func setBlockCacheControl(b *anthropic.ContentBlockParamUnion) {
+	switch {
+	case b.OfText != nil:
+		b.OfText.CacheControl = ephemeralCacheControl()
+	case b.OfImage != nil:
+		b.OfImage.CacheControl = ephemeralCacheControl()
+	case b.OfToolUse != nil:
+		b.OfToolUse.CacheControl = ephemeralCacheControl()
+	case b.OfToolResult != nil:
+		b.OfToolResult.CacheControl = ephemeralCacheControl()
+	}
+}
+
+// ephemeralCacheControl builds a breakpoint that actually serializes. The SDK
+// tags CacheControlEphemeralParam `omitzero`, and its only field is a `constant`
+// whose zero value is empty — so a bare CacheControlEphemeralParam{} marshals to
+// NOTHING and the breakpoint silently vanishes on the wire. Type must be set
+// explicitly for the field to appear. (This is why the system-block breakpoint
+// looked wired but produced no cache_control before #100's provider fix.)
+func ephemeralCacheControl() anthropic.CacheControlEphemeralParam {
+	cc := anthropic.CacheControlEphemeralParam{}
+	cc.Type = "ephemeral"
+	return cc
+}
+
+// markLastBlockCached puts a breakpoint at the end of a message. A message-level
+// cache_control means "cache everything through the end of this message" (see
+// types.Message.CacheControl), and Anthropic caches the prefix up to and
+// including the block the breakpoint sits on — so the last block is the right
+// place.
+func markLastBlockCached(m *anthropic.MessageParam) {
+	if m == nil || len(m.Content) == 0 {
+		return
+	}
+	setBlockCacheControl(&m.Content[len(m.Content)-1])
 }
 
 // messageContentString flattens a message's content (string or multimodal
