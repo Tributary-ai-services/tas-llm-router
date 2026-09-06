@@ -42,10 +42,12 @@ func (s *Server) applyPromptCacheMode(r *http.Request, req *types.ChatRequest) {
 	}
 	_ = requested
 
-	// Route-level default arrives via resolution once dashboard-be carries a
-	// prompt_cache block; until then only the header and the global default
-	// participate. Resolve already handles an empty route default.
-	mode := promptcache.Resolve("", header)
+	// Precedence: an explicit header wins; absent a header the gateway-wide
+	// default (prompt_cache.default_mode, parsed once at construction) applies;
+	// absent that, the built-in default. A per-route default from dashboard-be
+	// resolution will slot between header and global once that block exists —
+	// Resolve already models header > route > global.
+	mode := promptcache.Resolve(s.promptCacheDefault, header)
 
 	applied, breakpoints := promptcache.Apply(req, mode)
 	if removed := promptcache.Clamp(req); removed > 0 {
