@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 )
 
 // ObserveEmit records a single Emitter.Emit call's duration and
@@ -70,5 +71,45 @@ func RecordEvent(resp events.ResponseEnvelope) {
 				ScanFindingsTotal.WithLabelValues("outbound", sev).Add(float64(count))
 			}
 		}
+	}
+
+	recordPromptCache(resp)
+}
+
+// recordPromptCache pushes prompt-cache volume and savings from one event.
+//
+// Synthetic traffic (probes, demo generators, smoke tests) is excluded: it must
+// not inflate a savings figure nobody actually banked, nor create phantom
+// auto-mode volume the zero-hit alert would then treat as real.
+func recordPromptCache(resp events.ResponseEnvelope) {
+	if resp.Data.Synthetic {
+		return
+	}
+	vendor := resp.Data.Vendor
+	if vendor == "" {
+		vendor = "unknown"
+	}
+	mode := resp.Data.PromptCacheMode
+	if mode == "" {
+		mode = "none"
+	}
+	PromptCacheRequestsTotal.WithLabelValues(vendor, mode).Inc()
+
+	ta := resp.Data.TokenAccounting
+	if ta == nil {
+		return
+	}
+	if ta.CacheReadTokens > 0 {
+		PromptCacheReadTokensTotal.WithLabelValues(vendor).Add(float64(ta.CacheReadTokens))
+	}
+	if ta.CacheCreationTokens > 0 {
+		PromptCacheCreationTokensTotal.WithLabelValues(vendor).Add(float64(ta.CacheCreationTokens))
+	}
+	if ta.CacheReadCostUSD > 0 && clear.CacheReadMultiplier > 0 {
+		// A read is billed at CacheReadMultiplier (0.10×) of the input rate, so
+		// full price for those tokens is read_cost/mult and the avoided spend is
+		// the remainder: read_cost × (1-mult)/mult.
+		savings := ta.CacheReadCostUSD * (1 - clear.CacheReadMultiplier) / clear.CacheReadMultiplier
+		PromptCacheSavingsUSDTotal.WithLabelValues(vendor).Add(savings)
 	}
 }

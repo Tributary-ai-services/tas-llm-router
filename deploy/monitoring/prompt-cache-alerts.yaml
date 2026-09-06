@@ -1,0 +1,59 @@
+# Prometheus alerting rules for vendor prompt caching (tas-llm-router #100).
+#
+# These are NOT loaded by this repo. The TAS Prometheus lives in the
+# shared-monitoring stack (see the root CLAUDE.md observability section); copy
+# this group into that Prometheus's rule_files set, or reference it from a
+# ConfigMap, to activate. It is version-controlled here, next to the code that
+# emits the series, so the alert and the metric evolve together.
+#
+# Series emitted by pkg/aiqg/metrics (scraped from /aiqg/metrics):
+#   aiqg_prompt_cache_requests_total{vendor, mode}   applied-mode request volume
+#   aiqg_prompt_cache_read_tokens_total{vendor}      cache-hit tokens
+#   aiqg_prompt_cache_creation_tokens_total{vendor}  cache-write tokens
+#   aiqg_prompt_cache_savings_usd_total{vendor}      USD avoided by reads
+groups:
+  - name: prompt-cache
+    rules:
+      # The silent failure prompt caching exists to end: the gateway is placing
+      # breakpoints (mode=auto) yet the vendor reports zero cache reads — every
+      # request pays full price and nothing tells you. Only meaningful once the
+      # P2 auto engine ships; until then no request carries mode=auto, so the
+      # left-hand side is empty and the alert cannot fire (correct — nothing to
+      # warn about). A generous window keeps warm-up misses from flapping.
+      - alert: PromptCacheAutoZeroHits
+        expr: |
+          sum by (vendor) (increase(aiqg_prompt_cache_requests_total{mode="auto"}[1h])) > 100
+          and
+          sum by (vendor) (increase(aiqg_prompt_cache_read_tokens_total[1h])) == 0
+        for: 30m
+        labels:
+          severity: warning
+          service: tas-llm-router
+        annotations:
+          summary: "Prompt-cache auto mode is placing breakpoints but getting zero reads ({{ $labels.vendor }})"
+          description: >
+            Over the last hour the gateway applied mode=auto to more than 100
+            requests for {{ $labels.vendor }} but the vendor reported no
+            cache-read tokens. Placement is likely wrong (breakpoint below the
+            model minimum, after a volatile block, or voided by mid-conversation
+            model switching), so those requests are paying full price. Check the
+            placement engine and model-minimum table for {{ $labels.vendor }}.
+
+      # Creations with no reads: paying the 1.25x write premium to warm a cache
+      # nothing hits — the model-switching cold-rebuild signature. Advisory.
+      - alert: PromptCacheWritesWithoutReads
+        expr: |
+          sum by (vendor) (increase(aiqg_prompt_cache_creation_tokens_total[6h])) > 0
+          and
+          sum by (vendor) (increase(aiqg_prompt_cache_read_tokens_total[6h])) == 0
+        for: 2h
+        labels:
+          severity: info
+          service: tas-llm-router
+        annotations:
+          summary: "Prompt-cache writes without any reads ({{ $labels.vendor }})"
+          description: >
+            {{ $labels.vendor }} is writing prompt caches (1.25x input price) but
+            recording no reads over 6h. Often a cold-rebuild-every-turn pattern
+            from cost-optimized routing switching models within a conversation
+            (#100 finding). Consider model stickiness for cached conversations.

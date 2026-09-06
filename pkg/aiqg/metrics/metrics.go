@@ -154,6 +154,55 @@ var EmitterDegraded = prometheus.NewGauge(
 	},
 )
 
+// PromptCacheRequestsTotal counts requests by the prompt-cache mode that was
+// APPLIED (passthrough / off / auto / none) and vendor. It is the denominator
+// the zero-hit alert needs: "auto-mode requests are happening but read tokens
+// stay flat at zero" is the silent failure prompt caching exists to end, and it
+// is only expressible with a per-mode request count alongside the read-token
+// counter. Synthetic traffic is excluded at the call site.
+var PromptCacheRequestsTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_prompt_cache_requests_total",
+		Help: "Requests by applied prompt-cache mode and vendor (synthetic excluded).",
+	},
+	[]string{"vendor", "mode"},
+)
+
+// PromptCacheReadTokensTotal sums vendor-reported cache-READ (hit) tokens.
+// Non-zero means a breakpoint the gateway forwarded actually paid off.
+var PromptCacheReadTokensTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_prompt_cache_read_tokens_total",
+		Help: "Vendor-reported prompt-cache read (hit) tokens, by vendor.",
+	},
+	[]string{"vendor"},
+)
+
+// PromptCacheCreationTokensTotal sums cache-WRITE (creation) tokens — the 1.25×
+// cost of warming a cache. Watched next to reads: creations with no subsequent
+// reads is money spent warming a cache nothing hit (e.g. model switching mid
+// conversation cold-rebuilds every turn).
+var PromptCacheCreationTokensTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_prompt_cache_creation_tokens_total",
+		Help: "Vendor-reported prompt-cache creation (write) tokens, by vendor.",
+	},
+	[]string{"vendor"},
+)
+
+// PromptCacheSavingsUSDTotal is the dollar spend AVOIDED by cache reads: the
+// same read tokens at full input price would have cost read_cost/mult, of which
+// read_cost was actually paid, so the saving is the remainder. Computed from the
+// event's own cache-read cost and clear.CacheReadMultiplier so the metric and
+// the billing figure cannot disagree.
+var PromptCacheSavingsUSDTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_prompt_cache_savings_usd_total",
+		Help: "Estimated USD avoided by prompt-cache reads (vs full input price), by vendor.",
+	},
+	[]string{"vendor"},
+)
+
 func init() {
 	Registry.MustRegister(
 		EventsEmittedTotal,
@@ -165,6 +214,10 @@ func init() {
 		ShadowTokensTotal,
 		ShadowTruncatedTotal,
 		EmitterDegraded,
+		PromptCacheRequestsTotal,
+		PromptCacheReadTokensTotal,
+		PromptCacheCreationTokensTotal,
+		PromptCacheSavingsUSDTotal,
 	)
 	seed()
 }
