@@ -40,7 +40,7 @@ a near-miss probe gets a cached answer meant for a different question.
 
 ## Status & scope
 
-**As of 2026-08-26**, all four targets are in the tree and all four are wired
+**As of 2026-09-07**, all four targets are in the tree and all four are wired
 into `main.go` at `cmd/demo-traffic/main.go:109-144`. Nothing here is deployed:
 no Kubernetes manifest, Dockerfile, or Makefile target in this repository
 references `demo-traffic`, so `go run` from a checkout is the only way it runs.
@@ -52,16 +52,19 @@ catalog is the newest and moved most recently: six flows on 2026-08-16
 (`a73275e`), then the `research-rag` flow and three corrections to what it
 claims through 2026-08-17 (`0ab5718`, `ce20995`, `6e11c60`, `f924522`).
 
-Two known inaccuracies inside the tool itself, neither fixed here:
+The "six flows" wording inside the tool was corrected on 2026-08-26
+(`dc6811c`). The `--flow` help text and the comment above `flowCatalog` now both
+say seven, matching the seven entries at `cmd/demo-traffic/flows.go:139`
+(`it-helpdesk`, `security-questionnaire`, `contract-review`, `ticket-triage`,
+`incident-burst`, `research-rag`, `coding-agent`). `--print-catalog` remains the
+authoritative list, and is the thing to trust if these ever diverge again.
 
-- The `--flow` help text and the comment above `flowCatalog` both say "six"
-  flows; `cmd/demo-traffic/flows.go:139` now holds **seven**. `--print-catalog`
-  is authoritative.
-- The dashboard rollups this generator feeds are live, not planned:
-  `/api/v1/metrics/agents` and `/api/v1/flows` are both registered in
-  `aiqg-dashboard-be`, in `internal/handlers/metrics.go` — lines 54 and 57 of
-  that file, in that repository. Earlier revisions of this file described both
-  as future.
+One correction to earlier revisions of this file is still worth stating, because
+it changes what a reader expects to see fill in: the dashboard rollups this
+generator feeds are live, not planned. `/api/v1/metrics/agents` and
+`/api/v1/flows` are both registered in `aiqg-dashboard-be`, in
+`internal/handlers/metrics.go` — lines 54 and 57 of that file, in that
+repository. Earlier revisions of this file described both as future.
 
 ## Quick start
 
@@ -80,6 +83,12 @@ Data Extractor                      1      6        0.0065        0.0021        
 Research Orchestrator               1      4        0.1265        0.1265         81
 Support Bot                         1      2        0.0020        0.0005         94
 ```
+
+That run costs nothing: `--target=loki` calls no vendor model, so the
+`total cost $0.2474` it reports is the *synthetic* spend it is describing to the
+dashboard, not money leaving an account. The `avg CLEAR` column is the composite
+quality score those events carry — Cost, Latency, Efficacy, Assurance,
+Reliability, scored 0-100 and explained under "What a pass contains" below.
 
 The real run also prints all 20 event lines as JSON above that summary; they are
 elided from the fence for readability. Drop `--dry-run` and the same pass is
@@ -114,6 +123,25 @@ account behind the demo tenant, and raising `--flows-per-agent` or
 `--max-tokens` raises the bill proportionally. Point `--gateway-url` at the
 deployed gateway to reach the real pipeline; the flag defaults to
 `http://localhost:8086` for local work.
+
+> [!UNVERIFIED] The "eleven requests" count above did not reproduce on
+> 2026-09-07. The number of steps per flow is drawn from the run's random
+> number generator, so six unseeded `--dry-run` previews at
+> `--flows-per-agent 1` produced 13, 13, 14, 15, 16 and 17 requests, and three
+> at the default of 4 produced 56, 61 and 63.
+> The "roughly four times" scaling is right; the absolute figure is not. Adding
+> `--seed 42` pins the count (15 on every attempt) but not the `flow=` UUIDs,
+> which are freshly generated each run — so the transcript above will not
+> reproduce line for line either. The original sentence is left as its author
+> wrote it pending owner review; budget from a `--dry-run` of your own
+> invocation rather than from the figure quoted here.
+>
+> The same paragraph says `--dry-run` shows "the cost". It does not print a
+> dollar figure on the gateway targets — only the `POST` plan and a final
+> `gateway pass: sent=<n> failed=0` line. That `sent` count is the number of
+> vendor calls the real run would make, which is the input you need; the price
+> per call is whatever the demo tenant's vendor contract charges for the
+> per-scenario token caps listed below.
 
 ```bash
 export AIQG_TAS_AUTH_TOKEN=tas_qg_live_…
@@ -207,6 +235,18 @@ demo tenant's gateway token lives in
 `aether-secrets/apps/tas-llm-router/aiqg-tokens.env`, and you export it yourself.
 The flags below are the ones that change what a run does; `go run
 ./cmd/demo-traffic --help` prints the full set with defaults.
+
+Three groups matter, and the table does not separate them. **Size** — how much
+traffic a pass emits, and therefore what it costs — is `--flows-per-agent`
+(the main dial), `--inferred-flows`, and `--interval`, which turns a single pass
+into an unbounded series. **Shape** — what the traffic looks like once the
+volume is fixed — is `--flow` for which of the seven sequences run,
+`--users` for the user pool attribution is spread across, `--cache-bust` for
+whether `--target=flows` starts cold, and the four rate flags
+(`--compliance-rate`, `--vague-rate`, `--hedging-rate`, `--error-rate`) that set
+how often a synthesized event carries each kind of finding. Everything else is
+plumbing: endpoints, identifiers, credentials, and `--seed` / `--spread`, which
+fix reproducibility and the timestamp window without changing size or shape.
 
 | Flag | Default | Meaning |
 |---|---|---|
