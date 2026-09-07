@@ -108,17 +108,94 @@ func placeAuto(req *types.ChatRequest) int {
 	// followed by the current user question). Never after the question itself,
 	// which is the classic shared-prefix mistake: every request would write a
 	// unique entry and read nothing.
-	if placed < MaxBreakpoints {
-		if idx := lastCompleteTurnIndex(req); idx >= 0 {
-			through := clear.TokensFromBytes(toolsBytes(req) + messagesTextBytesThrough(req, idx))
-			if through >= min {
-				req.Messages[idx].CacheControl = ephemeralBreakpoint()
-				placed++
-			}
+	lastTurn := lastCompleteTurnIndex(req)
+	if placed < MaxBreakpoints && lastTurn >= 0 {
+		through := clear.TokensFromBytes(toolsBytes(req) + messagesTextBytesThrough(req, lastTurn))
+		if through >= min {
+			req.Messages[lastTurn].CacheControl = ephemeralBreakpoint()
+			placed++
 		}
 	}
 
+	// §4.3 — lookback fillers, using only the budget §4.1/§4.2 leave.
+	placed += placeLookbackFillers(req, min, placed, lastTurn)
+
 	return placed
+}
+
+// lookbackFillerInterval is how many content blocks may pass before a filler
+// breakpoint is inserted. The vendor's cache lookup walks back at most 20
+// blocks; spacing anchors ~15 apart keeps every breakpoint within that window
+// with margin, so a long agentic turn never silently misses (§4.3).
+const lookbackFillerInterval = 15
+
+// placeLookbackFillers inserts intermediate breakpoints inside a long history so
+// no breakpoint sits more than the 20-block lookback from a prior one (§4.3). A
+// single agentic turn can append dozens of tool_use/tool_result blocks; without
+// fillers the next request's breakpoint walks back 20, finds nothing, and cold-
+// rebuilds. Runs last, so it consumes only the budget §4.1/§4.2 left (§4.4
+// priority: system > last turn > fillers), and it walks only the stable history
+// up to the last complete turn — never the current question.
+func placeLookbackFillers(req *types.ChatRequest, min, alreadyPlaced, lastTurn int) int {
+	if lastTurn < 0 {
+		return 0 // no completed history to fill.
+	}
+	placed := 0
+	blocksSinceBP := 0
+	cumBytes := toolsBytes(req)
+	for i := 0; i <= lastTurn && i < len(req.Messages); i++ {
+		m := req.Messages[i]
+		cumBytes += contentTextBytes(m.Content)
+		blocksSinceBP += blocksIn(m)
+
+		// A message that already carries a breakpoint (system §4.1 or last turn
+		// §4.2) IS a lookback anchor — reset the spacing counter past it.
+		if m.CacheControl != nil {
+			blocksSinceBP = 0
+			continue
+		}
+		if blocksSinceBP < lookbackFillerInterval {
+			continue
+		}
+		if alreadyPlaced+placed >= MaxBreakpoints {
+			break // budget spent; §4.4 clamps rather than emitting a 5th (a 400).
+		}
+		// A filler below the model minimum caches nothing, so it would waste a
+		// slot; the cumulative prefix here is large, but check to be consistent.
+		if clear.TokensFromBytes(cumBytes) < min {
+			continue
+		}
+		req.Messages[i].CacheControl = ephemeralBreakpoint()
+		placed++
+		blocksSinceBP = 0
+	}
+	return placed
+}
+
+// blocksIn estimates how many vendor content blocks a message renders into —
+// the unit the 20-block lookback counts. An assistant turn that issued tool
+// calls becomes one text block (if it had text) plus one tool_use block per
+// call; a tool result is one block; everything else is one block, or one per
+// multimodal part.
+func blocksIn(m types.Message) int {
+	switch m.Role {
+	case "assistant":
+		n := len(m.ToolCalls)
+		if contentTextBytes(m.Content) > 0 {
+			n++
+		}
+		if n == 0 {
+			n = 1
+		}
+		return n
+	case "tool":
+		return 1
+	default:
+		if parts, ok := m.Content.([]types.ContentPart); ok && len(parts) > 0 {
+			return len(parts)
+		}
+		return 1
+	}
 }
 
 // lastSystemIndex is the index of the last system message, or -1 if none.
