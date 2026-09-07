@@ -1,5 +1,7 @@
 package types
 
+import "time"
+
 // Provider capabilities and configuration
 type ProviderCapabilities struct {
 	ProviderName              string        `json:"provider_name"`
@@ -34,6 +36,37 @@ type ModelInfo struct {
 	// Provider-specific model info
 	ProviderModelID string   `json:"provider_model_id,omitempty" yaml:"provider_model_id"`
 	Tags            []string `json:"tags,omitempty" yaml:"tags"`
+
+	// Dynamic model-registry fields (Phase 1, issue #2). All omitempty and
+	// additive, so a statically-configured ModelInfo that never touches the
+	// registry is unchanged: an empty Status is treated as active (see
+	// ModelInfo.IsActive), and the rest default to their zero values.
+	Status           ModelStatus `json:"status,omitempty" yaml:"status"`
+	LastValidated    time.Time   `json:"last_validated,omitzero" yaml:"last_validated"`
+	DeprecationDate  *time.Time  `json:"deprecation_date,omitempty" yaml:"deprecation_date"`
+	ReplacementModel string      `json:"replacement_model,omitempty" yaml:"replacement_model"`
+	Aliases          []string    `json:"aliases,omitempty" yaml:"aliases"`
+}
+
+// ModelStatus is a model's availability in the dynamic registry.
+type ModelStatus string
+
+const (
+	// ModelStatusActive is serviceable now. An empty status is treated as
+	// active so statically-configured models need no migration.
+	ModelStatusActive ModelStatus = "active"
+	// ModelStatusDeprecated still answers but should be migrated off — the
+	// registry can surface a ReplacementModel.
+	ModelStatusDeprecated ModelStatus = "deprecated"
+	// ModelStatusUnavailable no longer answers (removed by the vendor); routing
+	// must not select it.
+	ModelStatusUnavailable ModelStatus = "unavailable"
+)
+
+// IsActive reports whether the model may serve traffic. An empty status counts
+// as active — the migration-free default for statically-configured models.
+func (m ModelInfo) IsActive() bool {
+	return m.Status == "" || m.Status == ModelStatusActive
 }
 
 type CostStructure struct {
