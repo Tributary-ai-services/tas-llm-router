@@ -163,6 +163,72 @@ func TestAuto_ReplacesClientBreakpoints(t *testing.T) {
 	}
 }
 
+// toolExchange builds one agentic round: an assistant tool_use + its
+// tool_result. Two content blocks.
+func toolExchange(id string) []types.Message {
+	return []types.Message{
+		{Role: "assistant", ToolCalls: []types.ToolCall{{ID: id, Type: "function", Function: types.Function{Name: "f", Arguments: "{}"}}}},
+		{Role: "tool", ToolCallID: id, Content: "result"},
+	}
+}
+
+// §4.3: a long agentic turn (>20 blocks) gets intermediate fillers so no
+// breakpoint sits more than the 20-block lookback from a prior one — and the
+// total never exceeds the 4-breakpoint API cap.
+func TestAuto_LookbackFillersInLongTurn(t *testing.T) {
+	msgs := []types.Message{
+		{Role: "system", Content: bigText(1500)}, // clears sonnet-4-5's 1024
+		{Role: "user", Content: "kick off the task"},
+	}
+	for i := 0; i < 20; i++ { // 20 exchanges = 40 blocks
+		msgs = append(msgs, toolExchange("t"+string(rune('a'+i)))...)
+	}
+	msgs = append(msgs, types.Message{Role: "user", Content: "the current question"})
+
+	req := &types.ChatRequest{Model: "claude-sonnet-4-5", Messages: msgs}
+	_, n := Apply(req, ModeAuto)
+
+	if n != MaxBreakpoints {
+		t.Fatalf("placed %d breakpoints; a 40-block history should fill to the cap of %d", n, MaxBreakpoints)
+	}
+	if got := count(req); got != MaxBreakpoints {
+		t.Fatalf("request carries %d breakpoints; must never exceed the %d cap (a 5th is a 400)", got, MaxBreakpoints)
+	}
+	// The current question must never carry a breakpoint.
+	if req.Messages[len(req.Messages)-1].CacheControl != nil {
+		t.Error("breakpoint on the current question")
+	}
+	// At least one filler landed strictly between the system block and the last
+	// complete turn.
+	lastTurn := lastCompleteTurnIndex(req)
+	fillers := 0
+	for i := 1; i < lastTurn; i++ {
+		if req.Messages[i].CacheControl != nil {
+			fillers++
+		}
+	}
+	if fillers == 0 {
+		t.Error("no intermediate filler placed in a 40-block history")
+	}
+}
+
+// A short conversation needs no fillers — only system + last turn.
+func TestAuto_NoFillersInShortTurn(t *testing.T) {
+	req := &types.ChatRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []types.Message{
+			{Role: "system", Content: bigText(1500)},
+			{Role: "user", Content: "q1"},
+			{Role: "assistant", Content: bigText(200)},
+			{Role: "user", Content: "current question"},
+		},
+	}
+	_, n := Apply(req, ModeAuto)
+	if n != 2 {
+		t.Fatalf("placed %d, want 2 (system + last turn, no fillers in a short turn)", n)
+	}
+}
+
 func TestMinCacheTokens_Table(t *testing.T) {
 	cases := []struct {
 		model    string
