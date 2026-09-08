@@ -110,6 +110,15 @@ type RouterMetadata struct {
 	FallbackUsed    bool     `json:"fallback_used"`              // Whether fallback was triggered
 	RetryDelays     []int64  `json:"retry_delays,omitempty"`     // Delay between attempts (ms)
 	TotalRetryTime  int64    `json:"total_retry_time,omitempty"` // Total time spent on retries (ms)
+
+	// Model-registry resolution (epic #2). Set only when the registry changed
+	// the requested model — resolving an alias, or falling back off a
+	// deprecated/unavailable model. OriginalModel is what the caller sent;
+	// ResolvedModel is what actually ran; FallbackReason names the status that
+	// triggered a fallback (e.g. "model_deprecated").
+	OriginalModel  string `json:"original_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
 }
 
 type CostEstimate struct {
