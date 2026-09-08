@@ -38,6 +38,7 @@ type Application struct {
 var (
 	_ adapters.OpenAIModelLister    = (*openai.OpenAIProvider)(nil)
 	_ adapters.AnthropicModelProber = (*anthropic.AnthropicProvider)(nil)
+	_ routing.ModelRegistry         = (*registry.Registry)(nil)
 )
 
 // NewApplication creates a new application instance
@@ -191,6 +192,10 @@ func setupRegistry(router *routing.Router, cfg *config.Config, logger *logrus.Lo
 	if err := reg.Load(context.Background()); err != nil {
 		logger.WithError(err).Warn("registry: initial load failed; starting empty")
 	}
+
+	// Let the router consult the registry (alias resolution + fallback off
+	// deprecated/unavailable models) during routing.
+	router.SetRegistry(reg)
 
 	logger.WithFields(logrus.Fields{
 		"redis_backed":  rc.RedisURL != "",

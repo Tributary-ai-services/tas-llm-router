@@ -161,6 +161,26 @@ func (r *Registry) ListModels(provider string) ([]types.ModelInfo, error) {
 	return out, nil
 }
 
+// ResolveAliasAny resolves an alias WITHOUT a known provider, searching every
+// provider's alias map in deterministic order. Returns the target model, the
+// provider that owns it, and ok. The router needs this because it sees a model
+// name before it knows which provider will serve it.
+func (r *Registry) ResolveAliasAny(alias string) (model, provider string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	provs := make([]string, 0, len(r.aliases))
+	for p := range r.aliases {
+		provs = append(provs, p)
+	}
+	sort.Strings(provs)
+	for _, p := range provs {
+		if target, found := r.aliases[p][alias]; found {
+			return target, p, true
+		}
+	}
+	return "", "", false
+}
+
 // ResolveAlias maps a provider alias to its canonical model name. An unknown
 // name is returned unchanged — it is presumably already a real model id — so a
 // caller can resolve every requested name unconditionally without special-

@@ -48,6 +48,97 @@ type Router struct {
 
 	// dwell is fleet-wide switching hysteresis state (step 5).
 	dwell DwellStore
+
+	// registry is the dynamic model registry (epic #2). Nil unless configured;
+	// when set, Route resolves aliases and falls back off deprecated/unavailable
+	// models before selection. A nil registry is the default and leaves routing
+	// exactly as before.
+	registry ModelRegistry
+}
+
+// ModelRegistry is the slice of the model registry the router consults, kept
+// minimal so the routing package does not depend on the registry package. All
+// reads are served from the registry's in-memory snapshot — no per-request
+// vendor call on the hot path.
+type ModelRegistry interface {
+	// ResolveAliasAny resolves an alias to (model, provider) without a known
+	// provider; ok=false when it is not a known alias.
+	ResolveAliasAny(alias string) (model, provider string, ok bool)
+	// FindProvider returns the provider serving a concrete model name.
+	FindProvider(model string) (provider string, ok bool)
+	// GetModel returns the model's registry entry (for its cached Status).
+	GetModel(provider, model string) (*types.ModelInfo, error)
+	// GetFallback returns a serviceable replacement for a model.
+	GetFallback(provider, model string) (*types.ModelInfo, error)
+}
+
+// SetRegistry wires the model registry. Call once at startup before serving.
+func (r *Router) SetRegistry(reg ModelRegistry) { r.registry = reg }
+
+// registryResolution records what the registry did to a request's model, so the
+// outcome can be stamped onto RouterMetadata after selection.
+type registryResolution struct {
+	original       string
+	resolved       string // set only when the model actually changed
+	fellBack       bool
+	fallbackReason string
+}
+
+// resolveViaRegistry rewrites req.Model using the registry BEFORE selection:
+// it resolves an alias to a concrete model, then, if that model's cached status
+// is deprecated/unavailable, substitutes a fallback. A model the registry does
+// not know is left untouched, so this only ever affects models the registry has
+// actually discovered — traffic for anything else routes exactly as before.
+//
+// Availability is read from the cached Status (populated by the background sync
+// engine), never a per-request vendor call.
+func (r *Router) resolveViaRegistry(req *types.ChatRequest) registryResolution {
+	res := registryResolution{original: req.Model}
+	if r.registry == nil || req.Model == "" {
+		return res
+	}
+
+	model := req.Model
+	var provider string
+	var known bool
+	if target, p, ok := r.registry.ResolveAliasAny(model); ok {
+		model, provider, known = target, p, true
+	} else if p, ok := r.registry.FindProvider(model); ok {
+		provider, known = p, true
+	}
+	if !known {
+		return res // registry doesn't know this model — unchanged.
+	}
+
+	if m, err := r.registry.GetModel(provider, model); err == nil {
+		switch m.Status {
+		case types.ModelStatusUnavailable:
+			// The model will not answer — substitute a serviceable one.
+			if fb, ferr := r.registry.GetFallback(provider, model); ferr == nil {
+				res.fellBack = true
+				res.fallbackReason = "model_unavailable"
+				r.logger.WithFields(logrus.Fields{
+					"original": model, "fallback": fb.Name,
+				}).Warn("registry: model unavailable, using fallback")
+				model = fb.Name
+			}
+		case types.ModelStatusDeprecated:
+			// Deprecated models still answer — serve as-is but make the
+			// deprecation visible so callers migrate (a ReplacementModel, when
+			// set, names the target).
+			r.logger.WithFields(logrus.Fields{
+				"model": model, "replacement": m.ReplacementModel,
+			}).Warn("registry: model is deprecated; consider migrating")
+		}
+	}
+
+	if model != req.Model {
+		r.logger.WithFields(logrus.Fields{"from": req.Model, "to": model}).
+			Info("registry: resolved model")
+		req.Model = model
+		res.resolved = model
+	}
+	return res
 }
 
 // RoutingStrategy defines how to route requests
@@ -155,6 +246,11 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 		ctx = WithIsolatedEjected(ctx, ej)
 	}
 
+	// Model registry (epic #2): resolve aliases and fall back off
+	// deprecated/unavailable models before selection. No-op when no registry is
+	// configured or the model is unknown to it.
+	regRes := r.resolveViaRegistry(req)
+
 	// Determine routing strategy
 	strategy := r.determineStrategy(req)
 
@@ -189,6 +285,16 @@ func (r *Router) Route(ctx context.Context, req *types.ChatRequest) (*types.Rout
 		RequestID:      req.ID,
 		AttemptCount:   1,
 		FallbackUsed:   false,
+	}
+
+	// Stamp registry resolution (alias / model fallback) onto the metadata.
+	if regRes.resolved != "" || regRes.fellBack {
+		metadata.OriginalModel = regRes.original
+		metadata.ResolvedModel = regRes.resolved
+		if regRes.fellBack {
+			metadata.FallbackUsed = true
+			metadata.FallbackReason = regRes.fallbackReason
+		}
 	}
 
 	// Check if retry is configured
