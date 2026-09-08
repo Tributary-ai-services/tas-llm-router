@@ -7,23 +7,36 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// SyncConfig configures periodic model discovery (Phase 3, #4). Present now so
-// the config surface and lifecycle wiring are stable; the discovery body lands
-// in Phase 3.
+// SyncConfig configures periodic model discovery (the `registry:` YAML block).
 type SyncConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	SyncInterval  time.Duration `yaml:"sync_interval"`  // how often to discover; default 1h
-	ValidationTTL time.Duration `yaml:"validation_ttl"` // how long a validation result is trusted
-	StartupSync   bool          `yaml:"startup_sync"`   // discover once at startup
+	Enabled        bool          `yaml:"enabled"`
+	SyncInterval   time.Duration `yaml:"sync_interval"`    // how often to discover; default 1h
+	ValidationTTL  time.Duration `yaml:"validation_ttl"`   // how long a validation result is trusted
+	StartupSync    bool          `yaml:"startup_sync"`     // discover once at startup
+	RetryOnFailure bool          `yaml:"retry_on_failure"` // router may Trigger() a sync when a request hits an unknown/failed model (honoured by the router integration, Phase 4/#5)
+
+	// Fallback selects how the router (Phase 4, #5) replaces an unavailable
+	// model; carried here so the config surface is complete. Registry.GetFallback
+	// is the current resolver.
+	Fallback FallbackConfig `yaml:"fallback"`
+
+	// Aliases are user-defined name→target-model mappings applied after each
+	// sync. Provider-agnostic: the engine attaches each to the provider that
+	// owns its target.
+	Aliases map[string]string `yaml:"aliases"`
 }
 
-// SyncEngine periodically discovers and validates models from provider adapters
-// and writes them into the Registry.
-//
-// Phase-1 skeleton: the loop and the on-demand trigger exist so the lifecycle
-// can be wired, but syncAll performs no discovery yet — the adapters (Phase 2,
-// #3) and the discovery pass (Phase 3, #4) fill it. Running this engine today
-// is inert beyond a debug log, so it is safe to wire early.
+// FallbackConfig configures replacement of an unavailable model.
+type FallbackConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Strategy string `yaml:"strategy"` // "capability_match" | "configured_chain"
+}
+
+// SyncEngine periodically drives model discovery: on startup (optional), on a
+// fixed interval, and on demand via Trigger. Each pass asks the Registry to
+// discover + upsert every registered provider's models, then reapplies the
+// configured aliases. It owns scheduling and lifecycle; the Registry owns the
+// adapters and the actual discovery work.
 type SyncEngine struct {
 	registry  *Registry
 	config    SyncConfig
@@ -53,9 +66,9 @@ func (s *SyncEngine) Trigger() {
 	}
 }
 
-// Run drives the sync loop until ctx is cancelled. It is a no-op when the engine
-// is disabled. In Phase 1 the ticks and triggers call a stub syncAll; the
-// discovery body lands in Phase 3 (#4).
+// Run drives the sync loop until ctx is cancelled (graceful shutdown). It is a
+// no-op when the engine is disabled. Runs a startup pass when configured, then
+// syncs on the interval and whenever Trigger fires.
 func (s *SyncEngine) Run(ctx context.Context) {
 	if !s.config.Enabled {
 		s.logger.Debug("registry sync: disabled")
@@ -82,8 +95,37 @@ func (s *SyncEngine) Run(ctx context.Context) {
 	}
 }
 
-// syncAll is the discovery pass — a stub in Phase 1. Phase 3 (#4) will fan out
-// to the provider adapters, upsert discovered models, then Registry.Load.
-func (s *SyncEngine) syncAll(_ context.Context) {
-	s.logger.Debug("registry sync: skeleton no-op (discovery lands in Phase 3, #4)")
+// syncAll runs one discovery pass: the registry discovers + upserts every
+// provider's models, then configured aliases are (re)applied. Best-effort —
+// errors are logged, never fatal, so a provider outage degrades to stale data
+// rather than a crash. Duration/result are logged; Prometheus metrics are the
+// Observability phase (#6).
+func (s *SyncEngine) syncAll(ctx context.Context) {
+	start := time.Now()
+	err := s.registry.SyncAll(ctx)
+	if err != nil {
+		s.logger.WithError(err).Warn("registry sync: completed with errors")
+	}
+	s.applyAliases(ctx)
+	s.logger.WithFields(logrus.Fields{
+		"duration_ms": time.Since(start).Milliseconds(),
+		"ok":          err == nil,
+	}).Debug("registry sync pass complete")
+}
+
+// applyAliases attaches each configured name→target alias to the provider that
+// owns the target model. A target not present in any provider is skipped with a
+// warning rather than guessed at.
+func (s *SyncEngine) applyAliases(ctx context.Context) {
+	for alias, target := range s.config.Aliases {
+		provider, ok := s.registry.FindProvider(target)
+		if !ok {
+			s.logger.WithFields(logrus.Fields{"alias": alias, "target": target}).
+				Warn("registry: configured alias target not found in any provider; skipping")
+			continue
+		}
+		if err := s.registry.PutAlias(ctx, provider, alias, target); err != nil {
+			s.logger.WithError(err).WithField("alias", alias).Warn("registry: apply alias failed")
+		}
+	}
 }
