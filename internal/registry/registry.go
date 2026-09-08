@@ -2,12 +2,14 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/tributary-ai/llm-router-waf/internal/registry/adapters"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
 
@@ -23,6 +25,9 @@ type Registry struct {
 	mu      sync.RWMutex
 	models  map[string]map[string]types.ModelInfo // provider -> model name -> info
 	aliases map[string]map[string]string          // provider -> alias -> target
+
+	adaptersMu sync.RWMutex
+	adapters   map[string]adapters.ProviderAdapter // provider -> discovery adapter
 }
 
 var _ ModelRegistry = (*Registry)(nil)
@@ -33,11 +38,45 @@ func New(store Store, logger *logrus.Logger) *Registry {
 		logger = logrus.New()
 	}
 	return &Registry{
-		store:   store,
-		logger:  logger,
-		models:  map[string]map[string]types.ModelInfo{},
-		aliases: map[string]map[string]string{},
+		store:    store,
+		logger:   logger,
+		models:   map[string]map[string]types.ModelInfo{},
+		aliases:  map[string]map[string]string{},
+		adapters: map[string]adapters.ProviderAdapter{},
 	}
+}
+
+// RegisterAdapter wires a provider's discovery adapter (Phase 2, #3) so SyncAll
+// / SyncProvider / ValidateModel can reach it. Call at startup before syncing.
+func (r *Registry) RegisterAdapter(provider string, a adapters.ProviderAdapter) {
+	r.adaptersMu.Lock()
+	r.adapters[provider] = a
+	r.adaptersMu.Unlock()
+}
+
+func (r *Registry) adapterFor(provider string) adapters.ProviderAdapter {
+	r.adaptersMu.RLock()
+	defer r.adaptersMu.RUnlock()
+	return r.adapters[provider]
+}
+
+// FindProvider returns the provider serving a model name, searching every
+// provider deterministically. Used to attach a global (provider-agnostic)
+// config alias to the provider that actually owns its target.
+func (r *Registry) FindProvider(model string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	provs := make([]string, 0, len(r.models))
+	for p := range r.models {
+		provs = append(provs, p)
+	}
+	sort.Strings(provs)
+	for _, p := range provs {
+		if _, ok := r.models[p][model]; ok {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // Load pulls the durable snapshot from the store into memory, replacing the
@@ -174,19 +213,71 @@ func (r *Registry) GetFallback(provider, model string) (*types.ModelInfo, error)
 	return nil, ErrModelNotFound
 }
 
-// --- Skeletons filled in later phases -------------------------------------
-//
-// These reach provider APIs and so belong with the discovery adapters (Phase 2,
-// #3) and the sync engine (Phase 3, #4). Defined now so the ModelRegistry
-// contract is complete for the router integration (Phase 4, #5) to compile
-// against; they return ErrNotImplemented until then.
+// SyncAll discovers and upserts models for every registered adapter, in a
+// deterministic provider order. It honours ctx cancellation between providers
+// (graceful shutdown) and joins per-provider errors rather than aborting on the
+// first, so one flaky provider does not stop the others from refreshing.
+// ErrNotImplemented when no adapters are registered.
+func (r *Registry) SyncAll(ctx context.Context) error {
+	r.adaptersMu.RLock()
+	names := make([]string, 0, len(r.adapters))
+	for name := range r.adapters {
+		names = append(names, name)
+	}
+	r.adaptersMu.RUnlock()
+	if len(names) == 0 {
+		return fmt.Errorf("%w: no adapters registered", ErrNotImplemented)
+	}
+	sort.Strings(names)
 
-func (r *Registry) SyncAll(ctx context.Context) error { return ErrNotImplemented }
-
-func (r *Registry) SyncProvider(ctx context.Context, provider string) error {
-	return ErrNotImplemented
+	var errs []error
+	for _, provider := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.SyncProvider(ctx, provider); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
+// SyncProvider discovers one provider's models via its adapter and upserts them,
+// logging new models and status transitions so a deprecation or removal is
+// visible rather than silent. ErrNotImplemented when the provider has no
+// adapter.
+func (r *Registry) SyncProvider(ctx context.Context, provider string) error {
+	a := r.adapterFor(provider)
+	if a == nil {
+		return fmt.Errorf("%w: no adapter for provider %q", ErrNotImplemented, provider)
+	}
+	discovered, err := a.DiscoverModels(ctx)
+	if err != nil {
+		return fmt.Errorf("registry: discover %s: %w", provider, err)
+	}
+	for _, m := range discovered {
+		prev, prevErr := r.GetModel(provider, m.Name)
+		switch {
+		case errors.Is(prevErr, ErrModelNotFound):
+			r.logger.WithFields(logrus.Fields{"provider": provider, "model": m.Name, "status": m.Status}).
+				Info("registry: new model discovered")
+		case prevErr == nil && prev.Status != m.Status:
+			r.logger.WithFields(logrus.Fields{"provider": provider, "model": m.Name, "from": prev.Status, "to": m.Status}).
+				Info("registry: model status changed")
+		}
+		if err := r.Upsert(ctx, provider, m); err != nil {
+			return fmt.Errorf("registry: upsert %s/%s: %w", provider, m.Name, err)
+		}
+	}
+	return nil
+}
+
+// ValidateModel delegates to the provider's adapter. ErrNotImplemented when the
+// provider has no adapter.
 func (r *Registry) ValidateModel(ctx context.Context, provider, model string) (bool, error) {
-	return false, ErrNotImplemented
+	a := r.adapterFor(provider)
+	if a == nil {
+		return false, fmt.Errorf("%w: no adapter for provider %q", ErrNotImplemented, provider)
+	}
+	return a.ValidateModel(ctx, model)
 }
