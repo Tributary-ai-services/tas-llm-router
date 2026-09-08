@@ -26,6 +26,26 @@ type Config struct {
 	Security   SecurityConfig   `yaml:"security"`
 	Gatekeeper GatekeeperConfig `yaml:"gatekeeper"`
 	AIQG       AIQGConfig       `yaml:"aiqg"`
+	Registry   RegistryConfig   `yaml:"registry"`
+}
+
+// RegistryConfig configures the Dynamic Model Registry (epic #2). Disabled by
+// default: when Enabled is false the registry is never constructed and routing
+// is exactly as before. When enabled, a background sync engine discovers models
+// from the configured providers; RedisURL selects a shared, restart-durable
+// store (empty = in-process memory store, single-replica).
+type RegistryConfig struct {
+	Enabled        bool              `yaml:"enabled"`
+	RedisURL       string            `yaml:"redis_url"`
+	SyncInterval   time.Duration     `yaml:"sync_interval"`
+	ValidationTTL  time.Duration     `yaml:"validation_ttl"`
+	StartupSync    bool              `yaml:"startup_sync"`
+	RetryOnFailure bool              `yaml:"retry_on_failure"`
+	Aliases        map[string]string `yaml:"aliases"`
+	Fallback       struct {
+		Enabled  bool   `yaml:"enabled"`
+		Strategy string `yaml:"strategy"`
+	} `yaml:"fallback"`
 }
 
 // AIQGConfig configures the AIQG ingress feature. Empty/zero means

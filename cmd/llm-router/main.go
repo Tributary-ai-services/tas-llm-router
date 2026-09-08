@@ -11,21 +11,34 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/tributary-ai/llm-router-waf/internal/config"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/anthropic"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/openai"
+	"github.com/tributary-ai/llm-router-waf/internal/registry"
+	"github.com/tributary-ai/llm-router-waf/internal/registry/adapters"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/server"
+	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
 
 // Application represents the main application
 type Application struct {
-	config *config.Config
-	router *routing.Router
-	server *server.Server
-	logger *logrus.Logger
+	config  *config.Config
+	router  *routing.Router
+	server  *server.Server
+	logger  *logrus.Logger
+	regSync *registry.SyncEngine // nil unless the model registry is enabled
 }
+
+// The concrete providers must satisfy the registry discovery interfaces so
+// setupRegistry can build adapters from them. Enforced at compile time.
+var (
+	_ adapters.OpenAIModelLister    = (*openai.OpenAIProvider)(nil)
+	_ adapters.AnthropicModelProber = (*anthropic.AnthropicProvider)(nil)
+)
 
 // NewApplication creates a new application instance
 func NewApplication(configPath string) (*Application, error) {
@@ -125,12 +138,91 @@ func NewApplication(configPath string) (*Application, error) {
 		}
 	}
 
+	// Model registry (epic #2). Constructed only when enabled; the engine is
+	// started in Run so it shares the app's shutdown context. Nothing consults
+	// the registry yet — routing integration is the next slice (#5).
+	regSync := setupRegistry(routerInstance, cfg, logger)
+
 	return &Application{
-		config: cfg,
-		router: routerInstance,
-		server: serverInstance,
-		logger: logger,
+		config:  cfg,
+		router:  routerInstance,
+		server:  serverInstance,
+		logger:  logger,
+		regSync: regSync,
 	}, nil
+}
+
+// setupRegistry builds the model registry and its sync engine from the
+// registered providers, or returns nil when the registry is disabled (the
+// default). It wires discovery adapters from the concrete providers, loads any
+// persisted snapshot, and returns the engine for Run to start.
+func setupRegistry(router *routing.Router, cfg *config.Config, logger *logrus.Logger) *registry.SyncEngine {
+	rc := cfg.Registry
+	if !rc.Enabled {
+		return nil
+	}
+
+	var store registry.Store
+	if rc.RedisURL != "" {
+		if opt, err := redis.ParseURL(rc.RedisURL); err != nil {
+			logger.WithError(err).Warn("registry: invalid redis_url; using in-memory store")
+			store = registry.NewMemoryStore()
+		} else {
+			store = registry.NewRedisStore(redis.NewClient(opt), rc.ValidationTTL)
+		}
+	} else {
+		store = registry.NewMemoryStore()
+	}
+	reg := registry.New(store, logger)
+
+	// Build discovery adapters from the concrete providers (which satisfy the
+	// adapter interfaces — enforced at compile time above).
+	if p, ok := router.GetProvider("openai"); ok {
+		if lister, ok := p.(adapters.OpenAIModelLister); ok {
+			reg.RegisterAdapter("openai", adapters.NewOpenAIAdapter(lister, staticModels(cfg, "openai"), logger))
+		}
+	}
+	if p, ok := router.GetProvider("anthropic"); ok {
+		if prober, ok := p.(adapters.AnthropicModelProber); ok {
+			reg.RegisterAdapter("anthropic", adapters.NewAnthropicAdapter(prober, staticModels(cfg, "anthropic"), logger))
+		}
+	}
+
+	if err := reg.Load(context.Background()); err != nil {
+		logger.WithError(err).Warn("registry: initial load failed; starting empty")
+	}
+
+	logger.WithFields(logrus.Fields{
+		"redis_backed":  rc.RedisURL != "",
+		"sync_interval": rc.SyncInterval,
+		"startup_sync":  rc.StartupSync,
+	}).Info("Model registry enabled")
+
+	return registry.NewSyncEngine(reg, registry.SyncConfig{
+		Enabled:        true,
+		SyncInterval:   rc.SyncInterval,
+		ValidationTTL:  rc.ValidationTTL,
+		StartupSync:    rc.StartupSync,
+		RetryOnFailure: rc.RetryOnFailure,
+		Fallback:       registry.FallbackConfig{Enabled: rc.Fallback.Enabled, Strategy: rc.Fallback.Strategy},
+		Aliases:        rc.Aliases,
+	}, logger)
+}
+
+// staticModels returns a provider's configured models (pricing/capabilities) to
+// enrich discovery, or nil when the provider isn't configured.
+func staticModels(cfg *config.Config, provider string) []types.ModelInfo {
+	switch provider {
+	case "openai":
+		if cfg.Providers.OpenAI != nil {
+			return cfg.Providers.OpenAI.Models
+		}
+	case "anthropic":
+		if cfg.Providers.Anthropic != nil {
+			return cfg.Providers.Anthropic.Models
+		}
+	}
+	return nil
 }
 
 // Run starts the application
@@ -140,6 +232,12 @@ func (app *Application) Run() error {
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start the model-registry sync engine (if enabled). It shares this ctx, so
+	// the shutdown cancel stops it gracefully.
+	if app.regSync != nil {
+		go app.regSync.Run(ctx)
+	}
 
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)

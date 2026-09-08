@@ -3,7 +3,9 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -348,6 +350,46 @@ func (p *AnthropicProvider) EstimateCost(req *types.ChatRequest) (*types.CostEst
 }
 
 // HealthCheck performs a health check on the Anthropic API
+// ProbeModel tests whether a model answers by sending a minimal (1-token)
+// request. It satisfies registry/adapters.AnthropicModelProber so the model
+// registry can validate Anthropic models, which have no list-models API (#2).
+//
+// Contract (per AnthropicModelProber):
+//   - (true, nil)  the model answered — available.
+//   - (false, nil) the vendor definitively rejected it (HTTP 404 not_found) —
+//     unavailable.
+//   - (false, err) transient/unknown failure — the caller must NOT downgrade.
+func (p *AnthropicProvider) ProbeModel(ctx context.Context, model string) (bool, error) {
+	if model == "" {
+		return false, fmt.Errorf("anthropic probe: empty model")
+	}
+	req := anthropic.MessageNewParams{
+		Model:     anthropic.Model(model),
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("test"))},
+		MaxTokens: 1,
+	}
+	if _, err := p.clientFor(ctx).Messages.New(ctx, req); err != nil {
+		if probeErrorMeansUnavailable(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// probeErrorMeansUnavailable reports whether a probe error is a DEFINITIVE
+// "this model does not exist" — an HTTP 404, which Anthropic returns as a
+// not_found_error for an unknown model id — rather than a transient failure
+// (network, rate limit, overload) that must never mark a real model
+// unavailable.
+func probeErrorMeansUnavailable(err error) bool {
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusNotFound
+	}
+	return false
+}
+
 func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
 	model := p.pickHealthCheckModel()
 	if model == "" {

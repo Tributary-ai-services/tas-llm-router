@@ -285,6 +285,21 @@ func (p *OpenAIProvider) EstimateCost(req *types.ChatRequest) (*types.CostEstima
 	}, nil
 }
 
+// ListModelIDs returns the ids of every model the account currently offers, via
+// the OpenAI ListModels API. It satisfies registry/adapters.OpenAIModelLister so
+// the model registry can discover live models from this provider (epic #2).
+func (p *OpenAIProvider) ListModelIDs(ctx context.Context) ([]string, error) {
+	list, err := p.client.ListModels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("openai list models: %w", err)
+	}
+	ids := make([]string, 0, len(list.Models))
+	for _, m := range list.Models {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
 // HealthCheck performs a health check on the OpenAI API
 func (p *OpenAIProvider) HealthCheck(ctx context.Context) error {
 	// Simple health check using models endpoint
