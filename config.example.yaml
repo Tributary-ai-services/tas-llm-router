@@ -39,6 +39,25 @@ router:
     max_cost_increase: 0.5  # Allow up to 50% cost increase for fallback
     require_same_features: true
 
+# Dynamic Model Registry (epic #2). Disabled by default: when enabled: false the
+# registry is never constructed and routing behaves exactly as before. When
+# enabled, a background sync engine discovers models from the configured
+# providers and tracks their status (active/deprecated/unavailable).
+registry:
+  enabled: false
+  redis_url: ""            # e.g. redis://redis-shared.tas-shared:6379 — empty = in-memory (single replica)
+  sync_interval: 1h        # how often to re-discover models
+  validation_ttl: 5m       # how long a validation result / Redis entry is trusted
+  startup_sync: true       # discover once at startup
+  retry_on_failure: true   # (router integration, #5) trigger a sync when a request hits an unknown model
+  fallback:
+    enabled: true
+    strategy: capability_match   # or: configured_chain
+  aliases:                 # user-defined name -> concrete model
+    # fast: claude-3-haiku-20240307
+    # smart: claude-sonnet-4-5
+    # cheap: gpt-4o-mini
+
 providers:
   openai:
     api_key: "${OPENAI_API_KEY}"
