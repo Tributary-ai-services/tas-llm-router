@@ -40,6 +40,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -241,4 +243,134 @@ func ObserveCost(provider, model string, usd float64) {
 	if usd > 0 {
 		CostTotal.WithLabelValues(provider, model).Add(usd)
 	}
+}
+
+// --- Model registry (epic #2, Phase 5 observability) ----------------------
+
+var (
+	// RegistrySyncDuration is how long one provider's discovery pass took.
+	RegistrySyncDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "llm_router_registry_sync_duration_seconds",
+			Help:    "Duration of a model-registry discovery pass, by provider.",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
+		},
+		[]string{"provider"},
+	)
+
+	// RegistrySyncTotal counts discovery passes by provider and result
+	// (success / error).
+	RegistrySyncTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_router_registry_sync_total",
+			Help: "Model-registry discovery passes by provider and result.",
+		},
+		[]string{"provider", "result"},
+	)
+
+	// ModelFallbackTotal counts registry fallbacks from an unavailable model to
+	// its replacement.
+	ModelFallbackTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_router_model_fallback_total",
+			Help: "Model fallbacks performed by the registry, by from/to model.",
+		},
+		[]string{"from", "to"},
+	)
+
+	// ModelAliasResolutionTotal counts alias→model resolutions done at routing.
+	ModelAliasResolutionTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_router_model_alias_resolution_total",
+			Help: "Model alias resolutions, by alias and resolved model.",
+		},
+		[]string{"alias", "resolved"},
+	)
+
+	// ModelValidationTotal counts explicit model validations (the admin
+	// validate endpoint / sync probes) by provider, model, and result.
+	ModelValidationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_router_model_validation_total",
+			Help: "Model availability validations by provider, model, and result.",
+		},
+		[]string{"provider", "model", "result"},
+	)
+)
+
+func init() {
+	Registry.MustRegister(
+		RegistrySyncDuration,
+		RegistrySyncTotal,
+		ModelFallbackTotal,
+		ModelAliasResolutionTotal,
+		ModelValidationTotal,
+	)
+}
+
+// ObserveRegistrySync records one provider's discovery pass: its duration and
+// whether it succeeded.
+func ObserveRegistrySync(provider string, d time.Duration, ok bool) {
+	RegistrySyncDuration.WithLabelValues(provider).Observe(d.Seconds())
+	result := "success"
+	if !ok {
+		result = "error"
+	}
+	RegistrySyncTotal.WithLabelValues(provider, result).Inc()
+}
+
+// ObserveModelFallback records a registry fallback from one model to another.
+func ObserveModelFallback(from, to string) {
+	ModelFallbackTotal.WithLabelValues(from, to).Inc()
+}
+
+// ObserveAliasResolution records an alias→model resolution.
+func ObserveAliasResolution(alias, resolved string) {
+	ModelAliasResolutionTotal.WithLabelValues(alias, resolved).Inc()
+}
+
+// ObserveModelValidation records a model validation outcome ("available",
+// "unavailable", or "error").
+func ObserveModelValidation(provider, model, result string) {
+	ModelValidationTotal.WithLabelValues(provider, model, result).Inc()
+}
+
+// modelStatusCollector reports llm_router_model_status{provider,model,status}
+// at scrape time from the registry, so it never goes stale the way a mirrored
+// gauge would.
+type modelStatusCollector struct {
+	desc   *prometheus.Desc
+	status func() []ModelStatusSample
+}
+
+// ModelStatusSample is one model's status for the scrape-time gauge.
+type ModelStatusSample struct {
+	Provider string
+	Model    string
+	Status   string
+}
+
+func (c *modelStatusCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *modelStatusCollector) Collect(ch chan<- prometheus.Metric) {
+	if c.status == nil {
+		return
+	}
+	for _, s := range c.status() {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, 1, s.Provider, s.Model, s.Status)
+	}
+}
+
+// RegisterModelStatus wires llm_router_model_status to a live source read on
+// every scrape. Call once at startup when the registry is enabled; the supplied
+// function must be cheap and safe for concurrent use.
+func RegisterModelStatus(status func() []ModelStatusSample) error {
+	return Registry.Register(&modelStatusCollector{
+		desc: prometheus.NewDesc(
+			"llm_router_model_status",
+			"Registered model status (1 per provider/model/status).",
+			[]string{"provider", "model", "status"}, nil,
+		),
+		status: status,
+	})
 }

@@ -240,7 +240,7 @@ func TestEngine_AppliesConfiguredAliases(t *testing.T) {
 	})
 
 	// Drive a single pass synchronously via the unexported syncAll.
-	eng.syncAll(context.Background())
+	eng.syncOnce(context.Background())
 
 	if got, _ := r.ResolveAlias("anthropic", "fast"); got != "claude-haiku-4-5" {
 		t.Errorf("alias fast = %q, want claude-haiku-4-5", got)
@@ -260,4 +260,51 @@ func TestEngine_TriggerCoalesces(t *testing.T) {
 	// Fill the buffer, then a second Trigger must not block or panic.
 	eng.Trigger()
 	eng.Trigger()
+}
+
+func TestSyncNow_TalliesAndStats(t *testing.T) {
+	r := syncRegistry(t)
+	r.RegisterAdapter("anthropic", &stubAdapter{name: "anthropic", discover: []types.ModelInfo{
+		{Name: "claude-sonnet-4-5", Status: types.ModelStatusActive},
+		{Name: "claude-3-5-sonnet", Status: types.ModelStatusDeprecated},
+		{Name: "claude-gone", Status: types.ModelStatusUnavailable},
+	}})
+	eng := quietSyncEngine(r, SyncConfig{Enabled: true})
+
+	stats := eng.SyncNow(context.Background())
+	ps, ok := stats.Providers["anthropic"]
+	if !ok {
+		t.Fatal("no anthropic stats")
+	}
+	if ps.Discovered != 3 || ps.Active != 1 || ps.Deprecated != 1 || ps.Unavailable != 1 {
+		t.Errorf("tally = %+v, want 3/1/1/1", ps)
+	}
+	if !stats.OK || stats.LastRun.IsZero() {
+		t.Errorf("stats = %+v, want OK + LastRun set", stats)
+	}
+	// Stats() returns the stored summary.
+	if got := eng.Stats(); got.Runs != 1 || got.Providers["anthropic"].Discovered != 3 {
+		t.Errorf("Stats() = %+v", got)
+	}
+}
+
+func TestSyncNow_ProviderErrorRecordedNotFatal(t *testing.T) {
+	r := syncRegistry(t)
+	boom := errors.New("anthropic unreachable")
+	r.RegisterAdapter("anthropic", &stubAdapter{name: "anthropic", discoverErr: boom})
+	r.RegisterAdapter("openai", &stubAdapter{name: "openai", discover: []types.ModelInfo{
+		{Name: "gpt-4o", Status: types.ModelStatusActive},
+	}})
+	eng := quietSyncEngine(r, SyncConfig{Enabled: true})
+
+	stats := eng.SyncNow(context.Background())
+	if stats.OK {
+		t.Error("stats.OK should be false when a provider failed")
+	}
+	if stats.Providers["anthropic"].Error == "" {
+		t.Error("anthropic error not recorded")
+	}
+	if stats.Providers["openai"].Discovered != 1 {
+		t.Error("openai still should have synced despite anthropic failing")
+	}
 }

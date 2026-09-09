@@ -1,0 +1,84 @@
+{
+  "__comment": "Model Registry dashboard (tas-llm-router epic #2, Phase 5). NOT loaded by this repo — import into the shared-monitoring Grafana (see root CLAUDE.md). Datasource is a Prometheus scraping the router's /metrics. Version-controlled next to the code that emits the series.",
+  "title": "TAS LLM Router — Model Registry",
+  "uid": "tas-llm-router-model-registry",
+  "schemaVersion": 39,
+  "editable": true,
+  "tags": ["tas", "llm-router", "model-registry"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Model status (provider / model)",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "llm_router_model_status", "format": "table", "instant": true }
+      ],
+      "description": "One row per known model; the status label is active / deprecated / unavailable."
+    },
+    {
+      "id": 2,
+      "title": "Sync success/failure rate",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (provider,result) (rate(llm_router_registry_sync_total[5m]))", "legendFormat": "{{provider}} {{result}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Sync duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (provider,le) (rate(llm_router_registry_sync_duration_seconds_bucket[5m])))", "legendFormat": "{{provider}} p95" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 4,
+      "title": "Fallback usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (from,to) (increase(llm_router_model_fallback_total[1h]))", "legendFormat": "{{from}} -> {{to}}" }
+      ],
+      "description": "Fallbacks off unavailable models. Non-zero means a requested model was gone and the registry substituted a replacement."
+    },
+    {
+      "id": 5,
+      "title": "Model validation failures",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (provider,model) (rate(llm_router_model_validation_total{result=\"unavailable\"}[5m]))", "legendFormat": "{{provider}}/{{model}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Alias resolutions",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (alias,resolved) (rate(llm_router_model_alias_resolution_total[5m]))", "legendFormat": "{{alias}} -> {{resolved}}" }
+      ]
+    }
+  ]
+}

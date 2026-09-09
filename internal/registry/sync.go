@@ -2,9 +2,13 @@ package registry
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/tributary-ai/llm-router-waf/internal/metrics"
+	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
 
 // SyncConfig configures periodic model discovery (the `registry:` YAML block).
@@ -42,6 +46,41 @@ type SyncEngine struct {
 	config    SyncConfig
 	triggerCh chan struct{}
 	logger    *logrus.Logger
+
+	mu    sync.Mutex
+	stats SyncStats // last completed pass; read by the admin status endpoint
+}
+
+// SyncStats summarises the most recent discovery pass for the status endpoint.
+type SyncStats struct {
+	LastRun    time.Time                   `json:"last_run"`
+	DurationMS int64                       `json:"duration_ms"`
+	OK         bool                        `json:"ok"`
+	Runs       int                         `json:"runs"`
+	Providers  map[string]ProviderSyncStat `json:"providers"`
+}
+
+// ProviderSyncStat is one provider's outcome in a pass.
+type ProviderSyncStat struct {
+	Discovered  int    `json:"discovered"`
+	Active      int    `json:"active"`
+	Deprecated  int    `json:"deprecated"`
+	Unavailable int    `json:"unavailable"`
+	DurationMS  int64  `json:"duration_ms"`
+	Error       string `json:"error,omitempty"`
+}
+
+// Stats returns a copy of the most recent pass's summary (zero value before the
+// first pass). Safe for concurrent use.
+func (s *SyncEngine) Stats() SyncStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := s.stats
+	cp.Providers = make(map[string]ProviderSyncStat, len(s.stats.Providers))
+	for k, v := range s.stats.Providers {
+		cp.Providers[k] = v
+	}
+	return cp
 }
 
 // NewSyncEngine builds an engine over reg. A nil logger gets a default.
@@ -79,7 +118,7 @@ func (s *SyncEngine) Run(ctx context.Context) {
 		interval = time.Hour
 	}
 	if s.config.StartupSync {
-		s.syncAll(ctx)
+		s.syncOnce(ctx)
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -88,29 +127,86 @@ func (s *SyncEngine) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.syncAll(ctx)
+			s.syncOnce(ctx)
 		case <-s.triggerCh:
-			s.syncAll(ctx)
+			s.syncOnce(ctx)
 		}
 	}
 }
 
-// syncAll runs one discovery pass: the registry discovers + upserts every
-// provider's models, then configured aliases are (re)applied. Best-effort —
-// errors are logged, never fatal, so a provider outage degrades to stale data
-// rather than a crash. Duration/result are logged; Prometheus metrics are the
-// Observability phase (#6).
-func (s *SyncEngine) syncAll(ctx context.Context) {
+// SyncNow runs one discovery pass synchronously and returns its summary. Used by
+// the admin sync endpoint so the caller sees the result of the sync it asked
+// for, rather than firing the async Trigger and polling.
+func (s *SyncEngine) SyncNow(ctx context.Context) SyncStats {
+	return s.syncOnce(ctx)
+}
+
+// syncOnce runs one discovery pass: per provider it times SyncProvider, emits
+// the sync metrics, tallies the resulting models by status, and logs a
+// structured summary; then it reapplies configured aliases. Best-effort —
+// a provider error is recorded and logged, never fatal, so one provider's
+// outage degrades to stale data rather than stopping the others or crashing.
+// The pass summary is stored for the status endpoint and returned.
+func (s *SyncEngine) syncOnce(ctx context.Context) SyncStats {
 	start := time.Now()
-	err := s.registry.SyncAll(ctx)
-	if err != nil {
-		s.logger.WithError(err).Warn("registry sync: completed with errors")
+	stats := SyncStats{LastRun: start, OK: true, Providers: map[string]ProviderSyncStat{}}
+
+	for _, provider := range s.registry.Providers() {
+		if err := ctx.Err(); err != nil { // graceful shutdown mid-pass
+			break
+		}
+		pStart := time.Now()
+		err := s.registry.SyncProvider(ctx, provider)
+		dur := time.Since(pStart)
+		metrics.ObserveRegistrySync(provider, dur, err == nil)
+
+		ps := ProviderSyncStat{DurationMS: dur.Milliseconds()}
+		for _, m := range mustList(s.registry, provider) {
+			ps.Discovered++
+			switch m.Status {
+			case "", "active":
+				ps.Active++
+			case "deprecated":
+				ps.Deprecated++
+			case "unavailable":
+				ps.Unavailable++
+			}
+		}
+		if err != nil {
+			stats.OK = false
+			ps.Error = err.Error()
+			s.logger.WithError(err).WithField("provider", provider).Error("registry: sync failed")
+		} else {
+			s.logger.WithFields(logrus.Fields{
+				"provider":          provider,
+				"models_found":      ps.Discovered,
+				"models_active":     ps.Active,
+				"models_deprecated": ps.Deprecated,
+				"duration_ms":       ps.DurationMS,
+			}).Info("registry: model sync completed")
+		}
+		stats.Providers[provider] = ps
 	}
+
 	s.applyAliases(ctx)
-	s.logger.WithFields(logrus.Fields{
-		"duration_ms": time.Since(start).Milliseconds(),
-		"ok":          err == nil,
-	}).Debug("registry sync pass complete")
+
+	stats.DurationMS = time.Since(start).Milliseconds()
+	s.mu.Lock()
+	stats.Runs = s.stats.Runs + 1
+	s.stats = stats
+	s.mu.Unlock()
+	return stats
+}
+
+// mustList returns a provider's models, or nil on error (the tally then reads
+// as zero for that provider — the error itself is already surfaced via the
+// SyncProvider result).
+func mustList(reg *Registry, provider string) []types.ModelInfo {
+	models, err := reg.ListModels(provider)
+	if err != nil {
+		return nil
+	}
+	return models
 }
 
 // applyAliases attaches each configured name→target alias to the provider that
