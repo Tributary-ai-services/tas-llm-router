@@ -816,6 +816,110 @@ paths:
               schema:
                 type: string
 
+  /v1/registry/models:
+    get:
+      summary: List all registered models
+      description: |
+        Lists every model the dynamic model registry knows, grouped by provider,
+        with each model's status (active / deprecated / unavailable). Returns 503
+        when the registry is disabled.
+      tags:
+        - Registry
+      responses:
+        '200':
+          description: Models grouped by provider
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items: { type: object }
+        '503':
+          description: Registry not enabled
+
+  /v1/registry/models/{provider}:
+    get:
+      summary: List a provider's registered models
+      tags:
+        - Registry
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The provider's models
+        '404':
+          description: Unknown provider
+        '503':
+          description: Registry not enabled
+
+  /v1/registry/status:
+    get:
+      summary: Registry sync status
+      description: Last discovery pass summary (per-provider counts, duration, errors) and the registered providers.
+      tags:
+        - Registry
+      responses:
+        '200':
+          description: Sync status
+        '503':
+          description: Registry not enabled
+
+  /v1/registry/sync:
+    post:
+      summary: Trigger a manual discovery pass
+      description: |
+        Runs one synchronous discovery pass and returns its summary. Rate-limited
+        to one call per 10s (429 with `Retry-After` otherwise) since each pass
+        makes live provider calls.
+      tags:
+        - Registry
+      responses:
+        '200':
+          description: Sync summary
+        '429':
+          description: Called again too soon
+        '503':
+          description: Registry not enabled
+
+  /v1/registry/validate:
+    post:
+      summary: Validate a model's availability
+      description: Probes a specific model via its provider adapter and reports whether it is currently servable.
+      tags:
+        - Registry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, model]
+              properties:
+                provider: { type: string }
+                model: { type: string }
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: { type: string }
+                  model: { type: string }
+                  available: { type: boolean }
+        '400':
+          description: Missing provider or model
+        '503':
+          description: Registry not enabled
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -2035,3 +2139,5 @@ tags:
     description: Routing decision and strategy endpoints
   - name: Monitoring
     description: Metrics and observability endpoints
+  - name: Registry
+    description: Dynamic model registry — model discovery, status, and admin

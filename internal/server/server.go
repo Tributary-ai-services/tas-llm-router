@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -24,6 +25,7 @@ import (
 	routermetrics "github.com/tributary-ai/llm-router-waf/internal/metrics"
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
+	"github.com/tributary-ai/llm-router-waf/internal/registry"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
@@ -88,6 +90,13 @@ type Server struct {
 	// (and never re-warns) on the hot path. Empty means "no configured default"
 	// → the built-in DefaultMode (passthrough).
 	promptCacheDefault promptcache.Mode
+
+	// Model registry (epic #2). Nil unless enabled; set via SetRegistry. The
+	// admin registry endpoints read these.
+	modelRegistry *registry.Registry
+	modelRegSync  *registry.SyncEngine
+	regSyncMu     sync.Mutex
+	regSyncLast   time.Time // last manual /v1/registry/sync, for rate limiting
 
 	// respCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
 	// Nil when disabled — every cache branch is a no-op in that case.
@@ -951,6 +960,13 @@ func (s *Server) setupRoutes() *mux.Router {
 	api.HandleFunc("/breaker", s.handleBreakerStatus).Methods("GET")
 	api.HandleFunc("/routing/decision", s.handleRoutingDecision).Methods("POST")
 
+	// Model registry admin (epic #2, Phase 5). 503 when the registry is disabled.
+	api.HandleFunc("/registry/sync", s.handleRegistrySync).Methods("POST")
+	api.HandleFunc("/registry/models", s.handleListRegistryModels).Methods("GET")
+	api.HandleFunc("/registry/models/{provider}", s.handleListProviderModels).Methods("GET")
+	api.HandleFunc("/registry/status", s.handleRegistryStatus).Methods("GET")
+	api.HandleFunc("/registry/validate", s.handleValidateModel).Methods("POST")
+
 	// Bypass token management endpoints
 	if s.bypassHandler != nil {
 		s.bypassHandler.RegisterRoutes(r)
@@ -1358,6 +1374,10 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorCtx(w, r, http.StatusServiceUnavailable, fmt.Sprintf("Routing failed: %v", err))
 		return
 	}
+	// Registry observability (epic #2, Phase 5): record an alias resolution or a
+	// model fallback the router performed. Emitted here on the single primary
+	// serving path (not the shadow judge/replay paths, which also call Route).
+	recordRegistryResolution(metadata)
 
 	// AIQG: stamp the chosen provider's name onto the routing sidecar.
 	// Done here (not in router.Route) so AIQG plumbing stays in the
