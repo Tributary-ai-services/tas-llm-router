@@ -15,6 +15,7 @@ import (
 
 	"github.com/tributary-ai/llm-router-waf/internal/config"
 	"github.com/tributary-ai/llm-router-waf/internal/gatekeeper"
+	routermetrics "github.com/tributary-ai/llm-router-waf/internal/metrics"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/anthropic"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/openai"
 	"github.com/tributary-ai/llm-router-waf/internal/registry"
@@ -142,7 +143,7 @@ func NewApplication(configPath string) (*Application, error) {
 	// Model registry (epic #2). Constructed only when enabled; the engine is
 	// started in Run so it shares the app's shutdown context. Nothing consults
 	// the registry yet — routing integration is the next slice (#5).
-	regSync := setupRegistry(routerInstance, cfg, logger)
+	regSync := setupRegistry(routerInstance, serverInstance, cfg, logger)
 
 	return &Application{
 		config:  cfg,
@@ -157,7 +158,7 @@ func NewApplication(configPath string) (*Application, error) {
 // registered providers, or returns nil when the registry is disabled (the
 // default). It wires discovery adapters from the concrete providers, loads any
 // persisted snapshot, and returns the engine for Run to start.
-func setupRegistry(router *routing.Router, cfg *config.Config, logger *logrus.Logger) *registry.SyncEngine {
+func setupRegistry(router *routing.Router, srv *server.Server, cfg *config.Config, logger *logrus.Logger) *registry.SyncEngine {
 	rc := cfg.Registry
 	if !rc.Enabled {
 		return nil
@@ -194,16 +195,11 @@ func setupRegistry(router *routing.Router, cfg *config.Config, logger *logrus.Lo
 	}
 
 	// Let the router consult the registry (alias resolution + fallback off
-	// deprecated/unavailable models) during routing.
+	// deprecated/unavailable models) during routing, and the server serve the
+	// admin endpoints.
 	router.SetRegistry(reg)
 
-	logger.WithFields(logrus.Fields{
-		"redis_backed":  rc.RedisURL != "",
-		"sync_interval": rc.SyncInterval,
-		"startup_sync":  rc.StartupSync,
-	}).Info("Model registry enabled")
-
-	return registry.NewSyncEngine(reg, registry.SyncConfig{
+	engine := registry.NewSyncEngine(reg, registry.SyncConfig{
 		Enabled:        true,
 		SyncInterval:   rc.SyncInterval,
 		ValidationTTL:  rc.ValidationTTL,
@@ -212,6 +208,22 @@ func setupRegistry(router *routing.Router, cfg *config.Config, logger *logrus.Lo
 		Fallback:       registry.FallbackConfig{Enabled: rc.Fallback.Enabled, Strategy: rc.Fallback.Strategy},
 		Aliases:        rc.Aliases,
 	}, logger)
+	srv.SetRegistry(reg, engine)
+
+	// Expose llm_router_model_status from the registry at scrape time. A
+	// duplicate registration (a second app in the same process, as tests do) is
+	// not fatal.
+	if err := routermetrics.RegisterModelStatus(srv.ModelStatusSamples); err != nil {
+		logger.WithError(err).Debug("registry: model-status collector already registered")
+	}
+
+	logger.WithFields(logrus.Fields{
+		"redis_backed":  rc.RedisURL != "",
+		"sync_interval": rc.SyncInterval,
+		"startup_sync":  rc.StartupSync,
+	}).Info("Model registry enabled")
+
+	return engine
 }
 
 // staticModels returns a provider's configured models (pricing/capabilities) to
