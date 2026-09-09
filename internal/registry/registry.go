@@ -60,6 +60,19 @@ func (r *Registry) adapterFor(provider string) adapters.ProviderAdapter {
 	return r.adapters[provider]
 }
 
+// Providers returns the names of every provider with a registered adapter, in
+// deterministic order. The sync engine iterates these.
+func (r *Registry) Providers() []string {
+	r.adaptersMu.RLock()
+	defer r.adaptersMu.RUnlock()
+	names := make([]string, 0, len(r.adapters))
+	for name := range r.adapters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // FindProvider returns the provider serving a model name, searching every
 // provider deterministically. Used to attach a global (provider-agnostic)
 // config alias to the provider that actually owns its target.
