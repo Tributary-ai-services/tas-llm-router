@@ -1,0 +1,133 @@
+# Public AIQG gateway host: https://gateway.air-ops.net  (SEC-1)
+#
+# WHY THIS FILE EXISTS
+# This hostname is the customer-facing AIQG API. It deliberately has NO
+# Cloudflare Access in front of it — customers authenticate with their own
+# per-user `TAS-Auth` token, and a browser cannot send `CF-Access-Client-*`
+# headers. Until 2026-09-14 the tunnel rewrote the Host to
+# gateway.aiqg.tas.scharber.com, which lands on `llm-router-aiqg-ingress`
+# and its `/` Prefix rule — so the ENTIRE router route table was published
+# on a hostname with no gate at all. Verified anonymously from outside the
+# cluster on 2026-09-14: /health, /metrics, /aiqg/metrics, /v1/providers,
+# /v1/models, /v1/capabilities, /v1/breaker and /docs all returned 200.
+#
+# THE FIX: same shape as `ingress-docs-airops.yaml`. cloudflared now forwards
+# the ORIGINAL Host (no httpHostHeader rewrite) so this rule matches, and this
+# rule enumerates the customer endpoints one by one. Anything not listed 404s
+# at nginx before it reaches the router — no snippet annotations, no WAF
+# dependency, no reliance on the app's own middleware.
+#
+# WHAT IS ALLOWED, AND WHY EXACTLY THESE
+# Every path below is a POST handler wrapped in the AIQG middleware, which
+# 401s a request with no valid `TAS-Auth` token (`wrapAIQG`,
+# internal/server/server.go:924). They are the whole documented customer
+# surface (deploy/aiqg-public/TEST-USER-GUIDE.md). Nothing here is readable
+# without a token.
+#
+# Deliberately NOT allowed, though a stock SDK may want them:
+#   /v1/models, /v1/models/{model}  - unauthenticated (`api.HandleFunc`, not
+#     wrapAIQG); publishes the configured model inventory. Add them here only
+#     with an auth decision attached, not for SDK convenience.
+#   /health, /v1/health, /v1/providers, /v1/capabilities, /v1/breaker -
+#     unauthenticated operator surface; discloses which providers are
+#     configured and which are degraded.
+#   /metrics, /aiqg/metrics - Prometheus is UNAFFECTED by this: the
+#     `llm-router` and `aiqg-metrics` jobs in `prometheus-shared-config` use
+#     `role: endpoints` and scrape pod IPs directly, never the ingress.
+#   /docs, /docs/openapi.{yaml,json} - published on purpose at
+#     docs.air-ops.net, which is scoped to /docs only. One public docs host is
+#     enough.
+#
+# pathType: Exact throughout. Prefix would re-admit the subtree — /v1/messages
+# as a Prefix would also match /v1/messages/count_tokens, and any future
+# /v1/completions/* handler would be published without anyone choosing to.
+# That is why count_tokens is listed on its own line below.
+#
+# RESIDUAL RISK (accepted, documented): a WARP-enrolled device or a host on
+# the LAN can still reach nginx at 192.168.68.240 and send
+# `Host: gateway.aiqg.tas.scharber.com`, which keeps its `/` catch-all for
+# internal operators. That is an authenticated internal path, not the
+# anonymous internet one SEC-1 is about. Narrowing the internal host is a
+# separate change with separate blast radius.
+#
+# TLS is issued by the internal tas-ca-issuer, not Let's Encrypt: the only
+# client is cloudflared, one hop inside the pod network, with
+# `noTLSVerify: true`. The public certificate is Cloudflare's.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-router-gateway-airops-ingress
+  namespace: tas-llm-router
+  labels:
+    app: llm-router-aiqg
+    aiqg-mode: strict
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/part-of: tas
+  annotations:
+    cert-manager.io/cluster-issuer: tas-ca-issuer
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # 300s matches the internal host. Note Cloudflare Free/Pro gives up at
+    # 100s (error 524) before nginx does, so public clients must stream.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - gateway.air-ops.net
+      secretName: llm-router-gateway-airops-tls
+  rules:
+    - host: gateway.air-ops.net
+      http:
+        paths:
+          # OpenAI-compatible completions
+          - path: /v1/chat/completions
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router-aiqg
+                port:
+                  number: 8086
+          - path: /v1/completions
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router-aiqg
+                port:
+                  number: 8086
+          # Anthropic-compatible messages
+          - path: /v1/messages
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router-aiqg
+                port:
+                  number: 8086
+          # Listed separately because pathType is Exact — /v1/messages does
+          # not cover it.
+          - path: /v1/messages/count_tokens
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router-aiqg
+                port:
+                  number: 8086
+          # OpenAI-compatible embeddings
+          - path: /v1/embeddings
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router-aiqg
+                port:
+                  number: 8086
+          # OpenAI Responses API
+          - path: /v1/responses
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router-aiqg
+                port:
+                  number: 8086

@@ -22,6 +22,10 @@ resources:
 # Public API docs at docs.air-ops.net, scoped to /docs only — the host has
 # no Cloudflare Access in front of it.
 - ingress-docs-airops.yaml
+# Public AIQG gateway at gateway.air-ops.net, scoped to the token-authenticated
+# completion endpoints only (SEC-1). Same reason as the docs host: no
+# Cloudflare Access in front of it, so the path list is the gate.
+- ingress-gateway-airops.yaml
 
 commonLabels:
   app.kubernetes.io/name: llm-router
