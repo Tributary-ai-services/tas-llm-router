@@ -83,16 +83,22 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 	if jr == nil || req == nil || resp == nil {
 		return
 	}
+	// Each early return below removes a particular KIND of response from the
+	// judged population, so each is counted (#184). Random sampling is
+	// unbiased and stays uncounted; these are not.
 	eventID := w.Header().Get("TAS-Response-Event-Id")
 	if eventID == "" {
+		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedNoEventID).Inc()
 		return
 	}
 	tok := tokens.FromContext(ctx)
 	if tok == nil {
+		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedNotAttributed).Inc()
 		return // not AIQG-attributed — no tenant to scope the score
 	}
 	responseText := extractResponseContent(resp)
 	if strings.TrimSpace(responseText) == "" {
+		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedEmpty).Inc()
 		return // tool-call-only / empty — nothing semantic to judge
 	}
 	workflow, expID, variant := "", "", ""

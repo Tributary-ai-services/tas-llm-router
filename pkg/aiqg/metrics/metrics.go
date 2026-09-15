@@ -226,6 +226,42 @@ const (
 	SpendPathShadowReplay = "shadow_replay"
 )
 
+// JudgeExcludedTotal counts responses that reached the judge decision point and
+// were never judged, by reason.
+//
+// The judged population is not a random sample of served traffic, and nothing
+// else in the system makes that visible. Random sampling IS unbiased by
+// construction, so unsampled responses are deliberately not counted here —
+// folding them in would bury the exclusions that actually skew the result
+// under a number driven by the sample rate. Each reason below removes a
+// *particular kind* of response:
+//
+//   - blocked_outbound: the content scanner refused the response, so the
+//     handler returned 403 well before maybeJudge. These are precisely the
+//     responses most likely to score badly, so their absence flatters every
+//     judge aggregate — the measurement bias this counter exists to expose.
+//   - empty_response: tool-call-only turns, which skew toward agentic traffic.
+//   - not_attributed: no AIQG token, so there is no tenant to scope a score to.
+//   - no_event_id: no response event was emitted for a score to attach to.
+//
+// Without this, a judge score reads as "the quality of our traffic" when it is
+// really "the quality of the traffic that survived to be judged".
+var JudgeExcludedTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_judge_excluded_total",
+		Help: "Responses never judged, by reason (blocked_outbound/empty_response/not_attributed/no_event_id).",
+	},
+	[]string{"reason"},
+)
+
+// Reason label values for JudgeExcludedTotal.
+const (
+	JudgeExcludedBlocked       = "blocked_outbound"
+	JudgeExcludedEmpty         = "empty_response"
+	JudgeExcludedNotAttributed = "not_attributed"
+	JudgeExcludedNoEventID     = "no_event_id"
+)
+
 // EmitterDegraded is 1 when the configured Kafka event emitter could not be
 // built at startup and the gateway degraded to the log emitter, 0 otherwise.
 // A Gauge exports 0 from process start (no seeding needed), so a healthy gateway
@@ -301,6 +337,7 @@ func init() {
 		JudgeTokensTotal,
 		UnbilledSpendUSDTotal,
 		UnpricedCallsTotal,
+		JudgeExcludedTotal,
 		EmitterDegraded,
 		PromptCacheRequestsTotal,
 		PromptCacheReadTokensTotal,
