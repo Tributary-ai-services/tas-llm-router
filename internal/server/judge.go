@@ -15,6 +15,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/judge"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
@@ -33,25 +34,35 @@ type judgeRunner struct {
 	experiments *experiments.Resolver // source of variant overrides for the replay
 	router      *routing.Router       // for the offline variant replay
 	recorder    *judgeRecorder
-	log         *logrus.Logger
+	// emitter gives evaluation spend the per-tenant attribution metrics
+	// deliberately cannot carry (#184). Nil disables event emission without
+	// disabling judging — the counters still fire.
+	emitter events.Emitter
+	region  string
+	log     *logrus.Logger
 }
 
 // newJudgeRunner builds the runner, or returns nil when judging is off / the
 // dashboard isn't configured (nowhere to record). shadowPct>0 + an experiments
 // resolver enable pairwise shadow-eval (§6.3) on top of the pointwise judge.
-func newJudgeRunner(router *routing.Router, model string, samplePct, shadowPct int, exp *experiments.Resolver, dashboardURL, internalAuth string, log *logrus.Logger) *judgeRunner {
+func newJudgeRunner(router *routing.Router, model string, samplePct, shadowPct int, exp *experiments.Resolver, dashboardURL, internalAuth string, emitter events.Emitter, region string, log *logrus.Logger) *judgeRunner {
 	if model == "" || samplePct <= 0 || dashboardURL == "" || internalAuth == "" {
 		return nil
 	}
-	return &judgeRunner{
-		judge:       &judge.Judge{LLM: &routerCompletion{router: router}, Model: model},
+	jr := &judgeRunner{
 		samplePct:   samplePct,
 		shadowPct:   shadowPct,
 		experiments: exp,
 		router:      router,
 		recorder:    &judgeRecorder{http: &http.Client{Timeout: 5 * time.Second}, baseURL: strings.TrimRight(dashboardURL, "/"), auth: internalAuth},
+		emitter:     emitter,
+		region:      region,
 		log:         log,
 	}
+	// The adapter needs the runner back so a completed judge call can emit its
+	// own attributed event; the runner owns the emitter and the region.
+	jr.judge = &judge.Judge{LLM: &routerCompletion{router: router, runner: jr}, Model: model}
+	return jr
 }
 
 // sampled returns true for the fraction of events to judge — deterministic on
@@ -109,11 +120,27 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 	promptText := promptFromMessages(req)
 	tenantID := tok.TenantID
 
+	// Attribution for whatever evaluation calls follow. Captured here because
+	// this is the last point that still has the customer's token and the
+	// response event id; the adapter that actually bills has neither.
+	attr := &evalAttribution{
+		TenantID:          tok.TenantID,
+		AIQGAccountID:     tok.AIQGAccountID,
+		TokenID:           tok.TokenID,
+		SourceApp:         tok.SourceApp,
+		ParentEventID:     eventID,
+		ExperimentID:      expID,
+		ExperimentVariant: variant,
+		Workflow:          workflow,
+		Path:              metrics.SpendPathJudge,
+	}
+
 	// Pointwise judge on the sampled fraction.
 	if jr.sampled(eventID) {
 		go func() {
 			jctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
+			jctx = withEvalAttribution(jctx, attr)
 			score, err := jr.judge.Score(jctx, workflow, promptText, responseText)
 			if err != nil {
 				jr.log.WithError(err).Debug("aiqg judge: scoring failed")
@@ -140,7 +167,7 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 		// Carry control's own cap and usage: the cap so the variant is judged
 		// under the same limit (#182), the usage so the recorded comparison is
 		// a paired cost sample rather than a preference with no price (#183).
-		go jr.shadowEval(eventID, tenantID, expID, workflow, promptText, responseText, msgs, baseModel,
+		go jr.shadowEval(attr, promptText, responseText, msgs, baseModel,
 			cloneIntPtr(req.MaxTokens), resp.Usage)
 	}
 }
@@ -165,9 +192,17 @@ type replayResult struct {
 // shadowEval replays the control prompt through each non-control variant and
 // pairwise-judges control vs variant, recording a per-variant preference and
 // the measured cost of both arms. Best-effort; off the hot path.
-func (jr *judgeRunner) shadowEval(eventID, tenantID, expID, workflow, prompt, controlResp string, msgs []types.Message, baseModel string, controlMaxTokens *int, controlUsage *types.Usage) {
+func (jr *judgeRunner) shadowEval(attr *evalAttribution, prompt, controlResp string, msgs []types.Message, baseModel string, controlMaxTokens *int, controlUsage *types.Usage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	eventID, tenantID, expID, workflow := attr.ParentEventID, attr.TenantID, attr.ExperimentID, attr.Workflow
+
+	// The pairwise comparison is itself a judge call, so it attributes under
+	// the judge path. The replay below is a different kind of spend and gets
+	// its own path — one ctx for both would file half this function's cost
+	// under the wrong label.
+	judgeCtx := withEvalAttribution(ctx, attr)
+
 	variants := jr.experiments.NonControlOverrides(ctx, tenantID, expID)
 	for _, v := range variants {
 		rr, err := jr.replay(ctx, msgs, baseModel, controlMaxTokens, v.Override)
@@ -176,6 +211,16 @@ func (jr *judgeRunner) shadowEval(eventID, tenantID, expID, workflow, prompt, co
 		// that counts only successes understates the bill in the one direction
 		// nobody notices.
 		jr.countReplay(rr)
+		// Attribute the replay to the variant that actually ran. attr carries
+		// "control" — shadow-eval only fires on the control arm — but the
+		// billed call was the variant's, and filing it under control would
+		// credit the baseline with spend it never incurred.
+		if rr.Usage != nil {
+			replayAttr := *attr
+			replayAttr.Path = metrics.SpendPathShadowReplay
+			replayAttr.ExperimentVariant = v.Key
+			jr.emitEvalEvent(ctx, &replayAttr, rr.Vendor, rr.Model, rr.Usage, rr.FinishReason)
+		}
 		if err != nil || strings.TrimSpace(rr.Text) == "" {
 			metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowReplayFailed).Inc()
 			jr.log.WithError(err).Debug("aiqg shadow-eval: replay failed")
@@ -183,7 +228,7 @@ func (jr *judgeRunner) shadowEval(eventID, tenantID, expID, workflow, prompt, co
 		}
 		// Randomize A/B order per the bias control (§6.6).
 		variantFirst := crc32.ChecksumIEEE([]byte(eventID+":"+v.Key))%2 == 0
-		pw, err := jr.judge.ScorePairwise(ctx, workflow, prompt, controlResp, rr.Text, variantFirst)
+		pw, err := jr.judge.ScorePairwise(judgeCtx, workflow, prompt, controlResp, rr.Text, variantFirst)
 		if err != nil {
 			metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowJudgeFailed).Inc()
 			continue
@@ -331,7 +376,13 @@ func promptFromMessages(req *types.ChatRequest) string {
 // judge can decide the result is unusable. An abstaining judge, an
 // unparseable reply and a failed record all bill exactly what a clean score
 // does, so accounting further up would silently omit them.
-type routerCompletion struct{ router *routing.Router }
+type routerCompletion struct {
+	router *routing.Router
+	// runner carries the emitter + region so a completed call can emit an
+	// attributed event. The attribution itself rides the context, since this
+	// adapter is constructed once at startup and shared by every tenant.
+	runner *judgeRunner
+}
 
 func (rc *routerCompletion) Complete(ctx context.Context, model, system, user string) (string, error) {
 	maxTokens := 400
@@ -356,7 +407,10 @@ func (rc *routerCompletion) Complete(ctx context.Context, model, system, user st
 		metrics.JudgeCallsTotal.WithLabelValues(metrics.JudgeProviderFailed).Inc()
 		return "", fmt.Errorf("judge completion: %w", err)
 	}
-	countJudge(provider.GetProviderName(), effectiveModel(meta, req.Model), resp.Usage)
+	vendor, billedModel := provider.GetProviderName(), effectiveModel(meta, req.Model)
+	countJudge(vendor, billedModel, resp.Usage)
+	// Per-tenant attribution for the same spend the counters just recorded.
+	rc.runner.emitEvalEvent(ctx, evalAttributionFrom(ctx), vendor, billedModel, resp.Usage, finishReasonOf(resp))
 	return extractResponseContent(resp), nil
 }
 
