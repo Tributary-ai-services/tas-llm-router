@@ -76,14 +76,21 @@ func (jr *judgeRunner) sampled(eventID string) bool {
 
 // shadowSampled is the (separate, usually smaller) shadow-eval sample — it
 // replays + pairwise-judges, so it costs ~2× per sampled request.
-func (jr *judgeRunner) shadowSampled(eventID string) bool {
-	if jr.shadowPct <= 0 {
+//
+// pct is the EFFECTIVE rate for one experiment: its declared
+// guardrails.shadow_eval_pct when it set one, else the gateway-wide default.
+// Taking it as an argument rather than reading jr.shadowPct is what makes the
+// consent per-experiment (#184) — a shadow replay spends the tenant's money on
+// an evaluation they never directly asked for, and the experiment that
+// declares a rate is the thing that authorizes it.
+func shadowSampled(eventID string, pct int) bool {
+	if pct <= 0 {
 		return false
 	}
-	if jr.shadowPct >= 100 {
+	if pct >= 100 {
 		return true
 	}
-	return int(crc32.ChecksumIEEE([]byte("shadow:"+eventID))%100) < jr.shadowPct
+	return int(crc32.ChecksumIEEE([]byte("shadow:"+eventID))%100) < pct
 }
 
 // maybeJudge fires an async judge for a sampled, AIQG-attributed, non-streaming
@@ -161,7 +168,12 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 	// replay the same prompt through each variant offline and judge head-to-
 	// head. Zero user impact (the client already has control's response);
 	// ~2× cost on the shadow sample. Pairs with dry_run (everyone is control).
-	if expID != "" && variant == "control" && jr.experiments != nil && jr.shadowSampled(eventID) {
+	// The sampling gate moved INTO shadowEval: the effective rate is the
+	// experiment's own declared guardrail, which is only known after the
+	// resolver lookup. That lookup is a TTL-cached read on a goroutine off the
+	// hot path, so doing it before the sample decision costs nothing the
+	// customer can feel.
+	if expID != "" && variant == "control" && jr.experiments != nil {
 		msgs := append([]types.Message(nil), req.Messages...) // snapshot for the goroutine
 		baseModel := req.Model
 		// Carry control's own cap and usage: the cap so the variant is judged
@@ -203,7 +215,21 @@ func (jr *judgeRunner) shadowEval(attr *evalAttribution, prompt, controlResp str
 	// under the wrong label.
 	judgeCtx := withEvalAttribution(ctx, attr)
 
-	variants := jr.experiments.NonControlOverrides(ctx, tenantID, expID)
+	variants, declaredPct := jr.experiments.ShadowEvalPlan(ctx, tenantID, expID)
+
+	// An experiment that declares a rate authorizes its own shadow spend; one
+	// that doesn't inherits the gateway-wide default, so an existing
+	// deployment keeps behaving exactly as it did. Deliberately NOT
+	// min(declared, global): the global defaults to 0, so that reading would
+	// make every declared rate permanently inert and the guardrail
+	// undeployable without changing two knobs at once.
+	pct := jr.shadowPct
+	if declaredPct != nil {
+		pct = *declaredPct
+	}
+	if !shadowSampled(eventID, pct) {
+		return
+	}
 	for _, v := range variants {
 		rr, err := jr.replay(ctx, msgs, baseModel, controlMaxTokens, v.Override)
 		// Count the spend before anything can discard the result: an abstaining

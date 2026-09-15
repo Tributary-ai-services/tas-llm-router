@@ -62,6 +62,22 @@ type Assignment struct {
 // caps the eligible share; the rest of a matched cohort is left untouched.
 type Guardrails struct {
 	MaxTrafficPct *int `json:"max_traffic_pct,omitempty"`
+
+	// ShadowEvalPct (0–100) is how much of this experiment's CONTROL-arm
+	// traffic may be pairwise shadow-evaluated: replayed through each variant
+	// offline and judged head-to-head, at roughly 2× the cost of the request
+	// it shadows (tas-llm-router#184).
+	//
+	// It lives in Guardrails, beside max_traffic_pct, because it is the same
+	// kind of thing — a declared limit on what an experiment may spend of the
+	// tenant's money. A shadow replay bills the tenant for an evaluation no
+	// request of theirs asked for, so the experiment declaring a rate is what
+	// authorizes that spend, and consent becomes explicit by construction
+	// rather than inherited from a gateway-wide switch nobody agreed to.
+	//
+	// nil means the experiment declared nothing and inherits the gateway
+	// default; 0 means it explicitly declined.
+	ShadowEvalPct *int `json:"shadow_eval_pct,omitempty"`
 }
 
 // Experiment mirrors the aiqg-dashboard-be /internal/experiments payload. The
@@ -287,12 +303,21 @@ func (r *Resolver) Resolve(ctx context.Context, tenantID string, id Identity, at
 	return nil
 }
 
-// NonControlOverrides returns the non-control variants of an active experiment
-// for a tenant — the arms a control-arm request is shadow-evaluated against.
-// Empty when the experiment isn't active/known.
-func (r *Resolver) NonControlOverrides(ctx context.Context, tenantID, experimentID string) []Variant {
+// ShadowEvalPlan returns the non-control variants of an active experiment for a
+// tenant — the arms a control-arm request is shadow-evaluated against — together
+// with that experiment's declared shadow_eval_pct guardrail (nil when it
+// declared none, so the caller falls back to the gateway default). Empty/nil
+// when the experiment isn't active/known.
+//
+// The variants and the guardrail come back from ONE lookup deliberately.
+// Fetching them separately would mean two reads of a TTL cache that can expire
+// between them, so a caller could pair one generation's variants with another
+// generation's consent rate — replaying at a rate the experiment no longer
+// declares. Returning both from a single read makes that impossible rather
+// than merely unlikely.
+func (r *Resolver) ShadowEvalPlan(ctx context.Context, tenantID, experimentID string) ([]Variant, *int) {
 	if r == nil {
-		return nil
+		return nil, nil
 	}
 	for _, e := range r.active(ctx, tenantID) {
 		if e.ID != experimentID {
@@ -304,9 +329,17 @@ func (r *Resolver) NonControlOverrides(ctx context.Context, tenantID, experiment
 				out = append(out, v)
 			}
 		}
-		return out
+		// Copy the guardrail rather than handing back a pointer into the
+		// shared cache entry, which is read concurrently by other tenants'
+		// requests. Same reasoning as cloneIntPtr on the replay path.
+		var pct *int
+		if e.Guardrails.ShadowEvalPct != nil {
+			v := *e.Guardrails.ShadowEvalPct
+			pct = &v
+		}
+		return out, pct
 	}
-	return nil
+	return nil, nil
 }
 
 // HTTPLoader loads experiments from aiqg-dashboard-be's internal cache endpoint.
