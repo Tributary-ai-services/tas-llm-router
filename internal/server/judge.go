@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/credentials"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/experiments"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/judge"
@@ -39,13 +41,18 @@ type judgeRunner struct {
 	// disabling judging — the counters still fire.
 	emitter events.Emitter
 	region  string
-	log     *logrus.Logger
+	// creds resolves the tenant's own BYOK vendor key so an evaluation bills
+	// the customer whose traffic prompted it, rather than the gateway's shared
+	// key. Nil (BYOK unconfigured) means every eval uses the configured key,
+	// which is the pre-#184 behaviour.
+	creds *credentials.Resolver
+	log   *logrus.Logger
 }
 
 // newJudgeRunner builds the runner, or returns nil when judging is off / the
 // dashboard isn't configured (nowhere to record). shadowPct>0 + an experiments
 // resolver enable pairwise shadow-eval (§6.3) on top of the pointwise judge.
-func newJudgeRunner(router *routing.Router, model string, samplePct, shadowPct int, exp *experiments.Resolver, dashboardURL, internalAuth string, emitter events.Emitter, region string, log *logrus.Logger) *judgeRunner {
+func newJudgeRunner(router *routing.Router, model string, samplePct, shadowPct int, exp *experiments.Resolver, dashboardURL, internalAuth string, emitter events.Emitter, region string, creds *credentials.Resolver, log *logrus.Logger) *judgeRunner {
 	if model == "" || samplePct <= 0 || dashboardURL == "" || internalAuth == "" {
 		return nil
 	}
@@ -57,6 +64,7 @@ func newJudgeRunner(router *routing.Router, model string, samplePct, shadowPct i
 		recorder:    &judgeRecorder{http: &http.Client{Timeout: 5 * time.Second}, baseURL: strings.TrimRight(dashboardURL, "/"), auth: internalAuth},
 		emitter:     emitter,
 		region:      region,
+		creds:       creds,
 		log:         log,
 	}
 	// The adapter needs the runner back so a completed judge call can emit its
@@ -149,6 +157,14 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 			defer cancel()
 			jctx = withEvalAttribution(jctx, attr)
 			score, err := jr.judge.Score(jctx, workflow, promptText, responseText)
+			if errors.Is(err, errEvalSkippedBYOK) {
+				// A refusal, not a failure. The tenant is BYOK-only with no
+				// stored key, so nothing was called and nothing billed;
+				// logging it as a scoring failure would make a policy the
+				// gateway correctly respected read as a bug. Already counted
+				// as an exclusion at the decision point.
+				return
+			}
 			if err != nil {
 				jr.log.WithError(err).Debug("aiqg judge: scoring failed")
 				return
@@ -231,21 +247,30 @@ func (jr *judgeRunner) shadowEval(attr *evalAttribution, prompt, controlResp str
 		return
 	}
 	for _, v := range variants {
-		rr, err := jr.replay(ctx, msgs, baseModel, controlMaxTokens, v.Override)
+		// Built BEFORE the call, because it now decides whose key pays as well
+		// as who gets billed. attr carries "control" — shadow-eval only fires
+		// on the control arm — but the billed call is the variant's, and
+		// filing it under control would credit the baseline with spend it
+		// never incurred.
+		replayAttr := *attr
+		replayAttr.Path = metrics.SpendPathShadowReplay
+		replayAttr.ExperimentVariant = v.Key
+
+		rr, err := jr.replay(withEvalAttribution(ctx, &replayAttr), msgs, baseModel, controlMaxTokens, v.Override)
 		// Count the spend before anything can discard the result: an abstaining
 		// judge costs exactly what an agreeing one does, and a spend figure
 		// that counts only successes understates the bill in the one direction
 		// nobody notices.
 		jr.countReplay(rr)
-		// Attribute the replay to the variant that actually ran. attr carries
-		// "control" — shadow-eval only fires on the control arm — but the
-		// billed call was the variant's, and filing it under control would
-		// credit the baseline with spend it never incurred.
 		if rr.Usage != nil {
-			replayAttr := *attr
-			replayAttr.Path = metrics.SpendPathShadowReplay
-			replayAttr.ExperimentVariant = v.Key
 			jr.emitEvalEvent(ctx, &replayAttr, rr.Vendor, rr.Model, rr.Usage, rr.FinishReason)
+		}
+		// A BYOK-only tenant with no stored key is a refusal, not a failure:
+		// nothing was called and nothing billed, so counting it as a failed
+		// replay would make a policy the gateway correctly respected look like
+		// a bug it has.
+		if errors.Is(err, errEvalSkippedBYOK) {
+			continue
 		}
 		if err != nil || strings.TrimSpace(rr.Text) == "" {
 			metrics.ShadowReplaysTotal.WithLabelValues(metrics.ShadowReplayFailed).Inc()
@@ -340,6 +365,14 @@ func (jr *judgeRunner) replay(ctx context.Context, msgs []types.Message, baseMod
 	if err != nil {
 		return replayResult{}, err
 	}
+	// Same key decision as the judge path: a replay is billed spend too, and a
+	// BYOK-only tenant without a stored key must not have the gateway's shared
+	// key spent on their behalf.
+	dec := jr.resolveEvalKey(ctx, evalAttributionFrom(ctx), provider.GetProviderName())
+	if dec.skip {
+		return replayResult{}, errEvalSkippedBYOK
+	}
+	ctx = dec.ctx
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
 		return replayResult{}, err
@@ -425,6 +458,15 @@ func (rc *routerCompletion) Complete(ctx context.Context, model, system, user st
 		metrics.JudgeCallsTotal.WithLabelValues(metrics.JudgeRouteFailed).Inc()
 		return "", fmt.Errorf("judge route: %w", err)
 	}
+	// Whose key pays for this call. Resolved only now, because the key is
+	// per-(tenant, vendor) and the vendor is not known until Route has picked
+	// a provider. Returning before ChatCompletion means a skip never counts as
+	// a provider failure — nothing was called.
+	dec := rc.runner.resolveEvalKey(ctx, evalAttributionFrom(ctx), provider.GetProviderName())
+	if dec.skip {
+		return "", errEvalSkippedBYOK
+	}
+	ctx = dec.ctx
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
 		// No usage is recoverable from a failed call, so this counts as an
