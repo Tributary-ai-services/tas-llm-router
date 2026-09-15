@@ -142,6 +142,90 @@ const (
 	ShadowRecordFailed = "record_failed"
 )
 
+// JudgeCallsTotal counts LLM-as-judge calls by outcome.
+//
+// The judge is the other half of the spend that AIQG bills but never accounts
+// for (tas-llm-router#184). Shadow replays got counters first, but shadow-eval
+// is OFF by default while pointwise judging runs at a live sample rate — so
+// this path, not the replay path, is the unaccounted spend actually being
+// incurred today.
+//
+// Counted at the router adapter rather than at the scoring call, because that
+// is the only point every judge call passes through *before* its result can be
+// thrown away. A judge that abstains, returns unparseable JSON, or fails to
+// record costs exactly what a successful one does; counting at the call site
+// would drop all three and understate the bill in the one direction nobody
+// checks. `completed_no_usage` is kept distinct from `completed` so a provider
+// that stops reporting usage shows up as a gap rather than as a drop in spend.
+var JudgeCallsTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_judge_calls_total",
+		Help: "LLM-as-judge calls by outcome (completed/completed_no_usage/route_failed/provider_failed).",
+	},
+	[]string{"outcome"},
+)
+
+// JudgeTokensTotal sums tokens billed by judge calls, by direction. Taken from
+// the provider's own usage report, so it reflects what was billed rather than
+// what was asked for. Mirrors ShadowTokensTotal deliberately: the two paths are
+// summed together when answering "what did evaluation cost?".
+var JudgeTokensTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_judge_tokens_total",
+		Help: "Tokens billed by LLM-as-judge calls, by direction (input/output).",
+	},
+	[]string{"direction"},
+)
+
+// UnbilledSpendUSDTotal is the dollar cost of calls the gateway makes on its
+// own behalf — judge scoring and shadow replays — which never appear on a
+// customer's invoice and never reach the event path.
+//
+// Tokens alone cannot be summed into money: the two paths run different models
+// at rates that differ by ~19× between haiku and opus, so a token total is not
+// a spend total. Priced here from the same clear.DollarCost table the billing
+// figures use, so this metric and the invoice cannot disagree about rates.
+//
+// Labelled by path, NOT by tenant: per-tenant attribution belongs on the event
+// path, not in a metric whose cardinality would track customer count. That
+// remains the open half of #184.
+var UnbilledSpendUSDTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_unbilled_spend_usd_total",
+		Help: "USD spent on gateway-initiated evaluation calls, by path (judge/shadow_replay).",
+	},
+	[]string{"path"},
+)
+
+// UnpricedCallsTotal counts evaluation calls whose vendor:model is absent from
+// the pricing table, so their cost could not be added to UnbilledSpendUSDTotal.
+//
+// Without this, an unpriced judge model makes evaluation look FREE rather than
+// unmeasured — the spend total stays flat and nothing indicates it is missing
+// rows. Any sustained non-zero value here means UnbilledSpendUSDTotal is an
+// undercount, and names which path to go look at.
+var UnpricedCallsTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_unpriced_eval_calls_total",
+		Help: "Evaluation calls skipped by cost accounting for want of a pricing-table entry, by path.",
+	},
+	[]string{"path"},
+)
+
+// Outcome label values for JudgeCallsTotal.
+const (
+	JudgeCompleted        = "completed"
+	JudgeCompletedNoUsage = "completed_no_usage"
+	JudgeRouteFailed      = "route_failed"
+	JudgeProviderFailed   = "provider_failed"
+)
+
+// Path label values for UnbilledSpendUSDTotal / UnpricedCallsTotal.
+const (
+	SpendPathJudge        = "judge"
+	SpendPathShadowReplay = "shadow_replay"
+)
+
 // EmitterDegraded is 1 when the configured Kafka event emitter could not be
 // built at startup and the gateway degraded to the log emitter, 0 otherwise.
 // A Gauge exports 0 from process start (no seeding needed), so a healthy gateway
@@ -213,6 +297,10 @@ func init() {
 		ShadowReplaysTotal,
 		ShadowTokensTotal,
 		ShadowTruncatedTotal,
+		JudgeCallsTotal,
+		JudgeTokensTotal,
+		UnbilledSpendUSDTotal,
+		UnpricedCallsTotal,
 		EmitterDegraded,
 		PromptCacheRequestsTotal,
 		PromptCacheReadTokensTotal,
