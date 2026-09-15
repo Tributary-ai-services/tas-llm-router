@@ -1949,6 +1949,12 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 			} else if s.gatekeeper.ShouldBlock(result, "outbound") {
 				msg := gatekeeper.FormatBlockMessage(result, "Outbound")
 				s.logger.WithField("request_id", req.ID).Warn(msg)
+				// This return is upstream of maybeJudge, so a blocked response
+				// is never judged. That removes the worst-scoring responses
+				// from the judged population preferentially, which flatters
+				// every judge aggregate — count it so the bias is measurable
+				// rather than invisible (#184).
+				metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedBlocked).Inc()
 				s.writeErrorCtx(w, r, http.StatusForbidden, "response blocked by content policy")
 				return
 			}

@@ -410,6 +410,31 @@ and **where a cheaper automatic signal exists, prefer it over the judge**
   bias; version the rubric (`judge_rubric_version`) so scores compare over time;
   periodically **calibrate the judge against a human-labeled spot-check** set.
 
+#### What the judge path does *not* do (tas-llm-router#184)
+
+The judge and shadow-replay calls are made by the gateway on its own behalf and
+bypass the AIQG HTTP middleware. Three consequences are deliberate, and are
+written down here rather than left to be discovered:
+
+- **The response is not outbound-scanned before the judge sees it.** There is no
+  outbound redaction anywhere in the router, so the judge model receives the
+  response as generated. This is the right trade, not an oversight: scanning or
+  redacting first would change what the judge *reads* and therefore what it
+  scores, so the eval would no longer measure the answer that was actually
+  served. The measurement is kept faithful and the boundary is documented
+  instead of being silently narrowed.
+- **The judge model (`claude-haiku-4-5-20251001`) is Anthropic-hosted.** Judging
+  an OpenAI-origin response therefore discloses that response to a *second*
+  vendor. The experiment authorizes the evaluation, but the original request did
+  not choose that vendor — so for BYOK tenants this is a cross-vendor disclosure
+  and should be treated as one.
+- **Blocked responses are never judged.** The outbound `ShouldBlock` path
+  returns `403` before `maybeJudge` is reached, so the judged population
+  structurally excludes exactly the responses most likely to score badly. That
+  exclusion is counted as
+  `aiqg_judge_excluded_total{reason="blocked_outbound"}` so the bias is
+  measurable rather than invisible.
+
 ---
 
 ## 7. Guardrails (the part that gates the build)
@@ -560,6 +585,13 @@ Extends the existing page (today: comparison) with:
 - **Result validity** — confounding (time-of-day, cohort skew), insufficient
   samples; v1 is honest about sample size and avoids over-claiming
   significance.
+- **The judged population is a biased subset** — judging runs *after* the
+  outbound content scan, so blocked responses are structurally absent from every
+  judge aggregate, along with tool-call-only turns and unattributed traffic.
+  Random sampling is unbiased; these exclusions are not, and they remove the
+  worst-scoring responses preferentially. Counted per reason as
+  `aiqg_judge_excluded_total` so a quality verdict can be read against what it
+  actually covers. See §6.6.
 - **Stickiness vs. coverage** — keying on `conversation` is coherent but a few
   heavy users can dominate a variant; surface per-variant unique-key counts so
   skew is visible.
