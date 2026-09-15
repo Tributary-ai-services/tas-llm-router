@@ -19,6 +19,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/judge"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
+	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 )
 
 // judgeRunner wires the LLM-as-judge quality layer (§6.6) into the gateway:
@@ -148,6 +149,7 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 // were read for the text and dropped on the floor.
 type replayResult struct {
 	Text         string
+	Vendor       string // the provider that billed it — half of the pricing key
 	Model        string // what the variant actually resolved to after the override
 	Usage        *types.Usage
 	FinishReason string
@@ -198,10 +200,45 @@ func (jr *judgeRunner) countReplay(rr replayResult) {
 	if rr.Usage != nil {
 		metrics.ShadowTokensTotal.WithLabelValues("input").Add(float64(rr.Usage.PromptTokens))
 		metrics.ShadowTokensTotal.WithLabelValues("output").Add(float64(rr.Usage.CompletionTokens))
+		countSpend(metrics.SpendPathShadowReplay, rr.Vendor, rr.Model, rr.Usage)
 	}
 	if rr.Truncated {
 		metrics.ShadowTruncatedTotal.Inc()
 	}
+}
+
+// countSpend prices one gateway-initiated evaluation call and adds it to the
+// unbilled-spend total (#184).
+//
+// Tokens were already counted by the caller; this converts them to money,
+// which a token count cannot stand in for — the judge and the replay run
+// different models whose rates differ by more than an order of magnitude, so
+// summing their tokens produces a number that is not a cost.
+//
+// When the vendor:model is absent from the pricing table the call is recorded
+// as unpriced rather than skipped silently. That distinction matters: a
+// missing pricing row otherwise makes evaluation look free instead of
+// unmeasured, and the spend total would sit flat with nothing to indicate it
+// is an undercount.
+func countSpend(path, vendor, model string, u *types.Usage) {
+	cost, ok := clear.DollarCost(vendor, model, u.PromptTokens, u.CompletionTokens)
+	if !ok {
+		metrics.UnpricedCallsTotal.WithLabelValues(path).Inc()
+		return
+	}
+	metrics.UnbilledSpendUSDTotal.WithLabelValues(path).Add(cost)
+}
+
+// effectiveModel is the model that actually ran, which is what pricing must be
+// keyed on. The registry may resolve an alias or fall back off a deprecated
+// model (epic #2), in which case the requested name and the billed name are
+// different strings — and pricing the requested one would silently mis-price
+// every aliased call, or miss the table entirely and count it as unpriced.
+func effectiveModel(meta *types.RouterMetadata, requested string) string {
+	if meta != nil && meta.ResolvedModel != "" {
+		return meta.ResolvedModel
+	}
+	return requested
 }
 
 // replay runs the control prompt through a variant's override offline and
@@ -222,7 +259,7 @@ func (jr *judgeRunner) replay(ctx context.Context, msgs []types.Message, baseMod
 	// — a declared parameter is part of what the experiment is testing.
 	req := &types.ChatRequest{Model: baseModel, Messages: msgs, MaxTokens: cloneIntPtr(controlMaxTokens)}
 	applyExperimentOverride(req, override) // swaps model / params to the variant
-	_, provider, err := jr.router.Route(ctx, req)
+	meta, provider, err := jr.router.Route(ctx, req)
 	if err != nil {
 		return replayResult{}, err
 	}
@@ -232,7 +269,8 @@ func (jr *judgeRunner) replay(ctx context.Context, msgs []types.Message, baseMod
 	}
 	out := replayResult{
 		Text:         extractResponseContent(resp),
-		Model:        req.Model,
+		Vendor:       provider.GetProviderName(),
+		Model:        effectiveModel(meta, req.Model),
 		Usage:        resp.Usage,
 		FinishReason: finishReasonOf(resp),
 	}
@@ -280,6 +318,13 @@ func promptFromMessages(req *types.ChatRequest) string {
 // a one-shot request for the judge model and returns the text. Bypasses the
 // AIQG HTTP middleware entirely (internal call), so judging never recurses and
 // uses the gateway's configured provider key (not a customer key).
+//
+// It is also where judge spend is accounted (#184). This adapter, not the
+// scoring call, is the accounting point: every judge call — pointwise Score and
+// pairwise ScorePairwise alike — passes through here, and it runs before the
+// judge can decide the result is unusable. An abstaining judge, an
+// unparseable reply and a failed record all bill exactly what a clean score
+// does, so accounting further up would silently omit them.
 type routerCompletion struct{ router *routing.Router }
 
 func (rc *routerCompletion) Complete(ctx context.Context, model, system, user string) (string, error) {
@@ -292,15 +337,36 @@ func (rc *routerCompletion) Complete(ctx context.Context, model, system, user st
 			{Role: "user", Content: user},
 		},
 	}
-	_, provider, err := rc.router.Route(ctx, req)
+	meta, provider, err := rc.router.Route(ctx, req)
 	if err != nil {
+		metrics.JudgeCallsTotal.WithLabelValues(metrics.JudgeRouteFailed).Inc()
 		return "", fmt.Errorf("judge route: %w", err)
 	}
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
+		// No usage is recoverable from a failed call, so this counts as an
+		// attempt only. A provider that bills partial work on error would be
+		// invisible here — an accepted floor, not a claim of completeness.
+		metrics.JudgeCallsTotal.WithLabelValues(metrics.JudgeProviderFailed).Inc()
 		return "", fmt.Errorf("judge completion: %w", err)
 	}
+	countJudge(provider.GetProviderName(), effectiveModel(meta, req.Model), resp.Usage)
 	return extractResponseContent(resp), nil
+}
+
+// countJudge records what one judge call billed. Usage comes from the
+// provider's own report; its absence is counted as a distinct outcome rather
+// than as zero tokens, so a provider that stops reporting usage surfaces as a
+// gap instead of as a fall in spend.
+func countJudge(vendor, model string, u *types.Usage) {
+	if u == nil {
+		metrics.JudgeCallsTotal.WithLabelValues(metrics.JudgeCompletedNoUsage).Inc()
+		return
+	}
+	metrics.JudgeCallsTotal.WithLabelValues(metrics.JudgeCompleted).Inc()
+	metrics.JudgeTokensTotal.WithLabelValues("input").Add(float64(u.PromptTokens))
+	metrics.JudgeTokensTotal.WithLabelValues("output").Add(float64(u.CompletionTokens))
+	countSpend(metrics.SpendPathJudge, vendor, model, u)
 }
 
 // judgeRecorder POSTs a judge score to aiqg-dashboard-be's internal ingest,
