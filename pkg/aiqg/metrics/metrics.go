@@ -260,6 +260,35 @@ const (
 	JudgeExcludedEmpty         = "empty_response"
 	JudgeExcludedNotAttributed = "not_attributed"
 	JudgeExcludedNoEventID     = "no_event_id"
+	// JudgeExcludedBYOKOnly: the tenant is BYOK-only and has no stored key for
+	// the vendor the evaluation would have used, so the call was not made. The
+	// alternative — spending the gateway's shared key on an evaluation the
+	// tenant never asked for, against a policy that explicitly forbids the
+	// shared key — would be a consent violation dressed up as a fallback.
+	JudgeExcludedBYOKOnly = "byok_only_no_key"
+)
+
+// EvalCredentialSourceTotal records which key an evaluation call billed, by
+// path and source (tenant_stored / tas_shared / resolver_error).
+//
+// The request path stamps this on its routing sidecar, but an evaluation call
+// has no sidecar — StampCredentialSource is a silent no-op there — so without
+// this counter there is no way to answer "whose key paid for that judge call?".
+// That question is the whole point of the BYOK half of #184: a tenant who
+// brought their own key should not discover the gateway quietly used its own.
+var EvalCredentialSourceTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_eval_credential_source_total",
+		Help: "Key used by gateway evaluation calls, by path and source (tenant_stored/tas_shared/resolver_error).",
+	},
+	[]string{"path", "source"},
+)
+
+// Source label values for EvalCredentialSourceTotal.
+const (
+	EvalCredTenantStored = "tenant_stored"
+	EvalCredTASShared    = "tas_shared"
+	EvalCredResolverErr  = "resolver_error"
 )
 
 // EvalEventsTotal counts AIQG events emitted for gateway-initiated evaluation
@@ -371,6 +400,7 @@ func init() {
 		JudgeExcludedTotal,
 		EvalEventsTotal,
 		EvalEventsFailedTotal,
+		EvalCredentialSourceTotal,
 		EmitterDegraded,
 		PromptCacheRequestsTotal,
 		PromptCacheReadTokensTotal,
