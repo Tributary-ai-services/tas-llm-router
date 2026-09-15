@@ -262,6 +262,37 @@ const (
 	JudgeExcludedNoEventID     = "no_event_id"
 )
 
+// EvalEventsTotal counts AIQG events emitted for gateway-initiated evaluation
+// calls, by path (judge / shadow_replay).
+//
+// These events are what give evaluation spend PER-TENANT attribution, which
+// the spend counters deliberately cannot carry: a tenant label there would
+// make the series count track the customer count. The event path already
+// carries tenant, experiment and variant for real traffic, so evaluation
+// spend joins the same pipeline rather than needing a parallel one.
+var EvalEventsTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_eval_events_total",
+		Help: "AIQG events emitted for gateway evaluation calls, by path (judge/shadow_replay).",
+	},
+	[]string{"path"},
+)
+
+// EvalEventsFailedTotal counts evaluation events that could not be emitted.
+//
+// A failure here is a silent attribution loss, not a lost request: the call
+// still happened and still billed, the spend counters still moved, but no
+// per-tenant row exists for it. Without this counter the two views would drift
+// apart with nothing indicating why — the global total would stay right while
+// the per-tenant sum quietly ran short.
+var EvalEventsFailedTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_eval_events_failed_total",
+		Help: "Evaluation events that failed to emit, by path — each one is unattributed spend.",
+	},
+	[]string{"path"},
+)
+
 // EmitterDegraded is 1 when the configured Kafka event emitter could not be
 // built at startup and the gateway degraded to the log emitter, 0 otherwise.
 // A Gauge exports 0 from process start (no seeding needed), so a healthy gateway
@@ -338,6 +369,8 @@ func init() {
 		UnbilledSpendUSDTotal,
 		UnpricedCallsTotal,
 		JudgeExcludedTotal,
+		EvalEventsTotal,
+		EvalEventsFailedTotal,
 		EmitterDegraded,
 		PromptCacheRequestsTotal,
 		PromptCacheReadTokensTotal,

@@ -803,7 +803,8 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 		// judge model + sample pct + dashboard ingest are all configured.
 		server.judge = newJudgeRunner(router, config.AIQG.JudgeModel, config.AIQG.JudgeSamplePct,
 			config.AIQG.ShadowEvalPct, experimentResolver,
-			config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken, logger)
+			config.AIQG.DashboardURL, config.AIQG.DashboardInternalAuthToken,
+			server.aiqgEmitter, config.AIQG.Region, logger)
 		if server.judge != nil {
 			logger.WithFields(logrus.Fields{
 				"judge_model": config.AIQG.JudgeModel,
