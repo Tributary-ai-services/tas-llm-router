@@ -26,6 +26,8 @@ resources:
 # completion endpoints only (SEC-1). Same reason as the docs host: no
 # Cloudflare Access in front of it, so the path list is the gate.
 - ingress-gateway-airops.yaml
+# Public programmatic host llm.air-ops.net, path-allowlisted (SEC-23).
+- ingress-llm-airops.yaml
 
 commonLabels:
   app.kubernetes.io/name: llm-router

@@ -1,0 +1,109 @@
+# Public programmatic host: https://llm.air-ops.net  (SEC-23)
+#
+# WHY THIS FILE EXISTS
+# Same shape as ingress-gateway-airops.yaml, for the hostname SEC-1 did not
+# cover. The tunnel entry for llm.air-ops.net set
+# `httpHostHeader: llm-router.tas.scharber.com`, so requests landed on the
+# internal `llm-router` Ingress and its `/` Prefix rule — publishing the
+# router's ENTIRE route table on a public hostname, with a Cloudflare Access
+# service token as the only gate. Every route anyone adds to the router later
+# would be published there too, which is the failure SEC-1 was filed for.
+#
+# WHAT IS ALLOWED, AND WHY EXACTLY THESE
+# The hostname is documented as programmatic access to the LLM router
+# (deploy/cloudflared/README.md). That means completions — the same six
+# endpoints ingress-gateway-airops.yaml admits for the customer host:
+#   /v1/chat/completions, /v1/completions          OpenAI-compatible
+#   /v1/messages, /v1/messages/count_tokens        Anthropic-compatible
+#   /v1/embeddings, /v1/responses
+# count_tokens is listed separately because pathType is Exact — /v1/messages
+# does not cover it.
+#
+# Deliberately NOT allowed (unchanged from the SEC-1 reasoning):
+#   /v1/models, /v1/models/{model} - unauthenticated, publishes the configured
+#     model inventory (SEC-18 is the open decision about what that should be).
+#   /health, /v1/providers, /v1/capabilities, /v1/breaker - unauthenticated
+#     operator surface; discloses which providers are configured and degraded.
+#   /metrics, /aiqg/metrics - Prometheus scrapes pod IPs via `role: endpoints`,
+#     never the ingress, so it is unaffected.
+#   /docs - published on purpose at docs.air-ops.net, scoped to /docs.
+#
+# NOTE ON THE GATE: unlike gateway.air-ops.net (no Access, per-user TAS-Auth
+# token), this host keeps its Cloudflare Access service-token gate. The
+# backend here is the plain `llm-router` Service, which does NOT wrap requests
+# in the AIQG middleware — so Access is the authentication, and this allowlist
+# is what stops the rest of the router being reachable behind it.
+#
+# TLS is issued by the internal tas-ca-issuer: the only client is cloudflared,
+# one hop inside the pod network, with `noTLSVerify: true`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-router-llm-airops-ingress
+  namespace: tas-llm-router
+  labels:
+    app: llm-router
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/part-of: tas
+  annotations:
+    cert-manager.io/cluster-issuer: tas-ca-issuer
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # 300s matches the internal host; Cloudflare gives up at 100s (524), so
+    # public clients must stream.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - llm.air-ops.net
+      secretName: llm-router-llm-airops-tls
+  rules:
+    - host: llm.air-ops.net
+      http:
+        paths:
+          - path: /v1/chat/completions
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router
+                port:
+                  number: 8086
+          - path: /v1/completions
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router
+                port:
+                  number: 8086
+          - path: /v1/messages
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router
+                port:
+                  number: 8086
+          - path: /v1/messages/count_tokens
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router
+                port:
+                  number: 8086
+          - path: /v1/embeddings
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router
+                port:
+                  number: 8086
+          - path: /v1/responses
+            pathType: Exact
+            backend:
+              service:
+                name: llm-router
+                port:
+                  number: 8086
