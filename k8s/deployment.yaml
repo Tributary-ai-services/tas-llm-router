@@ -43,6 +43,22 @@ spec:
             name: llm-router-secret
 
         env:
+        # redis-shared requires a password since 2026-09-18 (SEC-24).
+        #
+        # AIQG_LINKAGE_REDIS_URL is also set in llm-router-config, which this
+        # Deployment pulls in via envFrom. That copy has no password and
+        # CANNOT get one: Kubernetes expands $(VAR) only in env[].value, never
+        # in a value sourced from a ConfigMap. Declaring it here overrides the
+        # envFrom copy (an explicit env entry wins) and is the only place the
+        # interpolation works. Leave the ConfigMap key alone — a password does
+        # not belong in a ConfigMap, which is the SEC-21 lesson.
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-shared-auth
+              key: password
+        - name: AIQG_LINKAGE_REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis-shared.tas-shared.svc.cluster.local:6379"
         - name: POD_NAME
           valueFrom:
             fieldRef:
