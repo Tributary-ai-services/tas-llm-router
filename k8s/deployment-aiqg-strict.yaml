@@ -121,9 +121,25 @@ spec:
         - name: GATEKEEPER_REDACT_STRATEGY
           value: replace
 
-        # Flow/step linkage store.
+        # Redis credentials (SEC-24 / SEC-26). Two DIFFERENT instances with
+        # two DIFFERENT passwords, so two Secrets. Both must be declared
+        # before the URLs that interpolate them — $(VAR) expansion only sees
+        # variables defined earlier in this list.
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-shared-auth
+              key: password
+        - name: SEMCACHE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-semcache-auth
+              key: password
+        # Flow/step linkage store. NOTE: server.go builds ONE sharedRedis
+        # client from this URL and also gives it to the C1 response cache, so
+        # this connection carries cached model responses, not just linkage.
         - name: AIQG_LINKAGE_REDIS_URL
-          value: redis://redis-shared.tas-shared.svc.cluster.local:6379
+          value: redis://:$(REDIS_PASSWORD)@redis-shared.tas-shared.svc.cluster.local:6379
 
         # C1 exact-match response cache. Only caches deterministic,
         # non-streaming, tool-free requests (responsecache.Decide).
@@ -144,7 +160,7 @@ spec:
         - name: AIQG_SEMCACHE_SHADOW
           value: "true"
         - name: AIQG_SEMCACHE_REDIS_URL
-          value: redis://redis-semcache.tas-shared.svc.cluster.local:6379
+          value: redis://:$(SEMCACHE_PASSWORD)@redis-semcache.tas-shared.svc.cluster.local:6379
         - name: AIQG_SEMCACHE_OLLAMA_URL
           value: http://ollama.tas-shared:11434
         # Embedder: TEI serving redis/langcache-embed-v3-small, which is
