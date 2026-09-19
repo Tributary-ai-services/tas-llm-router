@@ -40,6 +40,12 @@ images:
 # (`llm-router`, matching the deployment.yaml container image). Without
 # the prefix, `kubectl apply -k` rewrites the Deployment to pull a
 # stale unrelated repo and the live image silently changes on apply.
+#
+# NO newTag here, deliberately. The two Deployments run DIFFERENT builds —
+# llm-router is on aiqg-v5.75 and llm-router-aiqg on aiqg-v5.86 — and a single
+# newTag cannot express that: it would rewrite both to the same image.
+# Omitting it makes kustomize rewrite only the repository and keep whatever tag
+# each deployment.yaml declares, so each file records the build it actually
+# runs (OPS-14, OPS-27).
 - name: llm-router
   newName: registry-api.tas.scharber.com/tas-llm-router
-  newTag: latest

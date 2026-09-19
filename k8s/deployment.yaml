@@ -23,13 +23,18 @@ spec:
       # No wait-for-postgres: the router never contacts Postgres, so gating
       # every new pod on its reachability only added a startup dependency the
       # app does not use (#177).
+      #
+      # NOTE (2026-09-19): the LIVE Deployments still have that init container
+      # — they have not been rolled since 2025-11-20, so the cluster predates
+      # this decision. It is harmless while Postgres is up and will disappear
+      # on the next real deploy. Do not re-add it here to quieten kubectl diff.
       - name: wait-for-redis
         image: busybox:1.36
         command: ['sh', '-c', 'until nc -z redis-shared.tas-shared 6379; do echo waiting for redis; sleep 2; done']
 
       containers:
       - name: llm-router
-        image: llm-router:latest
+        image: llm-router:aiqg-v5.75
         imagePullPolicy: Always
         ports:
         - containerPort: 8086
@@ -42,8 +47,29 @@ spec:
         - secretRef:
             name: llm-router-secret
 
+
         env:
-        # redis-shared requires a password since 2026-09-18 (SEC-24).
+        # Timeouts: these existed ONLY on the live Deployment until 2026-09-19 —
+        # in no manifest and in no ConfigMap — so nothing in git recorded how
+        # long the router waits.
+        - name: SERVER_READ_TIMEOUT
+          value: "180s"
+        - name: SERVER_WRITE_TIMEOUT
+          value: "180s"
+        - name: ROUTER_REQUEST_TIMEOUT
+          value: "150s"
+        # KAFKA_BROKERS is ALSO in llm-router-config as kafka-shared.tas-shared:9092
+        # (the headless Service). This explicit entry overrides it with broker
+        # pod-0 directly, and an explicit env silently beats envFrom — so the
+        # ConfigMap value has not been in effect. Both addresses were verified
+        # reachable on 2026-09-19: the Service is headless, so its name resolves
+        # straight to the broker pod. The override buys nothing today and would
+        # become wrong the moment a second broker existed or pod-0 were renamed.
+        # Recorded as-is rather than corrected, because removing it changes what
+        # a running pod connects to and deserves its own change.
+        - name: KAFKA_BROKERS
+          value: "kafka-shared-0.kafka-shared.tas-shared.svc.cluster.local:9092"
+        # redis-shared requires a password
         #
         # AIQG_LINKAGE_REDIS_URL is also set in llm-router-config, which this
         # Deployment pulls in via envFrom. That copy has no password and
