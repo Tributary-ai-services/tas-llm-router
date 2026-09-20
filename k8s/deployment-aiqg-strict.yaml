@@ -170,8 +170,21 @@ spec:
         # one-line change.
         - name: AIQG_SEMCACHE_EMBED_MODEL
           value: all-minilm
+        # ROLLED BACK to ollama on the cluster; git now records that (OPS-27).
+        #
+        # #146 cut this over to tei + langcache-embed-v3-small on 2026-08-18 and
+        # it WAS deployed. Its own live verification then measured 0 false hits
+        # but also 0 genuine paraphrase hits — every natural paraphrase scored
+        # 0.77-0.92, under langcache's FPR=0 threshold of 0.93 — so the cache
+        # never hit. The cluster was put back to ollama/all-minilm by hand and
+        # nothing reverted git, which left `kubectl apply -k` able to silently
+        # re-ship a configuration already known to break the cache.
+        #
+        # AIQG_SEMCACHE_TEI_URL stays set, matching live: it is inert while the
+        # provider is ollama and keeps the TEI endpoint recorded for whoever
+        # retries the cutover.
         - name: AIQG_SEMCACHE_EMBED_PROVIDER
-          value: tei
+          value: ollama
         - name: AIQG_SEMCACHE_TEI_URL
           value: http://tei.tas-shared:8080
         - name: AIQG_SEMCACHE_DIM
@@ -188,12 +201,18 @@ spec:
         # all-minilm separates these classes poorly (separation -0.33) —
         # a better embedder, not a lower threshold, is the way to raise
         # hit rate.
-        # 0.93 is langcache-embed-v3-small's calibrated FPR=0 point, NOT 0.87
-        # (that was all-minilm's). Cutting the embedder without moving the
-        # threshold would knowingly ship a config measured to produce false
-        # hits, since the two models score the same pair differently.
+        # 0.87 is all-minilm's calibrated FPR=0 point. 0.93 was langcache's,
+        # and belongs with the tei provider above — the two numbers are NOT
+        # interchangeable, because the models score the same pair differently.
+        # Whichever way this is changed, move BOTH or neither: ollama at 0.93
+        # rejects nearly everything, tei at 0.87 ships false hits.
+        #
+        # Flushing aiqg:scache:* is MANDATORY on any embedder change, not
+        # optional: both models are 384-dim, so the RediSearch store cannot
+        # tell their vectors apart — neither the cache key nor Scope records
+        # which embedder produced an entry.
         - name: AIQG_SEMCACHE_MIN_SIMILARITY
-          value: "0.93"
+          value: "0.87"
         - name: AIQG_SEMCACHE_TTL
           value: 30m
         - name: AIQG_SEMCACHE_JUDGE_ENABLED
