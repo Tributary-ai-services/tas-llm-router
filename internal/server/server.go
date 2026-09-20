@@ -1583,6 +1583,7 @@ func (s *Server) runSemanticShadow(ctx context.Context, req *types.ChatRequest, 
 		cctx, cancel := context.WithTimeout(lctx, 15*time.Second)
 		defer cancel()
 		out := s.semCache.LookupWithOptions(cctx, scope, prompt, semcache.LookupOptions{Shadow: &shadow, MinSimilarity: &minSim})
+		recordSemCacheOutcome(out)
 		switch out.State {
 		case semcache.StateShadowHit, semcache.StateSemanticHit:
 			s.logger.WithFields(logrus.Fields{
@@ -1692,6 +1693,7 @@ func (s *Server) maybeServeSemantic(w http.ResponseWriter, r *http.Request, req 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	out := s.semCache.LookupWithOptions(ctx, scope, prompt, semcache.LookupOptions{Shadow: &serve, MinSimilarity: &minSim})
+	recordSemCacheOutcome(out)
 	if out.State != semcache.StateSemanticHit || out.Entry == nil {
 		// Not a hit — hand the near-miss/would-hit to the judge (FPR signal) and
 		// let the caller fall through to a live vendor call + store.
