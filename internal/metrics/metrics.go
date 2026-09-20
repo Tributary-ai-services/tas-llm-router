@@ -151,6 +151,68 @@ var (
 		},
 		[]string{"tier"},
 	)
+
+	// --- C4 semantic cache -------------------------------------------------
+	//
+	// These exist because nothing previously distinguished "the cache is
+	// working" from "the cache never hits" from "the cache is serving wrong
+	// answers". tas-llm-router#146 shipped a semantic cache with zero recall
+	// and it was found a month later by reading a commit message.
+	//
+	// Deliberately NOT labelled by tenant: a tenant label makes the series
+	// count track the customer count, and the calibration these feed is a
+	// global property of the embedder, not a per-customer one.
+
+	// SemCacheLookupsTotal counts every cascade decision by outcome.
+	//
+	// miss_rejected and miss_no_candidate are separated on purpose: the first
+	// means L1 found something and L2 threw it out (the threshold is doing
+	// work), the second means the store had nothing close (the cache is cold
+	// or the traffic is not repetitive). They call for opposite responses and
+	// a single "miss" hides which one you have.
+	SemCacheLookupsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_router_semcache_lookups_total",
+			Help: "Semantic cache cascade decisions by outcome.",
+		},
+		[]string{"outcome"},
+	)
+
+	// SemCacheTopSimilarity is the cosine of the closest candidate considered,
+	// split by whether L2 accepted it.
+	//
+	// This is the one that turns the threshold from an argument into a
+	// reading. The operating threshold should be the lowest value with no
+	// rejected candidates above it, taken from this histogram on real traffic
+	// — not a constant inherited from a model card. #146 inherited langcache's
+	// published 0.93 and shipped a cache that never hit; the live config
+	// inherited all-minilm's 0.87 and scores "can" against "can't" at 0.96.
+	//
+	// Buckets are dense between 0.80 and 0.98 because that is where every
+	// threshold worth arguing about lives; coarse below, since a 0.3 candidate
+	// tells you nothing you did not already know.
+	SemCacheTopSimilarity = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "llm_router_semcache_top_similarity",
+			Help:    "Cosine similarity of the top L1 candidate, by L2 verdict.",
+			Buckets: []float64{0.5, 0.6, 0.7, 0.75, 0.8, 0.825, 0.85, 0.875, 0.9, 0.925, 0.95, 0.96, 0.97, 0.98, 0.99, 1.0},
+		},
+		[]string{"verdict"},
+	)
+
+	// SemCacheRejectionsTotal counts L2 rejections by guard.
+	//
+	// A rising rate here is the earliest available sign that the embedder and
+	// the threshold disagree with reality — the guards are catching what the
+	// cosine let through. Falling to zero while lookups continue is equally
+	// informative: either the traffic changed or a guard stopped running.
+	SemCacheRejectionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_router_semcache_rejections_total",
+			Help: "Semantic cache L2 rejections by guard reason.",
+		},
+		[]string{"reason"},
+	)
 )
 
 func init() {
@@ -164,6 +226,9 @@ func init() {
 		AuthAttemptsTotal,
 		RateLimitHitsTotal,
 		BlockedRequestsTotal,
+		SemCacheLookupsTotal,
+		SemCacheTopSimilarity,
+		SemCacheRejectionsTotal,
 	)
 	seed()
 }
@@ -181,6 +246,12 @@ func seed() {
 	RateLimitHitsTotal.WithLabelValues("default").Add(0)
 	for _, provider := range []string{"openai", "anthropic"} {
 		ErrorsTotal.WithLabelValues(provider, "completion_failed").Add(0)
+	}
+	// The semantic-cache outcomes matter most when they are zero: a hit rate
+	// of nothing is the #146 failure, and an absent series renders as a blank
+	// panel rather than as a zero anybody notices.
+	for _, outcome := range []string{"semantic_hit", "shadow_hit", "miss_rejected", "miss_no_candidate"} {
+		SemCacheLookupsTotal.WithLabelValues(outcome).Add(0)
 	}
 }
 
