@@ -187,7 +187,29 @@ spec:
         # one-line change.
         - name: AIQG_SEMCACHE_EMBED_MODEL
           value: all-minilm
-        # ROLLED BACK to ollama on the cluster; git now records that (OPS-27).
+        # SWITCHED to tei + langcache-embed-v3-small on 2026-09-21, second attempt.
+        #
+        # The first attempt (#146) inherited langcache's published FPR=0
+        # threshold of 0.93 and measured zero paraphrase hits, so it was rolled
+        # back. A head-to-head measurement on 2026-09-20 then showed the
+        # problem was the threshold, not the model: at the SAME 0.87 threshold
+        # all-minilm scored "Can I cancel" vs "Can't I cancel" at 0.9595 (a
+        # served false hit), while langcache scored it 0.7694 and produced zero
+        # false hits across 7 near-misses with 83% recall on 6 paraphrases.
+        # So this switch keeps 0.87 and changes only the embedder.
+        #
+        # 0.87 is a PREDICTION from 13 hand-written pairs, not a measurement on
+        # traffic. Re-derive it from llm_router_semcache_top_similarity once an
+        # image containing #219 is running — the aiqg-v5.86 image does not.
+        #
+        # NOTE the boot log will still say `"embed_model":"all-minilm"`. That is
+        # misleading, not wrong: AIQG_SEMCACHE_EMBED_MODEL only feeds the ollama
+        # path and that log line. TEI serves exactly one model, fixed by its own
+        # --model-id (redis/langcache-embed-v3-small), and the TEI embedder never
+        # sends a model name. The vectors are langcache regardless.
+        #
+        # --- history ---
+        # Previously rolled back to ollama on the cluster; git recorded that (OPS-27).
         #
         # #146 cut this over to tei + langcache-embed-v3-small on 2026-08-18 and
         # it WAS deployed. Its own live verification then measured 0 false hits
@@ -201,7 +223,7 @@ spec:
         # provider is ollama and keeps the TEI endpoint recorded for whoever
         # retries the cutover.
         - name: AIQG_SEMCACHE_EMBED_PROVIDER
-          value: ollama
+          value: tei
         - name: AIQG_SEMCACHE_TEI_URL
           value: http://tei.tas-shared:8080
         - name: AIQG_SEMCACHE_DIM
