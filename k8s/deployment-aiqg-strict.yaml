@@ -41,6 +41,23 @@ spec:
         prometheus.io/port: "8086"
         prometheus.io/path: "/metrics"
     spec:
+      # Spread replicas across nodes (cluster gained pinova01 2026-09-21).
+      # Safe since the cluster LAN went in: 3,703 sequential Postgres connects
+      # in 10s from the other node vs 3,793 locally -- a 2.4% penalty.
+      #
+      # topologySpreadConstraints, not podAntiAffinity, which was measured
+      # putting both replicas on the SAME node. A rollout alone may still
+      # co-locate them; check placement and delete one pod to rebalance.
+      #
+      # NOTE: apply with `kubectl apply -k k8s/`, NOT `-f` -- the live selector
+      # carries this kustomization's commonLabels (OPS-30 Case B).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: llm-router-aiqg
       initContainers:
       # No wait-for-postgres: the router never contacts Postgres, so gating
       # every new pod on its reachability only added a startup dependency the
