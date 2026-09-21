@@ -11,20 +11,34 @@ answers:
   - "Why do I see health-check failures in the logs while /health reports healthy?"
   - "Which metrics can I trust, and which dashboard panels are showing fiction?"
   - "When do I escalate, to whom, and what do I attach?"
+  - "Which hostnames reach this service, and why does /health return 404 or 403 on some of them?"
+  - "Which behaviours described here change when the next image is deployed, and how do I tell which code a pod is running?"
 depth: standard
-verified_against: "tas-llm-router@eee4b24, 2026-08-25"
+verified_against: "tas-llm-router@552d869, 2026-09-21"
 ---
 
 # LLM Router — Operations
 
-> **Verified 2026-08-25 against `tas-llm-router@eee4b24`.** All counts, image
-> tags, and error signatures below are from that date unless a line says
-> otherwise. Re-verify before trusting any number here.
+> **Verified 2026-09-21 against `tas-llm-router@552d869`**, refreshing an
+> earlier pass against `eee4b24` on 2026-08-25. Lines that carry an older date
+> were observed on that date and not re-run; everything re-checked on
+> 2026-09-21 says so. Re-verify before trusting any number here.
 >
 > **Read the metrics subsection under "Health & signals" before you look at a
 > Grafana panel for this service.** The `llm_router_*` exporter was rewritten at
-> `eee4b24`; the fix is merged but **not yet deployed**, and every historical
-> value for those series is fabricated.
+> `eee4b24`; the fix is merged but **still not deployed as of 2026-09-21**, and
+> every value those series report is fabricated.
+>
+> **The code and the cluster have diverged, and this document describes both.**
+> Both deployments still run the images they ran in August (`aiqg-v5.75` and
+> `aiqg-v5.86`). Everything merged since — the metrics rewrite, a Kafka outage no
+> longer being fatal, the wired error/auth/rate-limit counters, the model
+> registry and its admin API, the semantic-cache and evaluation-spend metrics —
+> is in git but **not in any running pod**. Where the two differ, the text says
+> "running images" for what you will see today and "at `552d869`" for what the
+> next deploy brings. The section "What the next deploy changes" under "Common
+> operations" collects them in one place, with the one-line test for which code
+> a pod is running.
 
 **Before you start:** everything below assumes your `kubectl` context points at
 the TAS k3s cluster with read access to the `tas-llm-router` and `tas-shared`
@@ -37,7 +51,7 @@ default
 ```
 
 `default` is the expected value — that is the context name k3s installs, and it
-is what this cluster reported on 2026-08-25. Anything else means you are pointed
+is what this cluster reported on 2026-08-25 and again on 2026-09-21. Anything else means you are pointed
 at a different cluster and every command below will describe the wrong system.
 Then confirm you can actually read the namespace with `kubectl get pods -n
 tas-llm-router`, whose healthy output is in triage step 3.
@@ -72,11 +86,12 @@ flowchart LR
   lr --> oai[OpenAI API]
   aiqg --> anth
   aiqg --> oai
-  lr ==required at startup==> kafka[(kafka-shared)]
-  aiqg ==required at startup==> kafka
+  lr ==required at startup, running images==> kafka[(kafka-shared)]
+  aiqg ==required at startup, running images==> kafka
   aiqg ==auth + policy, every request==> dash[aiqg-dashboard-be]
-  lr -.cache, lazy.-> redis[(redis-shared)]
-  lr -.configured, unused at runtime.-> pg[(postgres-shared)]
+  lr -.cache, lazy, password auth.-> redis[(redis-shared)]
+  aiqg -.cache + linkage, password auth.-> redis
+  aiqg -.semantic cache, password auth.-> semcache[(redis-semcache)]
   keycloak[Keycloak] --> dash
 ```
 
@@ -88,14 +103,57 @@ connects to the dashboard, not to the router — the router holds no Keycloak
 configuration at all. All of this was measured on 2026-08-26; see "Dependency
 failure effects".
 
+Three things changed after that measurement. **Postgres is gone from the
+picture**: the router has no Postgres consumer anywhere in its code, so the
+`DATABASE_URL` key was removed from `llm-router-config` and the
+`wait-for-postgres` init container from both deployments (#177, both confirmed
+absent on the live cluster 2026-09-21). **Both Redis instances now require a
+password** (SEC-24, SEC-26, #216), read from Secrets `redis-shared-auth` and
+`redis-semcache-auth` in `tas-llm-router`, key `password` in each. And the
+**Kafka edge is thick only for the running images** — the code at `552d869`
+degrades to logging events instead of exiting (#191); see "Dependency failure
+effects".
+
 `llm-router` serves internal TAS traffic. `llm-router-aiqg` serves external AIQG
 gateway customers. They are separate deployments, separate services, separate
 ingress hosts, and they **run different image versions**:
 
-| Deployment | Serves | Ingress host | Image tag (2026-08-25) | Replicas |
+| Deployment | Serves | Ingress host | Image tag (2026-08-25, unchanged 2026-09-21) | Replicas |
 |---|---|---|---|---|
-| `llm-router` | Internal TAS traffic | `llm-router.tas.scharber.com` | `aiqg-v5.75` | 2, fixed |
-| `llm-router-aiqg` | External AIQG customers | `gateway.aiqg.tas.scharber.com` | `aiqg-v5.86` | 2, fixed |
+| `llm-router` | Internal TAS traffic | `llm-router.tas.scharber.com` | `aiqg-v5.75` | 2, fixed, one per node |
+| `llm-router-aiqg` | External AIQG customers | `gateway.aiqg.tas.scharber.com` | `aiqg-v5.86` | 2, fixed, one per node |
+
+**Five ingress hosts front these two deployments, and only two of them answer
+`/health`.** The two public `air-ops.net` hosts are path-allowlisted: nginx
+serves only the six completion endpoints (`/v1/chat/completions`,
+`/v1/completions`, `/v1/messages`, `/v1/messages/count_tokens`,
+`/v1/embeddings`, `/v1/responses`), each as an `Exact` path, and answers
+everything else — `/health`, `/metrics`, `/v1/models`, `/v1/breaker`, `/docs` —
+with its own `404` before the request reaches the router. Until September both
+hosts published the router's entire route table (SEC-1, SEC-23).
+
+| Host | Backend | What reaches the router | Gate in front | `/health` on 2026-09-21 |
+|---|---|---|---|---|
+| `llm-router.tas.scharber.com` | `llm-router` | Everything (`/` prefix) | Internal network only | `200`, JSON |
+| `gateway.aiqg.tas.scharber.com` | `llm-router-aiqg` | Everything (`/` prefix) | Internal network only | `200`, JSON |
+| `gateway.air-ops.net` | `llm-router-aiqg` | The six completion paths | None at Cloudflare; each request needs a `TAS-Auth` token | `404` from nginx |
+| `llm.air-ops.net` | `llm-router` | The six completion paths | Cloudflare Access service token | `403`, Cloudflare Access error page |
+| `docs.air-ops.net` | `llm-router` | `/docs` only | None | `404` from nginx |
+
+Sources: `k8s/ingress-gateway-airops.yaml:83` and `k8s/ingress-llm-airops.yaml:65`
+for the path lists; the `/health` column was observed from outside the cluster.
+**A `404` or `403` on `/health` from a public host is the design, not an
+outage** — probe health on the two internal hosts. The public hosts also carry an
+nginx `limit-rps: "50"` annotation and a 300-second read timeout, and sit behind
+Cloudflare, which gives up at 100 seconds with its own error `524`; long
+non-streaming completions from public clients can hit that first.
+
+> [!UNVERIFIED] Every public request reaches nginx from `cloudflared`, so nginx
+> may count all public traffic as one client for `limit-rps`, which would make
+> 50 requests/second a gateway-wide ceiling rather than a per-caller one. This
+> was inferred from the topology, not measured, and no throttling was observed
+> on 2026-09-21. If public callers report `503`s under load that the router's
+> own logs do not show, suspect this first.
 
 Both tags carry the `aiqg-` prefix regardless of which deployment they run on —
 that prefix is the image release line, not an indicator of which deployment it
@@ -104,6 +162,12 @@ belongs to. The tags are ordered, so `aiqg-v5.86` on `llm-router-aiqg` is
 first and the internal deployment lags it. A fix present in one deployment is not necessarily present in the
 other. There is no HorizontalPodAutoscaler; replica counts are fixed in the
 deployment spec and nothing restores them automatically beyond the ReplicaSet.
+
+Since 2026-09-21 the cluster has two nodes, `um773dev` and `pinova01`, and each
+deployment carries a `topologySpreadConstraints` rule (`maxSkew: 1` on
+`kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`) that places one
+replica on each (#220). It is a preference, not a guarantee — see "Restart a
+deployment" for why a rollout can still land both replicas on one node.
 
 What it owns: provider credentials, routing and fallback between providers,
 retry policy, spend attribution, and prompt scanning. What it does **not** own:
@@ -117,10 +181,12 @@ recover, so a restart cannot corrupt anything.
 
 The one caveat to that, and it is the exception worth carrying alongside the
 rule: a restart is cheap only when the dependencies a pod needs *to start* are
-up. Kafka must be reachable or the process exits, and the init containers block
-until Redis and Postgres answer. During an outage of any of those three, a
-running pod may be serving fine while a replacement could not start at all — so
-restarting is the one thing not to reach for. See "Dependency failure effects".
+up. Kafka must be reachable or the process exits (running images), and the
+`wait-for-redis` init container blocks until Redis answers. During an outage of
+either, a running pod may be serving fine while a replacement could not start at
+all — so restarting is the one thing not to reach for. See "Dependency failure
+effects". (Postgres was the third blocker until the init container that waited
+on it was removed; it no longer gates startup.)
 
 ## How it works end to end
 
@@ -137,10 +203,55 @@ the router does not return a partial or synthetic answer.
 
 Throughout, it writes telemetry to `kafka-shared.tas-shared:9092`, uses
 `redis-shared.tas-shared:6379` for response caching and for short-lived
-request-correlation state, records spend in
-`postgres-shared.tas-shared:5432/tas_shared`, and exports traces to
-`otel-collector-shared.tas-shared:4317`. The AIQG deployment additionally
-consults `aiqg-dashboard-be.aiqg.svc.cluster.local:8095` for policy.
+request-correlation state, and exports traces to
+`otel-collector-shared.tas-shared:4317`.
+
+> [!UNVERIFIED] The trace export in that sentence is not borne out by the code at
+> `552d869`. The collector address is set in `llm-router-config`, but the router
+> contains no OpenTelemetry library and never reads that setting. Nothing was
+> found that sends traces anywhere. Treat the collector as not a dependency, as
+> the table under "Dependency failure effects" does, and ask the owner whether
+> tracing was intended. The AIQG deployment additionally
+consults `aiqg-dashboard-be.aiqg.svc.cluster.local:8095` for policy, and keeps
+its semantic cache in a second Redis, `redis-semcache.tas-shared:6379`.
+
+Three AIQG terms recur below. The **semantic cache** stores past answers and
+serves one when a new prompt is close enough in meaning to a stored one, rather
+than byte-identical; on this cluster it runs in **shadow mode**, which means it
+records what it *would* have served without serving it. The **judge** is a
+sample of responses the gateway sends to a second model to grade, which costs
+money the gateway itself spends; **shadow replays** re-run a sample of requests
+against an alternative model for comparison, which also costs money. All three
+belong to `llm-router-aiqg` only.
+
+Two corrections to the August version of that paragraph. It said the router
+records spend in `postgres-shared`; it does not — the router has no Postgres
+client, the key that pointed at it was removed from `llm-router-config` because
+it embedded a plaintext password (#177, `k8s/configmap.yaml:19`), and spend
+leaves the pod as Kafka events. The Kafka address that matters is
+`AIQG_KAFKA_BROKERS` in the ConfigMap, `kafka-shared.tas-shared:9092`
+(`k8s/configmap.yaml:118`), read by the AIQG event emitter — the component whose
+failure stops startup. The internal `llm-router` deployment also sets a
+`KAFKA_BROKERS` pointing at the broker pod directly
+(`k8s/deployment.yaml:92`), and the ConfigMap has one too, but no code in the
+router reads `KAFKA_BROKERS` (nor the ConfigMap's `REDIS_URL`); do not spend
+time on either during an incident.
+
+**Redis connections are password-authenticated.** Each deployment builds its
+Redis URL inside the pod spec from a Secret-backed variable — `REDIS_PASSWORD`
+from Secret `redis-shared-auth`, and on `llm-router-aiqg` also
+`SEMCACHE_PASSWORD` from Secret `redis-semcache-auth`, key `password` in both,
+namespace `tas-llm-router`. The ConfigMap also carries an
+`AIQG_LINKAGE_REDIS_URL` without a password; it is overridden by the deployment's
+own entry and has no effect, so do not "fix" it by adding a password there
+(`k8s/deployment.yaml:96`). On `llm-router-aiqg` that one `redis-shared`
+connection carries the exact-match response cache as well as flow linkage, so it
+holds cached model responses.
+
+The internal `llm-router` also sets three timeouts on its deployment:
+`SERVER_READ_TIMEOUT` and `SERVER_WRITE_TIMEOUT` of 180 seconds and
+`ROUTER_REQUEST_TIMEOUT` of 150 seconds (`k8s/deployment.yaml:77`). Until
+2026-09-19 these existed only on the live object and in no manifest.
 
 The dependency that matters most at 3am is the **public internet egress** to
 `api.anthropic.com` and `api.openai.com`. It is the least controlled hop in the
@@ -149,6 +260,71 @@ path and the source of every failure signature observed on the verification date
 ## Health & signals
 
 Triage in order. You have sixty seconds.
+
+**The sixty-second check, no token needed.** Three commands, each answering in
+under a second on 2026-09-21. Together they cover both deployments, a real
+call through the router to a provider using the router's own credential, and
+the AIQG authentication backend. None of them needs a customer token, and none
+generates text.
+
+**(a) Is the router up, and are both providers reachable?**
+
+```bash
+curl -sS -k https://llm-router.tas.scharber.com/health
+{"providers":{"anthropic":{"status":"healthy","response_time_ms":571,"last_checked":1790024744},"openai":{"status":"healthy","response_time_ms":477,"last_checked":1790024743}},"status":"healthy","timestamp":1790024759}
+```
+
+**(b) Does a real request reach Anthropic through the router, on the router's own key?**
+
+```bash
+curl -sS -k -w '\nHTTP %{http_code}\n' https://llm-router.tas.scharber.com/v1/messages/count_tokens \
+  -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}]}'
+{"input_tokens":8}
+
+HTTP 200
+```
+
+**(c) Is the AIQG gateway up, and is its authentication backend answering?**
+
+```bash
+curl -sS -k -w '\nHTTP %{http_code}\n' https://gateway.aiqg.tas.scharber.com/v1/messages/count_tokens \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer probe' \
+  -H 'TAS-Auth: tas_qg_live_oncallprobe0000000000000000' \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}]}'
+{"error":{"code":"path_a_auth_required","message":"AIQG ingress requires a recognized TAS-Auth token","reason":"token_unknown","docs":"https://docs.tas.scharber.com/aiqg/auth"}}
+HTTP 401
+```
+
+All three shown are healthy results, captured 2026-09-21. How to read them:
+
+- **(b)** goes through the internal router's full request path. The internal
+  host admits requests without a `TAS-Auth` header. The router then calls
+  Anthropic's token-counting endpoint with its own configured key
+  (`internal/server/count_tokens.go:31`). `{"input_tokens":N}` with `200` proves
+  the pod, the routing, egress, and the Anthropic credential all work. A `502`
+  whose body contains `count_tokens failed:` carries Anthropic's own error — an
+  `invalid x-api-key` there is the credential failure mode. It does not test the
+  OpenAI key; `/health` in (a) is the only token-free signal for OpenAI.
+- **(c) is supposed to return `401` with `"reason":"token_unknown"`.** The token
+  is deliberately made up. The gateway sends it to `aiqg-dashboard-be` to be
+  looked up on every request, with no caching and a 2-second timeout
+  (`pkg/aiqg/tokens/dashboard_resolver.go:93`). So `token_unknown` proves that the
+  AIQG pods answered and the authentication backend answered "no such token". A
+  `503` with `token_resolver_unavailable` instead means the backend is down —
+  see "Dependency failure effects". A 401 whose `reason` is missing, and whose
+  message names a missing header, means a header was dropped from the command.
+  Send the made-up value shown, never a real customer token.
+
+> [!UNVERIFIED] Check (b) calls Anthropic's token-counting endpoint, which
+> generates no text. Anthropic's public pricing describes token counting as free
+> of charge. This pass did not confirm that against the account's billing, so
+> do not run (b) in a tight loop.
+
+If all three pass, the service is up for both internal and customer traffic. Go
+to the steps below only when one fails, or when a caller reports a failure the
+three do not explain. The only thing none of them covers is a real completion
+with a customer's own token, which is step 2.
 
 **1. Is it up, and are its providers reachable?**
 
@@ -159,24 +335,82 @@ curl -sS -k https://llm-router.tas.scharber.com/health
 
 **Healthy looks like:** top-level `"status":"healthy"`, both providers
 `"healthy"`, and `response_time_ms` in the high hundreds — 583ms and 767ms were
-the observed values on the verification date. Treat sustained values above
+the observed values on 2026-08-25, and 571ms and 477ms when re-run on
+2026-09-21. Treat sustained values above
 roughly 3000ms, or either provider reporting anything other than `healthy`, as
 degraded rather than down.
+
+**What "sustained" means, as something you can check.** The router re-probes
+each provider every 30 seconds (the default at `internal/config/config.go:399`),
+and `/health` returns the result of the last probe, so two calls inside one
+interval return the same number. "Sustained" here means **three consecutive
+probes**, which takes about 90 seconds to observe — run this after the
+sixty-second check, not instead of it:
+
+```bash
+for i in 1 2 3; do
+  curl -sS -k https://llm-router.tas.scharber.com/health | python3 -c "import sys,json
+d=json.load(sys.stdin); print(d['status'], ' '.join(f\"{k}={v['status']}:{v['response_time_ms']}ms\" for k,v in d['providers'].items()))"
+  sleep 30
+done
+healthy anthropic=healthy:613ms openai=healthy:589ms
+healthy anthropic=healthy:478ms openai=healthy:2349ms
+healthy anthropic=healthy:576ms openai=healthy:979ms
+```
+
+Captured on 2026-09-21. Degraded is any provider above 3000ms on all three
+lines. One slow line is a single slow probe — the `2349ms` above is one,
+recovered by the next probe — and the egress on this cluster produces those
+routinely.
+
+That measures the router's own probe, not what callers wait. For callers, ask
+Loki for the 95th-percentile duration of real completion requests. Every request
+is logged with a `duration_ms` field, so this works on the running images, whose
+latency metrics are fabricated:
+
+```bash
+curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query' \
+  --data-urlencode 'query=quantile_over_time(0.95, {namespace="tas-llm-router"} | json | msg="HTTP request" | path=~"/v1/(chat/completions|completions|messages|embeddings|responses)" | unwrap duration_ms [1h]) by (container)'
+```
+
+On 2026-09-21 the same expression over a 24-hour window, `[24h]`, returned
+`187.4` milliseconds for the `llm-router` container, across 13 completion
+requests. Nothing is returned when there were no completion requests in the
+window, which is common on this cluster. Treat a p95 above 3000 (milliseconds)
+over `[15m]`, with requests present, as degraded.
+
+Once an image from `eee4b24` or later is running, the same threshold is a
+Prometheus expression:
+
+```bash
+curl -sS -k -G 'https://prometheus.tas.scharber.com/api/v1/query' \
+  --data-urlencode 'query=histogram_quantile(0.95, sum by (le, service) (rate(llm_router_request_duration_seconds_bucket[15m]))) > 3'
+{"status":"success","data":{"resultType":"vector","result":[]}}
+```
+
+Any `service` returned by this is degraded. Read the empty result carefully:
+on 2026-09-21 it is empty because no running pod exports the series (see the
+which-exporter test below), not because latency is fine. Use the Loki
+expression until that changes.
 
 `-k` is required: the ingress certificate is issued by the internal
 `tas-ca-issuer`, which is not in a laptop trust store. Without it curl returns
 nothing and exit code 60. `-k` suppresses certificate validation only — it does
 not mask an application error. For the AIQG deployment use
 `https://gateway.aiqg.tas.scharber.com/health`, which returns the same shape.
+Do not probe the public `air-ops.net` hosts for health: they do not serve
+`/health` at all (see the host table under "Mental model").
 
 **On the outputs in this document.** Every read-only command here was executed
-against the live cluster on the verification date and its real output pasted —
+against the live cluster and its real output pasted, on the date given beside
+it — 2026-08-25 or 2026-08-26 for the first pass, 2026-09-21 for anything this
+refresh re-ran —
 the curl bodies, the pod and revision listings, the Loki and Prometheus
 responses, and the node figures alike. Two conventions apply. Loki responses
 carry a large `stats` object that says nothing an operator needs, so it appears
 as `"stats":{...}` where it was cut; everything before it is verbatim. Long
 listings are trimmed with a `...` line, and the trimmed rows are always more of
-the same. The four commands that *change* something (restart, scale, roll back)
+the same. The commands that *change* something (restart, scale, roll back, delete a pod)
 or that need a credential this document does not carry were **not** executed;
 each is marked `<!-- unverified-example -->` in its code block and shows the
 expected shape rather than an observed one. Nothing else here is an
@@ -206,6 +440,14 @@ unrunnable without one. **Get a token before you need it** — the two places th
 document tells you to use one are its own recovery-confirmation step and the
 evidence you attach when escalating, so acquiring it mid-incident is the worst
 time.
+
+No shared on-call test token exists anywhere this document can point to. The
+Secret `llm-router-aiqg-tokens` holds tokens the gateway accepts, but they
+belong to tenants: do not borrow one. If you have no AIQG dashboard account to
+issue your own, the sixty-second check at the top of this section covers
+everything this step does except a customer-token completion. Record in the
+ticket that step 2 was not run, and ask the owner to issue you a token after the
+incident.
 
 **Issue one yourself — you do not need ops for this.** The AIQG dashboard has a
 self-serve token API, and it is the intended path:
@@ -256,15 +498,17 @@ Never paste a token into a ticket, a chat message, or this document.
 **3. Are the pods actually running?**
 
 ```bash
-kubectl get pods -n tas-llm-router
-NAME                               READY   STATUS    RESTARTS   AGE
-llm-router-7c5987584b-knpcd        1/1     Running   0          8d
-llm-router-7c5987584b-mw4zd        1/1     Running   0          8d
-llm-router-aiqg-77c574cc9b-l9xhn   1/1     Running   0          20h
-llm-router-aiqg-77c574cc9b-pxv5k   1/1     Running   0          20h
+kubectl get pods -n tas-llm-router -o wide
+NAME                              READY   STATUS    RESTARTS   AGE    IP           NODE       NOMINATED NODE   READINESS GATES
+llm-router-6ddd95fb5-fjn5m        1/1     Running   0          117m   10.42.0.42   um773dev   <none>           <none>
+llm-router-6ddd95fb5-h9nzp        1/1     Running   0          118m   10.42.1.55   pinova01   <none>           <none>
+llm-router-aiqg-549cc85f4-cfd7j   1/1     Running   0          116m   10.42.0.43   um773dev   <none>           <none>
+llm-router-aiqg-549cc85f4-n9j7d   1/1     Running   0          114m   10.42.1.57   pinova01   <none>           <none>
 ```
 
-Two replicas each is the expected steady state. **Ready does not mean working
+Captured 2026-09-21. Two replicas each, **one on each node**, is the expected
+steady state; both replicas of one deployment on the same node is a placement
+problem to fix in daylight (see "Restart a deployment"), not an outage. **Ready does not mean working
 here** — both deployments use a `tcpSocket` probe on port 8086, not an HTTP
 health check. A pod with invalid provider credentials passes its probe, reports
 Ready, and serves traffic that fails at the provider. Never conclude from
@@ -329,7 +573,7 @@ curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query' \
 | Count in 15m | Reading |
 |---|---|
 | Empty result or 0 | Normal. This was the live value on 2026-08-25, and over the preceding 6 hours. |
-| 1–10 | Normal. Health-check resets arrive in bursts; the 24-hour total on 2026-08-25 was 16. |
+| 1–10 | Normal. Health-check resets arrive in bursts; the 24-hour total on 2026-08-25 was 16, and on 2026-09-21 it was 8 — every one a provider health check. |
 | 11–50 | Investigate. Check whether the errors are health-check failures or completion failures before escalating. |
 | Over 50 | Treat as an incident and go to triage step 2 — that is more than three per minute, well above anything observed. |
 
@@ -342,6 +586,27 @@ The shape matters more than the count. Errors naming a provider health check are
 noise at any of the volumes above; the same volume of `All completion attempts
 failed` is an outage.
 
+**One class of error is invisible to every `| json | level=...` query above.**
+The Redis client library writes its own connection failures as plain text, not
+JSON, so the `json` stage cannot parse them and the level filter drops them.
+Search for them by string instead — this is the line both AIQG replicas wrote on
+2026-09-18 while `redis-shared` restarted for the password cutover:
+
+```bash
+curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query_range' \
+  --data-urlencode 'query={namespace="tas-llm-router"} |= "redis: "' \
+  --data-urlencode 'limit=20'
+{"status":"success","data":{"resultType":"streams","result":[],"stats":{...}}}
+```
+
+`"result":[]` in the default one-hour window on 2026-09-21 is the healthy
+answer. A hit looks like this, where `…` stands for the Redis library's own
+source-file location, which the real line carries and this document omits:
+
+```bash
+redis: 2026/09/18 19:34:55 … redis: connection pool: failed to dial after 5 attempts: dial tcp 10.43.11.181:6379: connect: connection refused
+```
+
 **5. Is it this service or a dependency?** Work from the observed state, not from
 a string search — two of the internal dependencies log nothing at all when they
 fail, so searching for their names finds silence and proves nothing.
@@ -349,11 +614,13 @@ fail, so searching for their names finds silence and proves nothing.
 | What you observe | Where the fault is |
 |---|---|
 | Errors naming `api.anthropic.com` or `api.openai.com` | The provider or egress. The router is behaving correctly by reporting it. |
-| `CrashLoopBackOff`, with a startup line naming `NewKafkaEmitter` and `run out of available brokers` | **Kafka.** Not a bad image — see the dependency section before rolling back. |
+| `CrashLoopBackOff`, with a startup line naming `NewKafkaEmitter` and `run out of available brokers` | **Kafka.** Not a bad image — see the dependency section before rolling back. Applies to the running images; code at `552d869` no longer crash-loops on this. |
 | `CrashLoopBackOff` with any other startup error | The router or its image. |
 | Callers get `503` / `token_resolver_unavailable` while pods look Ready | `aiqg-dashboard-be`. Not the caller's token. |
-| Callers get `401` / `path_a_auth_required` | The caller's token, not a dependency. |
-| Pods Ready, requests succeeding, nothing in the logs | Redis or Postgres could still be down — they fail silently. Check their pods directly. |
+| Callers get `401` / `path_a_auth_required` | The caller's token, not a dependency. ("Path A" is the gateway's authenticated processing path; the code means the request lacked or failed the credentials to enter it. Unpacked under "Failure modes".) |
+| Pods Ready, requests succeeding, nothing in the logs | Redis could still be down — it is silent at `error` level. Check its pods directly and run the plain-text `redis: ` query in step 4. |
+| Plain-text `redis: ... failed to dial` lines | `redis-shared` or `redis-semcache` unreachable. Not the router. |
+| A public `air-ops.net` host answers `404` or `403` | Nothing, if the path is not one of the six completion endpoints — that is the path allowlist or Cloudflare Access working. |
 
 A `CrashLoopBackOff` is **not** by itself evidence that the router is at fault;
 that is the single most misleading state on this service. Read the startup line
@@ -364,7 +631,7 @@ signatures.
 random replica**, so counters appear to jump between values on consecutive curls
 — each pod keeps its own. Prometheus is unaffected: it uses endpoint discovery
 and scrapes all four pods individually. `/metrics` is served on the same port
-8086 and is registered at `internal/server/server.go:898`. Query the series
+8086 and is registered at `internal/server/server.go:982`. Query the series
 through Prometheus at `prometheus-shared.tas-shared:9090` or Grafana.
 
 The exporter behind `/metrics` was replaced at commit `eee4b24`, and whether a
@@ -392,7 +659,7 @@ cover the history, the new exporter, and what is actually running today.
 > day the new image is deployed.
 
 **What is real after `eee4b24`.** `/metrics` is now served by `promhttp` from a
-dedicated `client_golang` registry (`internal/metrics/metrics.go:48`), and the
+dedicated `client_golang` registry (`internal/metrics/metrics.go:50`), and the
 regression test scrapes twice with no traffic in between and fails if any value
 moved (`internal/metrics/metrics_test.go:21`). The series and where each number
 comes from:
@@ -402,13 +669,13 @@ comes from:
 | `llm_router_requests_total` | HTTP middleware around the completion handlers, `internal/metrics/middleware.go:74` | Request rate and status-code mix. Labels are `provider`, `method`, `status_code`. |
 | `llm_router_request_duration_seconds` | Same middleware, `internal/metrics/middleware.go:75` | **New series.** End-to-end latency as the caller sees it, including scanning, routing, and fallback hops. |
 | `llm_router_active_connections` | In-flight gauge, `internal/metrics/middleware.go:61` | Concurrency right now. Previously the constant 5. |
-| `llm_router_tokens_total` | `resp.Usage` on each completed call, `internal/server/server.go:1681` | Token volume by provider and direction. |
-| `llm_router_cost_total` | The pricing call that also produces the tenant's spend record, `internal/server/server.go:1683` | Dollar spend. The metric and the billing record are computed by the same code path on the same numbers, so a discrepancy between this panel and a tenant's invoice is not possible — if they differ, one of them was read over a different time window. |
+| `llm_router_tokens_total` | `resp.Usage` on each completed call, `internal/server/server.go:1772` | Token volume by provider and direction. |
+| `llm_router_cost_total` | The pricing call that also produces the tenant's spend record, `internal/server/server.go:1774` | Dollar spend. The metric and the billing record are computed by the same code path on the same numbers, so a discrepancy between this panel and a tenant's invoice is not possible — if they differ, one of them was read over a different time window. |
 | `llm_router_blocked_requests_total` | Policy enforcement, `internal/server/enforcement.go:127` | Requests refused by policy, labelled `inbound` or `outbound`. |
-| `llm_router_provider_health` | Read from the router at scrape time, `internal/server/server.go:338` | Provider reachability. Cannot go stale, because nothing mirrors it. |
+| `llm_router_provider_health` | Read from the router at scrape time, `internal/server/server.go:403` | Provider reachability. Cannot go stale, because nothing mirrors it. |
 
 Two behaviours of the new middleware change what the numbers mean. It wraps
-**outside** the AIQG gateway middleware (`internal/server/server.go:853`), so a
+**outside** the AIQG gateway middleware (`internal/server/server.go:930`), so a
 request the gateway rejects with a 401 is now counted as traffic; under the old
 exporter an authentication outage was invisible in the request count. And the
 `provider` label reads `none` when routing never chose a provider — an auth
@@ -417,20 +684,46 @@ masquerade as a vendor problem.
 
 Only the six completion routes are instrumented: `/v1/chat/completions`,
 `/v1/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/embeddings`,
-and `/v1/responses` (`internal/server/server.go:857`). `/health`, `/metrics`,
+and `/v1/responses` (`internal/server/server.go:934` onward, each wrapped by `wrapAIQG` at `internal/server/server.go:922`). `/health`, `/metrics`,
 `/v1/models`, and the management routes are excluded, so a fifteen-second scrape
 interval does not dominate the request rate.
 
-> [!WARNING] **Three of the new series are registered but never written to.**
+One gap in the table above closes at `552d869`: streaming completions did not
+feed `llm_router_tokens_total` or `llm_router_cost_total`, so both
+under-reported by the streaming share — the one exception to the table's claim
+that the cost panel cannot disagree with a tenant's invoice: on an `eee4b24`
+image that uses streaming, it runs low. They now do, from the final usage frame of
+the stream (`internal/server/server.go:1873`), including a stream that failed
+part-way, since those tokens were generated and billed. A stream that dies
+mid-response now ends with an explicit error event rather than looking like a
+clean, short answer, and a request for streaming that falls back to a single JSON
+body carries the response header `X-TAS-Stream-Fallback: true`
+(`internal/server/server.go:1888`).
+
+> [!WARNING] **At `eee4b24`, three of the new series were registered but never written to.**
 > `llm_router_errors_total`, `llm_router_auth_attempts_total`, and
 > `llm_router_rate_limit_hits_total` are declared at
-> `internal/metrics/metrics.go:113`, `:124`, and `:144` and registered at
-> `internal/metrics/metrics.go:152`, but no non-test code increments any of
+> `internal/metrics/metrics.go:113`, `:127`, and `:147` and registered at
+> `internal/metrics/metrics.go:219`, but no non-test code increments any of
 > them. A counter vector with no observed label combination exports nothing, so
 > after the rollout these three read **"No data"** rather than zero, and the
 > error-rate and rate-limit panels on `llm-router-overview` stay blank. Read a
 > blank panel here as missing instrumentation, not as an absence of errors — use
 > the Loki query in step 4 for error volume instead.
+>
+> **Superseded at `552d869`, not yet in any running pod.** Commit `1d89669`
+> wired all three: `llm_router_errors_total{error_type="completion_failed"}` on
+> the two "completion failed" paths (`internal/server/server.go:1759` and
+> `:1929`), `llm_router_auth_attempts_total` at each gateway authentication
+> outcome — `success`, `malformed`, `unknown`, `suspended`, `missing`
+> (`internal/middleware/aiqg.go:206` onward) — and
+> `llm_router_rate_limit_hits_total` where the limiter refuses a request
+> (`internal/security/ratelimit.go:277`). The known label combinations are also
+> pre-seeded at zero (`internal/metrics/metrics.go:242`), so a freshly started pod
+> exports an honest `0` instead of "No data". Once an image built from
+> `552d869` or later is running, a blank panel on these series means the
+> *scrape* failed, not that the counter is missing. Until then the paragraph
+> above still describes what you see.
 >
 > `llm_router_blocked_requests_total` counts only **enforce-mode** blocks: in
 > observe mode `applyEnforcement` returns before reaching the counter
@@ -459,7 +752,7 @@ There are two modes:
   the request with HTTP 422 and the message `blocked by policy: <pattern-ids>`.
 
 Observe is the default: a request whose tenant has no resolvable bundle gets
-observe with no rules (`internal/middleware/aiqg.go:1190`), on the reasoning that
+observe with no rules (`internal/middleware/aiqg.go:1228`), on the reasoning that
 an operator who has not chosen enforcement has not consented to it. TAS has
 historically left bundles in observe as a deliberate demonstration setting, so
 observe is the case you should expect.
@@ -524,11 +817,18 @@ Prometheus was appending to every sample.
 > the clock formula exactly. Until an image built from `eee4b24` or later is
 > rolled out, the `[!CAUTION]` block above describes the running system, not its
 > history.
+>
+> **Still true on 2026-09-21.** Both deployments were restarted on 2026-09-17
+> and their pods rescheduled on 2026-09-21, but onto the same two image tags, so
+> the fabricated exporter is still what every pod serves:
+> `llm_router_cost_total{model="gpt-4o"}` read $8,950,136.35 on all four pods,
+> and the which-exporter test below still returns an empty result.
 
 **Which exporter is a given pod serving?** `llm_router_request_duration_seconds`
 did not exist before `eee4b24`, so its presence is the test. Scraping through the
 ingress hits one random replica, which is useless for a per-pod answer — ask
-Prometheus, which scrapes all four pods individually and keeps the `pod` label:
+Prometheus, which scrapes all four pods individually and records each pod's
+address in the `instance` label:
 
 ```bash
 curl -sS -k -G 'https://prometheus.tas.scharber.com/api/v1/query' \
@@ -537,11 +837,11 @@ curl -sS -k -G 'https://prometheus.tas.scharber.com/api/v1/query' \
 ```
 
 An empty `result` means no pod is running the new exporter — that was the state
-on 2026-08-25. Each `instance` that appears is a pod that has it. To scrape one
+on 2026-08-25 and again on 2026-09-21. Each `instance` that appears is a pod that has it. To scrape one
 named pod directly instead, bypass the ingress with a port-forward:
 
 ```bash
-kubectl port-forward -n tas-llm-router pod/llm-router-aiqg-77c574cc9b-l9xhn 18086:8086 &
+kubectl port-forward -n tas-llm-router pod/llm-router-aiqg-549cc85f4-cfd7j 18086:8086 &
 fwd=$!
 sleep 3
 curl -sS http://localhost:18086/metrics | grep -c llm_router_request_duration_seconds
@@ -554,8 +854,9 @@ returns, and without it curl fails with a connection refused. `kill $fwd` closes
 it; a forgotten port-forward holds local port 18086 and quietly survives the rest
 of your session.
 
-A count of `0` is the old exporter, non-zero is the new one. Substitute a current
-pod name from triage step 3 — the names change on every rollout.
+A count of `0` is the old exporter, non-zero is the new one — `0` is what this
+pod returned on 2026-09-21. Substitute a current pod name from triage step 3 —
+the names change on every rollout.
 
 **The `aiqg_*` family is the one you can act on today.** It lives on a separate
 registry at `/aiqg/metrics`, was never affected by any of this, and is what the
@@ -580,7 +881,8 @@ curl -sS -k -G 'https://prometheus.tas.scharber.com/api/v1/query' \
 
 **Both deployments present, each with a value, is the pass condition.** A rate of
 `0` means no requests in the last fifteen minutes — normal on this low-traffic
-cluster and what was observed on 2026-08-25. What would be a failure is a
+cluster and what was observed on 2026-08-25. On 2026-09-21 both rows were
+present again, `llm-router` at `0` and `llm-router-aiqg` at `0.0022`. What would be a failure is a
 *missing* `service` entry: that means Prometheus has no recent sample from those
 pods at all, which is the same condition `LLMRouterAllReplicasDown` alerts on.
 Judge this query by whether both rows appear, not by the number.
@@ -601,7 +903,27 @@ The same "declared but never written" caveat applies here: a counter with no
 observations exports nothing, so `aiqg_scan_findings_total` reading "No data" in
 a fresh scrape means no scan has run since the pod started, not that scanning is
 broken. Prometheus retains the series from before the last restart, which is why
-it appears in a label listing but not in a live scrape.
+it appears in a label listing but not in a live scrape. The same applies to
+`aiqg_events_emitted_total` and `aiqg_request_tier_total` straight after a
+restart: on 2026-09-21, a few hours after the pods were rescheduled,
+`llm-router-aiqg` exported neither until its first request.
+
+**Series that arrive with the next deploy.** The code at `552d869` exports the
+following; none of them exists in Prometheus on 2026-09-21, because no running
+pod has the code. Their absence today is expected — their absence *after* a
+deploy of `552d869` or later is a scrape problem.
+
+| Series | Path | What it tells you |
+|---|---|---|
+| `aiqg_emitter_degraded` | `/aiqg/metrics` | `1` when the pod could not reach Kafka at startup and is logging events to stdout instead (`pkg/aiqg/metrics/metrics.go:332`). The only signal that spend attribution has left Kafka; see "Dependency failure effects". |
+| `llm_router_semcache_lookups_total{outcome}` | `/metrics` | Semantic-cache decisions: `semantic_hit`, `shadow_hit`, `miss_rejected` (a candidate was found and thrown out), `miss_no_candidate` (nothing close was stored). Seeded at zero, so a flat zero hit rate is visible rather than blank (`internal/metrics/metrics.go:175`). |
+| `llm_router_semcache_top_similarity`, `llm_router_semcache_rejections_total` | `/metrics` | The similarity score of the best candidate and the reasons candidates were rejected — the readings that decide the cache threshold. `llm-router-aiqg` only; the internal deployment has no semantic cache. |
+| `aiqg_judge_calls_total`, `aiqg_judge_tokens_total`, `aiqg_shadow_replays_total`, `aiqg_shadow_tokens_total` | `/aiqg/metrics` | Calls and tokens the gateway spends on its own quality evaluation (an LLM grading responses, and replays of requests against an alternative model), which were previously not counted at all (`pkg/aiqg/metrics/metrics.go:162`). |
+| `aiqg_unbilled_spend_usd_total{path}` | `/aiqg/metrics` | Dollars spent on those evaluation calls. Watch this during a spend incident: it is gateway-initiated cost that no customer request caused. |
+| `aiqg_eval_credential_source_total{source}` | `/aiqg/metrics` | Whose provider key an evaluation call used: `tenant_stored`, `tas_shared`, or `resolver_error`. Evaluation calls for a tenant who brought their own key are billed to that key, and skipped entirely if the tenant allows only their own key and has none stored (`internal/server/eval_credentials.go:54`). |
+| `aiqg_judge_excluded_total{reason}`, `aiqg_eval_events_failed_total` | `/aiqg/metrics` | Responses never evaluated, and evaluation events that failed to emit — the latter is spend with no tenant attached. |
+| `aiqg_prompt_cache_*` | `/aiqg/metrics` | Vendor prompt-cache requests by mode, read and creation tokens, and estimated dollars saved (`pkg/aiqg/metrics/metrics.go:345`). |
+| `llm_router_registry_*`, `llm_router_model_*` | `/metrics` | Model-registry sync passes, alias resolutions, and fallbacks. **Only when the registry is enabled**, and it is disabled by default; see "Model registry admin endpoints". |
 
 ## Dependency failure effects
 
@@ -624,10 +946,15 @@ a row says the effect on live requests is undetermined, that is why.
 | Dependency | Address | Blocks startup? | Blocks requests? | Pod still Ready? | Signature |
 |---|---|---|---|---|---|
 | `kafka-shared` | `kafka-shared.tas-shared:9092` | **Yes — fatal** | Yes, totally | **No.** The pod never reaches Ready, its restart count climbs, and it settles into `CrashLoopBackOff` | `Failed to create application: ... failed to build AIQG emitter: ... kafka: client has run out of available brokers to talk to: dial tcp ...: connect: connection refused` |
-| `aiqg-dashboard-be` | `aiqg-dashboard-be.aiqg.svc.cluster.local:8095` | No | **Yes — every authenticated request**, fails closed after ~2s | **Yes.** Looks perfectly healthy | Client gets `503 {"error":{"code":"token_resolver_unavailable","message":"AIQG token resolver is temporarily unavailable; retry"}}` |
+| `aiqg-dashboard-be` | `aiqg-dashboard-be.aiqg.svc.cluster.local:8095` | No | **Yes — every request that carries a `TAS-Auth` token, on both deployments.** It fails closed after ~2s. On `llm-router-aiqg` that is every request. On the internal `llm-router`, requests without `TAS-Auth` skip the lookup and are unaffected | **Yes.** Looks perfectly healthy | Client gets `503 {"error":{"code":"token_resolver_unavailable","message":"AIQG token resolver is temporarily unavailable; retry"}}` |
+| OpenTelemetry collector | `otel-collector-shared.tas-shared:4317` | No | No | Yes | **None — not a dependency.** The address is set in `llm-router-config` (`k8s/configmap.yaml:29`), but the router contains no OpenTelemetry library at all: no `go.opentelemetry.io` module in `go.mod`, now or in its history, and no code reads `OTEL_EXPORTER_OTLP_ENDPOINT`. A collector outage cannot affect it |
+| NGINX ingress controller | one pod in namespace `ingress-nginx`, on `um773dev` | No | **Yes — every hostname, both deployments**, while the pods themselves stay healthy | Yes | No request reaches the router, so it logs nothing and `/health` is unreachable from outside the cluster. Check with `kubectl get pods -n ingress-nginx -o wide` |
+| Node `um773dev` | — | Replacements cannot start: Redis and Kafka live there | **Yes, all external traffic.** The ingress controller, Kafka, `redis-shared`, and `redis-semcache` all ran only on `um773dev` on 2026-09-21 | The `pinova01` replicas stay Ready but unreachable | `kubectl get nodes` shows `um773dev` `NotReady`. See "Limits & trade-offs" |
 | Anthropic / OpenAI | `api.anthropic.com`, `api.openai.com` | No | Completions only | Yes | Provider error text — the router is reporting correctly, not failing. Fallback moves to the next provider if the tenant has one configured. |
-| `redis-shared` | `redis-shared.tas-shared:6379` | No | Undetermined — see below | Yes | **None.** Logs the dead address at `info` as though enabled; zero error lines |
-| `postgres-shared` | `postgres-shared.tas-shared:5432` | No | Undetermined — see below | Yes | **None.** Zero log lines mention postgres, the database, or the dead port |
+| `redis-shared` | `redis-shared.tas-shared:6379` | No for the application; **yes for a new pod**, via the `wait-for-redis` init container | Undetermined — see below | Yes | **None at startup.** Logs the dead address at `info` as though enabled; zero error lines. Once traffic uses the connection, a plain-text `redis: ... failed to dial` line (observed 2026-09-18, see below) |
+| `redis-semcache` (`llm-router-aiqg` only) | `redis-semcache.tas-shared:6379` | No | Undetermined; the semantic cache runs in shadow mode (`AIQG_SEMCACHE_SHADOW=true`), so it is not serving answers today | Yes | Not measured in the August probe, which predates it being password-protected |
+| `postgres-shared` | `postgres-shared.tas-shared:5432` | No | No — **no longer a dependency at all** (see below) | Yes | **None.** Zero log lines mention postgres, the database, or the dead port |
+| Redis password Secrets `redis-shared-auth`, `redis-semcache-auth` | Secrets in `tas-llm-router` | **Yes, for a new pod** if either Secret or its `password` key is missing | Only if the password is wrong | n/a — the container never starts | The new pod shows `CreateContainerConfigError`; the references are not marked optional (`k8s/deployment-aiqg-strict.yaml:145`) |
 | Keycloak | — | No | No | Yes | Not a dependency of the router at all — see below |
 
 **Kafka is a hard dependency, and it does not look like one.** The container exits
@@ -638,12 +965,45 @@ that is crash-looping, read the startup line: if it names `NewKafkaEmitter` and
 `run out of available brokers`, the image is fine and Kafka is down. Rolling back
 will not help, because every previous image has the same dependency.
 
+**This changes with the next deploy.** From commit `d8da473` (#191), a Kafka
+broker unreachable at startup no longer stops the process: the router falls back
+to writing its events to stdout, where log collection picks them up, keeps
+serving, and sets the gauge `aiqg_emitter_degraded` to `1`
+(`internal/server/server.go:226`). It logs one line at `error`:
+
+```bash
+AIQG Kafka emitter unavailable at startup — DEGRADING to the log emitter so the gateway keeps serving. Events go to stdout (captured by log collection) instead of Kafka until a restart reconnects. A Kafka outage costs telemetry, not availability.
+```
+
+That text is the message in the code; no running pod has produced it, so it has
+not been seen in Loki. Two consequences once it ships. A Kafka outage stops being
+an outage and becomes a **spend-attribution** problem — events reach Loki but not
+the Kafka topic `tas.aiqg.events.v1` that downstream consumers read. And the
+fallback is sticky: a pod that degraded stays degraded after Kafka recovers,
+until it is restarted, so `aiqg_emitter_degraded == 1` on a pod whose Kafka is
+healthy again means *restart that pod*. Until an image from `d8da473` or later is
+running, the crash-loop behaviour above is what you will see. The presence of
+`aiqg_emitter_degraded` on a pod's `/aiqg/metrics`, at any value, is the test:
+the gauge was added in the same commit, so a pod that exports it has the new
+behaviour.
+
 **The dashboard being down is distinguishable from a bad token, and the
 distinction saves an incident.** Token resolution goes through `DashboardResolver`,
 an HTTP client of `aiqg-dashboard-be` — confirmed by the startup line
 `"msg":"AIQG token resolver: DashboardResolver (HTTP client of aiqg-dashboard-be)"` —
 not through the mounted token file. So `aiqg-dashboard-be` sits on the
 authentication path for **every** request. Read the status code:
+
+**Which deployment this hits.** Both deployments load the dashboard address from
+the shared `llm-router-config`, and both build the same resolver. That is why
+the August probe, running the *internal* image, printed that startup line. The
+difference is in who sends a token. `llm-router-aiqg` is strict and looks up
+every request, so a dashboard outage takes out all customer traffic. The internal
+`llm-router` is permissive and looks up only requests that carry `TAS-Auth`, so
+internal callers that do not send one — the normal case — keep working. On
+2026-09-21 the same made-up token got an identical `401 token_unknown` from
+both hosts, which confirms both do the lookup. Check (c) of the sixty-second
+check is the fastest way to tell which side of this table you are on.
 
 | What you see | What it means |
 |---|---|
@@ -668,17 +1028,52 @@ Redis address produces a reassuring startup line at `info`, not an error:
 
 The `6399` there is the dead port the experiment set — the router reported the
 cache "enabled" against an address nothing was listening on, because the client
-connects lazily. Postgres was quieter still: `DATABASE_URL` is configured in
+connects lazily. Postgres was quieter still: `DATABASE_URL` was then configured in
 `llm-router-config`, but with it pointed at a dead port the router logged
 **nothing at all**, `/health` returned `200`, and the pod stayed Ready. The
 running router does not appear to connect to Postgres during normal operation.
 
-> [!UNVERIFIED] The **request-path** effect of a Redis or Postgres outage is not
-> established. The probe could not run an authenticated completion, because token
+Both halves of that have since been settled. **Postgres is not a dependency**:
+no code in the router reads `DATABASE_URL`, so the key was removed from
+`llm-router-config` (#177, `k8s/configmap.yaml:19`) and the `wait-for-postgres`
+init container with it; on 2026-09-21 neither was present on the live cluster. A
+Postgres outage has no effect on this service. (The Secret `llm-router-secret`,
+which ops manages outside the repository, still carried `DATABASE_URL` and
+`DATABASE_PASSWORD` keys on 2026-09-21. Nothing reads them; their presence is
+not evidence of a dependency.) **Redis is not always silent**:
+once a request actually uses the connection, the Redis client library writes its
+failure as plain text rather than JSON, which every `| json | level=` query
+misses. Both AIQG replicas wrote this on 2026-09-18 while `redis-shared`
+restarted for the password cutover:
+
+```bash
+redis: 2026/09/18 19:34:29 … redis: connection pool: failed to dial after 5 attempts: dial tcp 10.43.142.94:6379: connect: connection refused
+```
+
+Search for it with `|= "redis: "`, as in triage step 4.
+
+> [!UNVERIFIED] The **request-path** effect of a Redis outage is not
+> established (Postgres no longer applies, see above). The probe could not run an authenticated completion, because token
 > resolution requires a token registered with the dashboard. What is known is that
-> startup is silent, readiness is unaffected, and nothing is logged. Whether a
+> startup is silent, readiness is unaffected, and nothing is logged at `error`
+> level (the plain-text dial failures shown above appear only once traffic uses
+> the connection). Whether a
 > live request degrades, slows, or fails is undetermined — do not read the silence
 > as proof that it is harmless.
+
+**What to do about a Redis outage, given that.** Decide from what callers get,
+not from what the router says:
+
+1. Do not restart, scale, or roll back either deployment. A replacement pod
+   cannot start while Redis is down (see below).
+2. Run the sixty-second check at the top of "Health & signals". Check (b)
+   exercises the request path without depending on the cache.
+3. If it passes, and step 2's real completion passes where you have a token,
+   callers are being served. Work the incident on the Redis side, in
+   `tas-shared`, and leave the router alone.
+4. If completions fail and the only abnormal signal anywhere is Redis, escalate.
+   That combination would be the first observation of the undetermined case, so
+   attach the plain-text `redis: ` Loki lines and the failing request.
 
 **Keycloak is not a dependency of this service.** There is no Keycloak
 configuration of any kind in `llm-router-config`, in `llm-router-secret`, or in
@@ -687,31 +1082,40 @@ API that *issues* the tokens (see triage step 2) and `aiqg-dashboard-be`'s own
 authentication. A Keycloak outage does not stop the router from serving a token it
 already accepts; it stops new tokens being issued.
 
-> [!IMPORTANT] **Do not restart or scale either deployment during a Redis or
-> Postgres outage.** A *running* pod tolerates both being down — that is findings 3
-> and 4 above. But the init containers `wait-for-postgres` and `wait-for-redis`
-> block on `nc -z` until those services answer, so **no new pod can start**.
+> [!IMPORTANT] **Do not restart or scale either deployment during a Redis
+> outage.** A *running* pod tolerates it being down — that is the `redis-shared` row of the table above.
+> But the init container `wait-for-redis` blocks on `nc -z` until
+> `redis-shared.tas-shared:6379` answers, so **no new pod can start**.
 > Restarting converts a silent degradation into a hard outage: the replacement
-> parks in `Init:0/2`, and with `maxUnavailable: 0` on `llm-router-aiqg` you keep
+> parks in `Init:0/1`, and with `maxUnavailable: 0` on `llm-router-aiqg` you keep
 > the old pods only for as long as you never terminate them. This is the same
-> `Init:0/2` stall described under "Restart a deployment" — that section tells you
+> `Init:0/1` stall described under "Restart a deployment" — that section tells you
 > what a stalled rollout looks like; this one tells you not to start one.
+>
+> Until 2026-09-21 the deployments also carried `wait-for-postgres`, and the
+> stall read `Init:0/2`; that init container has been removed and Postgres no
+> longer blocks anything. The init check is a bare TCP connect, so it passes on a
+> Redis that is up but rejecting the pod's password — a wrong password lets the
+> pod start and fails later, on use.
 
-**Check the dependency directly — do not start from the router's logs.** Two of
-the five failures above log nothing at all, so a log search is the wrong first
-move. Ask the dependencies whether they are up:
+**Check the dependency directly — do not start from the router's logs.** The
+Redis failures in the table above log nothing at `error` level, and a missing
+password Secret logs nothing at all because the container never starts, so a
+log search is the wrong first move. Ask the dependencies whether they are up:
 
 ```bash
-kubectl get pods -n tas-shared -l 'app in (redis-shared,postgres-shared,kafka-shared)'
-NAME                            READY   STATUS      RESTARTS      AGE
-kafka-shared-0                  1/1     Running     4 (50d ago)   110d
-postgres-shared-0               1/1     Running     1 (50d ago)   253d
-redis-shared-7d87d5645c-cnjp4   1/1     Running     0             38d
-redis-shared-85c7875cfd-jdbqw   0/1     Completed   0             253d
-redis-shared-85c7875cfd-rnng4   0/1     Completed   1 (288d ago)   342d
+kubectl get pods -n tas-shared -l 'app in (redis-shared,redis-semcache,kafka-shared)'
+NAME                              READY   STATUS      RESTARTS       AGE
+kafka-shared-0                    1/1     Running     11 (20d ago)   137d
+redis-semcache-59d98d66ff-94w2q   1/1     Running     0              3d1h
+redis-shared-59bc79f55c-j8msr     1/1     Running     0              3d1h
+redis-shared-85c7875cfd-jdbqw     0/1     Completed   0              280d
+redis-shared-85c7875cfd-rnng4     0/1     Completed   1 (315d ago)   368d
 ```
 
-All three healthy on 2026-08-25. The `Completed` rows are old Redis ReplicaSets
+All three healthy on 2026-09-21. The August version of this check listed
+`postgres-shared` instead of `redis-semcache`; Postgres no longer matters to this
+service and the semantic-cache Redis does. The `Completed` rows are old Redis ReplicaSets
 that have already terminated — ignore them and read only the `Running` ones.
 `aiqg-dashboard-be` is not in this namespace; check it with
 `kubectl get pods -n aiqg`.
@@ -737,7 +1141,7 @@ string that will never appear.
 **When writing Loki queries against this namespace, the pod-name label is
 `instance`, not `pod`.** A query written as `{namespace="tas-llm-router",
 pod="..."}` returns zero streams and reads as "no logs" rather than as an error.
-Use `{namespace="tas-llm-router", instance="llm-router-aiqg-77c574cc9b-l9xhn"}`
+Use `{namespace="tas-llm-router", instance="llm-router-aiqg-549cc85f4-cfd7j"}`
 to scope to one replica.
 
 The fastest discriminator remains the real-completion check in triage step 2: a
@@ -758,7 +1162,7 @@ riskier one is the internal deployment, not the customer-facing one.**
 |---|---|---|
 | Strategy | `maxSurge: 25%, maxUnavailable: 25%` | `maxSurge: 1, maxUnavailable: 0` |
 | Removes a pod first? | **Yes** | No — waits for the new pod to be Ready |
-| Can a stall cost a replica? | **Yes.** It declares requests (250m / 512Mi), and the node was 93% reserved on 2026-08-25, so the replacement can land `Pending` after an old pod is already gone | No. Old pods keep serving until the replacement is Ready |
+| Can a stall cost a replica? | **Yes.** It declares requests (250m / 512Mi), and the node was 93% reserved on 2026-08-25, so the replacement can land `Pending` after an old pod is already gone. Less likely since the second node arrived: 71% and 47% reserved on 2026-09-21 | No. Old pods keep serving until the replacement is Ready |
 | Worst case | Degraded: one replica serving instead of two | Delayed: new version does not arrive, service unaffected |
 
 So the reassurance below applies fully to `llm-router-aiqg` and with a caveat to
@@ -780,6 +1184,32 @@ deployment "llm-router" successfully rolled out
 **Cost:** seconds of elevated error rate. The service is stateless, so a restart
 cannot corrupt anything — the risk is availability during the roll, not data.
 
+**A restart can put both replicas on one node.** The spread rule is
+`ScheduleAnyway`, and a rolling update was measured co-locating replicas on
+2026-09-21 (#220). After any restart, re-run triage step 3 and read the node
+column. If both pods of one deployment share a node, delete one of them and the
+ReplicaSet reschedules it, normally onto the other node.
+
+**Blast radius:** the requests in flight through that one pod are dropped, and
+the deployment runs on one replica for the few seconds the replacement takes to
+become Ready. Do this in daylight, one pod at a time, never during an incident
+and never while a Redis outage would leave the replacement stuck in init.
+
+```bash
+kubectl delete pod -n tas-llm-router llm-router-aiqg-549cc85f4-cfd7j
+<!-- unverified-example --> not run: changes cluster state. Expected shape:
+pod "llm-router-aiqg-549cc85f4-cfd7j" deleted
+```
+
+**If you apply the manifests yourself, use `kubectl apply -k k8s/`, never
+`kubectl apply -f`.** The live deployments' selectors carry labels that only the
+kustomization adds, and a selector is immutable, so a bare `-f` of
+`k8s/deployment.yaml` is rejected (`k8s/deployment.yaml:36`). The kustomization
+also rewrites the image repository to `registry-api.tas.scharber.com/tas-llm-router`
+and keeps each file's own tag — `aiqg-v5.75` and `aiqg-v5.86` — so an apply
+reproduces what runs rather than moving either deployment to a new build
+(`k8s/kustomization.yaml:44`).
+
 **Caveat for `llm-router-aiqg`:** its rolling update strategy is `maxSurge: 1,
 maxUnavailable: 0` — Kubernetes must schedule one *additional* pod and see it
 become Ready before it is allowed to remove an old one. `llm-router` uses
@@ -795,32 +1225,35 @@ version, and this is not a page. A stalled rollout is an urgent-tomorrow
 problem; only a failing real-completion check (triage step 2) is an outage.
 
 **Request headroom is not what stalls it.** `llm-router-aiqg` declares no
-resource requests at all — the container spec is `{}`, and both init containers
-are the same — which makes its pods **BestEffort**. Confirm that for yourself:
+resource requests at all — the container spec is `{}`, and its init container
+is the same — which makes its pods **BestEffort**. Confirm that for yourself:
 
 ```bash
 kubectl get pods -n tas-llm-router -o custom-columns=Pod:.metadata.name,QoS:.status.qosClass
-Pod                                QoS
-llm-router-7c5987584b-knpcd        Burstable
-llm-router-7c5987584b-mw4zd        Burstable
-llm-router-aiqg-77c574cc9b-l9xhn   BestEffort
-llm-router-aiqg-77c574cc9b-pxv5k   BestEffort
+Pod                               QoS
+llm-router-6ddd95fb5-fjn5m        Burstable
+llm-router-6ddd95fb5-h9nzp        Burstable
+llm-router-aiqg-549cc85f4-cfd7j   BestEffort
+llm-router-aiqg-549cc85f4-n9j7d   BestEffort
 ```
 
-The scheduler fits a
+Captured 2026-09-21. The scheduler fits a
 pod by comparing its *requests* against what is unreserved on the node, and a
-pod requesting nothing always fits. The node being at 93% of CPU requests
-therefore cannot leave an AIQG pod `Pending`. Per the TAS resource policy that
+pod requesting nothing always fits. A node at 93% of CPU requests, as
+`um773dev` was on 2026-08-25, therefore cannot leave an AIQG pod `Pending`. Per the TAS resource policy that
 is the intended trade: BestEffort pods schedule regardless of request pressure,
 and pay for it by being the first the kubelet evicts under real memory pressure.
 
 What can actually stall an AIQG rollout, in the order worth checking:
 
-1. **Init containers not completing.** Each pod runs `wait-for-postgres` and
-   `wait-for-redis`, busybox loops that block until `postgres-shared.tas-shared:5432`
-   and `redis-shared.tas-shared:6379` accept a TCP connection. If either shared
-   service is down the new pod sits in `Init:0/2` indefinitely. This is the most
-   likely cause on this cluster and it is a dependency failure, not a router one.
+1. **Init container not completing.** Each pod runs `wait-for-redis`, a busybox
+   loop that blocks until `redis-shared.tas-shared:6379` accepts a TCP
+   connection. If Redis is down the new pod sits in `Init:0/1` indefinitely.
+   This is the most likely cause on this cluster and it is a dependency failure,
+   not a router one. (Before 2026-09-21 a second init container,
+   `wait-for-postgres`, also ran and the stall read `Init:0/2`; it has been
+   removed.) A pod in `CreateContainerConfigError` instead is the related case
+   of a missing Redis password Secret — see "Dependency failure effects".
 2. **Image pull failure** — pod status `ErrImagePull` or `ImagePullBackOff`,
    usually the registry at `registry-api.tas.scharber.com` or a tag that was
    never pushed.
@@ -839,7 +1272,9 @@ What can actually stall an AIQG rollout, in the order worth checking:
 
    That was the 2026-08-25 state and is the pass condition: every pressure
    condition `False` and `Ready=True`. `MemoryPressure=True` or `Ready` anything
-   but `True` is your cause.
+   but `True` is your cause. Since 2026-09-21 there is a second node,
+   `pinova01`; run the same command against it, or both at once with
+   `kubectl get nodes`, whose status column read `Ready` for both on that date.
 5. **Pod-count ceiling.** This is the one capacity limit that is
    request-independent, so it is the only one that *would* block a BestEffort
    pod. Compare the ceiling against what is actually running:
@@ -852,7 +1287,9 @@ What can actually stall an AIQG rollout, in the order worth checking:
    ```
 
    96 of 110 on 2026-08-25 — fourteen slots free, so this was not the
-   constraint. Read the second number approaching the first as the cause. The
+   constraint. On 2026-09-21, with work spread across two nodes, the same count
+   read 69 of 110 on `um773dev` and 32 of 110 on `pinova01` (substitute the node
+   name in both commands). Read the second number approaching the first as the cause. The
    `status.phase=Running` filter matters: without it the count includes
    `Completed` pods and reads far above the real number.
 
@@ -871,8 +1308,10 @@ kubectl describe pod -n tas-llm-router -l app=llm-router-aiqg | grep -A15 Events
 Events:                      <none>
 ```
 
-That is the healthy steady state: four pods `1/1 Running` and no events. During a
-stalled rollout you will see a fifth pod in `Pending`, `Init:0/2`, or
+That is the healthy steady state as captured on 2026-08-25, when the cluster had
+one node: four pods `1/1 Running` and no events. Today the node column should
+read one `um773dev` and one `pinova01` per deployment, as in triage step 3.
+During a stalled rollout you will see a fifth pod in `Pending`, `Init:0/1`, or
 `ImagePullBackOff`, and the `Events:` section carries the scheduler's or
 kubelet's reason instead of `<none>`.
 
@@ -907,6 +1346,13 @@ here a stalled rollout *can* cost you a replica — the opposite of the AIQG cas
 Two replicas means losing one leaves one serving, which is degraded rather than
 down, but do not start a second restart on top of it.
 
+**Re-measured 2026-09-21, with two nodes:** the same command read `cpu 11360m
+(71%)` and `memory 21951Mi (73%)` on `um773dev`, and `cpu 3800m (47%)` and
+`memory 5963Mi (38%)` on `pinova01` (run it with `pinova01` in place of the node
+name). With that headroom a 250m / 512Mi replacement fits comfortably, so the
+risk above is now mainly historical — but check both nodes before restarting,
+because a return to the August figures on either brings it back.
+
 These percentages describe *reservations*, not consumption. A node at 93% of CPU
 requests may be nearly idle; the number constrains what the scheduler will admit,
 not how fast the service runs.
@@ -929,7 +1375,7 @@ REVISION  CHANGE-CAUSE
 ```
 
 **There is history to roll back to** — eleven revisions, 105 through 115, on
-2026-08-25. What is missing is `CHANGE-CAUSE`: every row reads `<none>`, so the
+2026-08-25, and eleven again on 2026-09-21, now 109 through 119. What is missing is `CHANGE-CAUSE`: every row reads `<none>`, so the
 list tells you revisions exist but not what any of them contained. Do not read
 the empty column as an empty history.
 
@@ -953,6 +1399,18 @@ Pod Template:
 
 Read the `Image:` line for the `llm-router` container (further down the same
 output) to get the tag, and the `restartedAt` annotation to date the revision.
+That revision predates the removal of `wait-for-postgres`, which is why it still
+lists it; rolling back to it would bring that init container back, and with it
+a startup dependency on Postgres.
+
+**Rolling back does not undo the Redis password requirement.** Any revision from
+before 2026-09-18 builds its Redis URL without a password, and `redis-shared`
+requires a password (#216), so a rollback that far produces pods that start —
+the init check is a bare TCP connect — but whose Redis connections are refused.
+What that does to live requests is the undetermined Redis case under
+"Dependency failure effects". Check that the revision's pod
+template lists `REDIS_PASSWORD` among its environment variables before you pick
+it.
 Walk backwards from the current revision until you find the last tag known to be
 good, then roll back to it:
 
@@ -976,8 +1434,11 @@ kubectl scale deploy/llm-router -n tas-llm-router --replicas=3
 deployment.apps/llm-router scaled
 ```
 
-Both deployments share one node (`um773dev`). Scaling up consumes the headroom
-that rolling updates need — check allocated resources first, as above.
+Both deployments span two nodes (`um773dev` and `pinova01`) since 2026-09-21;
+until then they shared `um773dev` alone. The spread rule tolerates a skew of
+one, so a third replica lands on whichever node has fewer. Scaling up consumes
+the headroom that rolling updates need — check allocated resources on both nodes
+first, as above.
 
 ### Rotate provider credentials
 
@@ -1003,6 +1464,107 @@ in step 2 of triage, not by reading the secret back.
 > reconstruct one from the deployment spec under time pressure. If you carry out a
 > rotation with the owner, write the steps down afterwards; that is what closes
 > this gap.
+>
+> **Partly narrowed on 2026-09-21.** Both deployments load the Secret
+> `llm-router-secret` in namespace `tas-llm-router` as environment variables, and
+> it carries the keys `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`; on
+> `llm-router-aiqg`, `ANTHROPIC_API_KEY` from the same Secret also feeds the
+> payload-extraction model. That Secret is deliberately kept out of the
+> kustomization, because applying a tracked placeholder overwrote the live keys
+> on 2026-06-03 (`k8s/kustomization.yaml:9`) — never `kubectl apply` a copy of
+> `k8s/secret.example.yaml` over it. Who authorizes a change is still unrecorded,
+> so the "what to do" above stands.
+
+### Rotate the Redis passwords
+
+**Blast radius:** a pod keeps the password it started with, so changing the
+password on a Redis instance without restarting both deployments leaves every
+running pod unable to authenticate. On `redis-shared` that covers both
+deployments' response cache and flow linkage; on `redis-semcache` it covers the
+semantic cache of `llm-router-aiqg`.
+
+The passwords live in Secrets `redis-shared-auth` and `redis-semcache-auth`,
+key `password`, namespace `tas-llm-router` — separate instances, separate
+passwords. The deployments read them into `REDIS_PASSWORD` and
+`SEMCACHE_PASSWORD` and interpolate them into the Redis URLs inside the pod spec
+(`k8s/deployment-aiqg-strict.yaml:145`). Both are copies of a password the Redis
+instance itself holds, which lives in `tas-shared`, outside this service, so a
+rotation is a coordinated change across both namespaces: new password on the
+Redis server and in these Secrets, then a rollout restart of **both**
+deployments, then the plain-text `redis: ` Loki query from triage step 4 to
+confirm nothing is failing to connect. The root guidance file of the TAS
+repository describes the same coordinated-rotation pattern for the shared
+Postgres password. Do this with the owner, as for provider keys.
+
+### Model registry admin endpoints
+
+**Blast radius:** reading is harmless. `POST /v1/registry/sync` and
+`POST /v1/registry/validate` make live calls to the providers' model-listing
+APIs, which is why a manual sync is limited to one per ten seconds.
+
+The code at `552d869` adds a model registry: a background job that asks each
+provider which models exist, tracks each as active, deprecated, or unavailable,
+and lets routing resolve short aliases and fall back from a model that has gone
+away. Five endpoints drive and inspect it (`internal/server/server.go:965`):
+
+| Endpoint | Does |
+|---|---|
+| `GET /v1/registry/status` | Whether it is enabled, which providers it covers, and the last sync summary |
+| `GET /v1/registry/models`, `GET /v1/registry/models/{provider}` | The models it currently knows, grouped by provider |
+| `POST /v1/registry/sync` | Runs a discovery pass now. A second call inside ten seconds gets `429` with `Retry-After` |
+| `POST /v1/registry/validate` | Probes one model; body `{"provider":"...","model":"..."}` |
+
+**Today these return `404`**, because no running image has them:
+
+```bash
+curl -sS -k -w '\nHTTP %{http_code}\n' https://llm-router.tas.scharber.com/v1/registry/status
+404 page not found
+
+HTTP 404
+```
+
+Captured 2026-09-21. After the next deploy they will answer `503` with the
+message `model registry is not enabled` (`internal/server/registry_admin.go:86`)
+— also expected, not a fault. The registry is **off by default**: it is
+switched on only by `registry.enabled: true` in the router's YAML
+configuration, which has no environment-variable override and is not set
+anywhere in the cluster's configuration. Like `/v1/breaker`, these routes are
+not behind the gateway's token check, and neither public `air-ops.net` host
+allowlists them, so they are reachable only on the two internal hosts.
+
+### What the next deploy changes
+
+Everything in this list is merged at `552d869` and **absent from both running
+images** (`aiqg-v5.75`, `aiqg-v5.86`). No image carries a commit label, so
+the image tag and the series a pod exports are the only ways to tell which code
+it runs. Two series bracket the range:
+
+| The pod's `/metrics` exports | Its code is at least | So it has |
+|---|---|---|
+| Neither series below | older than `eee4b24` | None of this list. Both running images, 2026-09-21 |
+| `llm_router_request_duration_seconds` | `eee4b24`, the exporter rewrite | The real exporter; not necessarily anything else here |
+| `llm_router_semcache_lookups_total` | `8e641ca`, the last code change before `552d869` | **Everything in this list.** Commits after it changed only Kubernetes manifests |
+
+`llm_router_semcache_lookups_total` is pre-seeded at zero, so it is present from
+the moment a new pod starts, before any traffic. Run the Prometheus query from
+the which-exporter test under "Health & signals" with that series name in place
+of `llm_router_request_duration_seconds_count`; an empty result means no pod
+has the code.
+
+| Change | What you will see differently | Where |
+|---|---|---|
+| Metrics exporter rewrite | `llm_router_*` stops being fabricated; every counter drops to its real, small value, and the two security dashboards go blank | Metrics subsection under "Health & signals" |
+| Kafka non-fatal (#191) | A Kafka outage no longer crash-loops the pod; `aiqg_emitter_degraded` becomes `1` and events go to Loki | "Dependency failure effects" |
+| Error, auth, and rate-limit counters wired (#170, #175) | These panels show honest zeros instead of "No data" | Metrics subsection |
+| Streaming metrics and errors (#171, #172) | Streaming requests count toward tokens and cost; a stream that dies mid-way ends in an error event | Metrics subsection |
+| Strict mode fails closed with no token source (#173) | If the AIQG deployment is ever started with neither a token list nor a dashboard address, every request gets `401` rather than being let through | "Failure modes" |
+| Semantic-cache, evaluation-spend, and prompt-cache metrics (#184, #199, #219) | New `llm_router_semcache_*`, `aiqg_judge_*`, `aiqg_shadow_*`, `aiqg_eval_*`, `aiqg_prompt_cache_*` series | "Series that arrive with the next deploy" |
+| Model registry (#202–#208) | Admin endpoints answer `503` instead of `404`; no routing change while disabled | "Model registry admin endpoints" |
+
+**Deploy one deployment at a time and re-run triage steps 1 and 2 after each.**
+The two running tags are already eleven version numbers apart, and both
+predate every change above, so the next deploy is a large jump for
+`llm-router` in particular. The owner decides when it happens.
 
 ## Failure modes
 
@@ -1020,10 +1582,31 @@ this kind today may well page you first.
 | Every retry exhausted, caller gets a hard failure | `All completion attempts failed` (level `error`), preceded by `Completion attempt failed` (level `warning`, with `"attempt":1`) | The underlying provider error is not retryable. Observed 17 times in 48h, each paired one-to-one with an `Anthropic API call failed` — retries did not rescue a single one | Fix the underlying provider error; a 401 will never succeed on retry | The warning-level attempt lines stop appearing |
 | Log lines missing for a pod that recently restarted | `failed to try resolving symlinks in path "/var/log/pods/tas-llm-router_llm-router-aiqg-...": lstat ...: no such file or directory` | Alloy, the log collector, chasing a path for a pod that no longer exists. **Not a router failure** | None — ignore | The message stops once collection settles after the rollout |
 
+The rows below were added on 2026-09-21 for failure shapes introduced since the
+table was built. The first two were observed; the third has not occurred and is
+quoted from the code.
+
+| Symptom | Literal error text | Cause | Fix | Confirm |
+|---|---|---|---|---|
+| Plain-text Redis errors in Loki; nothing at `error` level; requests may or may not succeed | `redis: 2026/09/18 19:34:55 … redis: connection pool: failed to dial after 5 attempts: dial tcp 10.43.11.181:6379: connect: connection refused` | `redis-shared` or `redis-semcache` unreachable — observed on both AIQG replicas on 2026-09-18 while `redis-shared` restarted for the password cutover | Restore the Redis instance; do **not** restart the router while Redis is down, or the replacement parks in `Init:0/1` | The `\|= "redis: "` Loki query from triage step 4 returns `"result":[]` again |
+| A public caller gets a web error page instead of JSON | nginx `404 Not Found` on `gateway.air-ops.net` or `llm.air-ops.net`; `Error ・ Cloudflare Access` with HTTP `403` on `llm.air-ops.net` | The path is not one of the six allowlisted completion endpoints (SEC-1, SEC-23), or the caller of `llm.air-ops.net` did not present the Cloudflare Access service token. Both observed 2026-09-21 on `/health` | None on the router side. Point the caller at a completion path, or at the internal hosts for operator endpoints | A `POST` without a token to `https://gateway.air-ops.net/v1/chat/completions` returns the router's own `401` `path_a_auth_required` JSON, proving the request reached the router |
+| **(At `552d869`, not yet deployed.)** Every request to the AIQG gateway gets `401`, with valid tokens | `Path A auth rejected — strict mode with no token resolver (empty token list); failing closed` (level `error`); caller body `{"error":{"code":"path_a_auth_required",...,"reason":"no_resolver_configured"...}}` | `llm-router-aiqg` started with neither a dashboard address nor a token list, so it cannot identify anyone and refuses everyone rather than admitting blank identities (#173, `internal/middleware/aiqg.go:1042`) | Restore `AIQG_DASHBOARD_URL` in `llm-router-config`, or the token Secret `llm-router-aiqg-tokens`, then restart | Startup logs `AIQG token resolver: DashboardResolver (HTTP client of aiqg-dashboard-be)`, and the real-completion check passes |
+
 **Standing issue as of 2026-08-24:** 51 occurrences of `invalid x-api-key`
 against Anthropic in the preceding 48 hours. This was an active credential
 problem on that date, not a historical one. Confirm current state before
 assuming it has been resolved.
+
+**Re-checked 2026-09-21:** zero occurrences of `invalid x-api-key` in the
+preceding 48 hours, and the only error-level lines in that window were 12
+provider health-check failures (8 OpenAI, 4 Anthropic). The credential problem
+appears resolved; re-run the count before relying on that:
+
+```bash
+curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query' \
+  --data-urlencode 'query=sum(count_over_time({namespace="tas-llm-router"} |= "invalid x-api-key" [48h]))'
+{"status":"success","data":{"resultType":"vector","result":[],"stats":{...}}}
+```
 
 **Not covered by the table above:** rate limiting, request timeouts, and caller
 authentication failures. Absence means not observed in the 48-hour window, not
@@ -1032,11 +1615,14 @@ impossible. You cannot fall back to the metrics for any of the three —
 `llm_router_errors_total` are declared but never incremented, so they report
 nothing regardless of what happens. Loki is the only source, so here is a
 directed query and the expected shape for each rather than an open-ended search.
+(That holds for the running images. At `552d869` all three counters are wired
+and seeded at zero, so after the next deploy they become a second source; see
+the metrics subsection.)
 
 **Rate limiting.** The limiter answers HTTP 429 with a JSON body containing
 `"message": "Rate limit exceeded"` and `"type": "rate_limit_error"`, plus
 `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and
-`Retry-After` headers (`internal/security/ratelimit.go:281`). The refusal is
+`Retry-After` headers (`internal/security/ratelimit.go:277`). The refusal is
 written to the caller, not logged as an error, so search the whole stream rather
 than filtering on level:
 
@@ -1053,7 +1639,7 @@ from the caller's side by looking for the `Retry-After` header on their response
 
 **Request timeouts.** A timeout is not its own signature — it is classified as a
 retryable error by substring match on `timeout`, `connection`, `unavailable`, or
-`rate limit` (`internal/server/server.go:2547`), and then surfaces through the
+`rate limit` (`internal/server/server.go:2673`), and then surfaces through the
 retry path already in the table above. Search for the retry lines and read the
 embedded provider error:
 
@@ -1099,7 +1685,7 @@ two ways of not entering this one, and which you get depends on the ingress
 - **The customer-facing gateway runs strict.** A request missing either header is
   rejected with 401 and a body whose `code` is `path_a_auth_required` and whose
   `missing_header` field names the one that was absent
-  (`internal/middleware/aiqg.go:1133`). You can confirm an AIQG pod is in this
+  (`internal/middleware/aiqg.go:1174`). You can confirm an AIQG pod is in this
   mode from its label: `aiqg-mode=strict`, visible in the revision output shown
   under "Roll back".
 - **The internal ingress runs permissive.** A request with no `TAS-Auth` passes
@@ -1107,6 +1693,13 @@ two ways of not entering this one, and which you get depends on the ingress
   behaviour that predates AIQG. This is why the same missing header produces a
   401 on `gateway.aiqg.tas.scharber.com` and nothing at all on
   `llm-router.tas.scharber.com`.
+
+The two public hosts follow their backends: `gateway.air-ops.net` reaches
+`llm-router-aiqg` and is strict — a token-less `POST` to
+`/v1/chat/completions` there returned exactly this `401` with
+`"missing_header":"TAS-Auth"` on 2026-09-21 — while `llm.air-ops.net` reaches the
+permissive `llm-router`, where Cloudflare Access, not the router, is what
+authenticates the caller.
 
 Distinguishing the two log lines matters: `Authentication failed` is a credential
 problem, and `path_a_auth_required` is a client not sending a header at all. The
@@ -1177,6 +1770,11 @@ in the subject line rather than assuming urgency is inferred.
 > never fired. Slack remains commented out in the ConfigMap; email is the only
 > delivery path.
 >
+> Re-run on 2026-09-21, the same query returned `6` for both instances and the
+> failure counter `0`: six notifications sent since Alertmanager last restarted,
+> none failed. Alert groups from other TAS services now share this pipeline, so
+> a non-zero count is not by itself about this router.
+>
 > > [!UNVERIFIED] A caveat reported separately, which this pass could not
 > > confirm: that the pod cannot persist its notification log and silences,
 > > leaving deduplication state non-durable across restarts — which would mean a
@@ -1206,13 +1804,24 @@ in the subject line rather than assuming urgency is inferred.
 > ```
 >
 > Seven rules across two groups is the 2026-08-25 state and matches the list
-> above. And the source the pod loads from:
+> above. On 2026-09-21 the same command printed five groups: those two,
+> unchanged, plus `aiqg_activity_digest`, `tas_backup`, and `tas_drift`, which
+> belong to other services. The two groups above are still the only ones about
+> this router. The repository also carries two prompt-cache alerts,
+> `PromptCacheAutoZeroHits` and `PromptCacheWritesWithoutReads`, in
+> `deploy/monitoring/prompt-cache-alerts.yaml`; they are **not loaded** into
+> Prometheus, by design of that file, and could not fire today anyway because
+> their series come with the next deploy. And the source the pod loads from:
 >
 > ```bash
 > kubectl get cm prometheus-shared-rules -n tas-shared -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}'
 > llm-router-availability-alerts.yml
 > semcache-judge-alerts.yml
 > ```
+>
+> That is the 2026-08-25 listing. On 2026-09-21 it also listed
+> `aiqg-digest-alerts.yml`, `backup-alerts.yml`, and `drift-alerts.yml`, matching
+> the three new groups.
 >
 > Read one in full with `kubectl get cm prometheus-shared-rules -n tas-shared -o
 > jsonpath='{.data.llm-router-availability-alerts\.yml}'`. A group present in the
@@ -1226,7 +1835,10 @@ in the subject line rather than assuming urgency is inferred.
 > exporter rewrite at `eee4b24` changes no alerting behaviour in either
 > direction: nothing breaks when the eight removed series disappear, and nothing
 > starts paging when the real ones arrive. Alerting on real request rate, error
-> rate, or latency is still to be written.
+> rate, or latency is still to be written. So is an alert on
+> `aiqg_emitter_degraded`: once the next deploy makes Kafka loss non-fatal, a
+> Kafka outage stops being visible as a crash loop, and until a rule watches
+> that gauge nothing will page on it.
 
 **Escalate when** any of these hold:
 
@@ -1247,13 +1859,26 @@ it already carries the alert name, severity, and start time.
 
 **Do not attempt alone:** rotating provider credentials (it affects every tenant
 at once and there is no staged rollout), and scaling either deployment beyond
-three replicas on this single node.
+three replicas. That limit was set when the cluster was one node; it has two
+since 2026-09-21, and the limit stands until the owner revisits it. Also: rotating either Redis
+password (it spans two namespaces and both deployments), deploying a new image
+(see "What the next deploy changes"), and re-applying the manifests (only ever
+with `kubectl apply -k k8s/`).
 
 ## Limits & trade-offs
 
-Both deployments run on one node, `um773dev`. There is no multi-node
-redundancy — node loss takes down every replica of both deployments
-simultaneously. Two replicas protect against pod-level failure only.
+Until 2026-09-21 both deployments ran on one node, `um773dev`, and node loss
+took down every replica at once. Since then each deployment keeps one replica on
+`um773dev` and one on `pinova01` (#220), which is **less redundancy than it
+looks**. On 2026-09-21 everything the router depends on still ran only on
+`um773dev`: the single NGINX ingress controller that every hostname passes
+through, Kafka, `redis-shared`, and `redis-semcache`. Losing `um773dev`
+therefore still takes both deployments offline for callers, because no request
+can reach the surviving `pinova01` replicas through the ingress, and no
+replacement pod could start without Redis. What the spread does buy is survival
+of `pinova01` failing, or of either node being drained for maintenance, with
+one replica of each deployment serving throughout. `aiqg-dashboard-be`, on the
+authentication path, already runs one replica on each node.
 
 The two deployments have different Kubernetes quality-of-service classes, which
 decides which pods the kubelet evicts first when the node runs short of memory.
@@ -1291,10 +1916,19 @@ exist until this commit.
 This is the accepted trade-off of the rewrite: fewer signals, all of them true,
 rather than a full dashboard of constants. The gap it leaves is that error rate,
 authentication outcomes, and rate limiting have no metric at all until someone
-wires the three declared-but-unwritten counters to their call sites.
+wires the three declared-but-unwritten counters to their call sites. That wiring
+is done at `552d869`; the gap closes when that code is deployed.
+
+**The code and the cluster have drifted apart, and that is itself a risk.** Both
+running images predate every change merged since August. The longer that lasts,
+the larger the next deploy, and the more of this document describes behaviour
+that is true in git but not in production. Check the image tags in the table
+under "Mental model" before trusting any "at `552d869`" statement to describe
+what a pod does.
 
 ## Related
 
+- Developer and API documentation: `docs/dev/llm-router-api.md`; routing guide: `docs/concept/routing.md`
 - Repository: `tas-llm-router`, OpenAPI specification at `docs/openapi.yaml`
 - Port allocations: `aether-shared/services-and-ports.md`
 - Public documentation ingress: `docs.air-ops.net`
