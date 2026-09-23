@@ -10,7 +10,7 @@ answers:
   - "Which flags change the size and the shape of a pass?"
   - "How do I confirm the data actually landed?"
   - "What has to be updated here when the gateway's event shape changes?"
-verified_against: "tas-llm-router@eee4b24, 2026-08-26"
+verified_against: "tas-llm-router@552d869, 2026-09-21"
 depth: standard
 ---
 
@@ -33,6 +33,19 @@ for cost: whether a vendor model is actually called.
 | `flows` | yes | Runs seven ordered enterprise workloads where the step *sequence* is the demonstration: a seed request, paraphrases that should hit the cache, and near-miss probes that must not. |
 | `fingerprint-eval` | yes | Sends untagged, tool-bearing requests from five distinct personas and prints `event_id,persona` ground truth, so inferred attribution can be scored offline. |
 
+Four terms recur below. An **attributed** request carries headers that name
+the calling agent, flow, and user (`TAS-Agent-Id`, `TAS-Flow-Id`, `baggage:
+user.id=…`), so the dashboard can bill it to an agent instead of guessing. The
+**strict gateway** is the customer-facing router deployment `llm-router-aiqg`
+in namespace `tas-llm-router`, reached at `gateway.aiqg.tas.scharber.com`; it
+returns 401 for any request without a gateway token
+(`k8s/ingress-aiqg-strict.yaml`). A **near-miss probe** is a prompt worded
+almost like an earlier one but asking a different question (logging in to the
+virtual private network (VPN) versus logging in to my account); the cache must *not* answer it from the earlier
+response. **CLEAR** is the gateway's per-request quality score, 0–100, built
+from five dimensions — Cost, Latency, Efficacy, Assurance, Reliability — and it
+is the `avg CLEAR` column in the run summary.
+
 It is not a load generator — there is no concurrency and no rate control — and
 it is not a test suite. Three targets exist to make dashboard panels show
 something believable; `flows` is the one that can fail, and it fails loudly when
@@ -40,7 +53,7 @@ a near-miss probe gets a cached answer meant for a different question.
 
 ## Status & scope
 
-**As of 2026-08-26**, all four targets are in the tree and all four are wired
+**As of 2026-09-21** (verified against commit `552d869`), all four targets are in the tree and all four are wired
 into `main.go` at `cmd/demo-traffic/main.go:109-144`. Nothing here is deployed:
 no Kubernetes manifest, Dockerfile, or Makefile target in this repository
 references `demo-traffic`, so `go run` from a checkout is the only way it runs.
@@ -51,12 +64,20 @@ The `loki` and `gateway` targets have been in use since 2026-06 (`3b2fa46`,
 catalog is the newest and moved most recently: six flows on 2026-08-16
 (`a73275e`), then the `research-rag` flow and three corrections to what it
 claims through 2026-08-17 (`0ab5718`, `ce20995`, `6e11c60`, `f924522`).
+The only change to the tool since was `dc6811c` (2026-08-26), which corrected
+the `--flow` help text and the comments above `flowCatalog` from "six" flows to
+**seven** — the count `cmd/demo-traffic/flows.go:139` has held since
+`research-rag` landed. `--print-catalog` remains the authoritative list; its
+seven ids are `it-helpdesk`, `security-questionnaire`, `contract-review`,
+`ticket-triage`, `incident-burst`, `research-rag`, and `coding-agent`.
 
-Two known inaccuracies inside the tool itself, neither fixed here:
+Two things worth knowing before trusting older notes or the flag help:
 
-- The `--flow` help text and the comment above `flowCatalog` both say "six"
-  flows; `cmd/demo-traffic/flows.go:139` now holds **seven**. `--print-catalog`
-  is authoritative.
+- `--model` and `--max-tokens` look like they control `--target=gateway`, and
+  their help text says so, but they do not. Each request takes its model and
+  output cap from its scenario in `cmd/demo-traffic/gateway.go:147`, and the
+  send at `cmd/demo-traffic/gateway.go:237` passes those, not the flags.
+  `--model` only appears in the startup banner.
 - The dashboard rollups this generator feeds are live, not planned:
   `/api/v1/metrics/agents` and `/api/v1/flows` are both registered in
   `aiqg-dashboard-be`, in `internal/handlers/metrics.go` — lines 54 and 57 of
@@ -95,24 +116,50 @@ existing shared token for this repository's demo tenant lives in
 `--token` or, failing that, the `AIQG_TAS_AUTH_TOKEN` environment variable
 (`cmd/demo-traffic/main.go:66`).
 
-`--dry-run` works on the gateway targets too, and it is how to see the request
-plan and the cost before spending anything:
+`--dry-run` works on the gateway targets too. It prints the request plan —
+every request's model and output cap — but no dollar figure; the cost estimate
+below is derived from that plan. The last line counts previewed requests as
+`sent`:
 
 ```bash
-go run ./cmd/demo-traffic --target=gateway --dry-run --flows-per-agent 1
+go run ./cmd/demo-traffic --target=gateway --dry-run --flows-per-agent 1 --seed 42
 demo-traffic: target=gateway url=http://localhost:8086 model=claude-haiku-4-5-20251001 agents=4 flows-per-agent=1 users=[u_alice u_bob u_carol u_dave] dry-run=true
-POST http://localhost:8086/v1/chat/completions  agent="Research Orchestrator" user=u_carol flow=b7583c6c-de8c-41df-9260-72a65ae69c54 scenario=happy model=claude-haiku-4-5-20251001 max_tokens=64
-POST http://localhost:8086/v1/chat/completions  agent="Research Orchestrator" user=u_carol flow=b7583c6c-de8c-41df-9260-72a65ae69c54 scenario=truncated model=claude-haiku-4-5-20251001 max_tokens=32
-POST http://localhost:8086/v1/chat/completions  agent="Research Orchestrator" user=u_carol flow=b7583c6c-de8c-41df-9260-72a65ae69c54 scenario=expensive model=claude-opus-4-6 max_tokens=512
+POST http://localhost:8086/v1/chat/completions  agent="Research Orchestrator" user=u_bob flow=4b843edf-61a5-4870-93f9-6fe7dc8c6d04 scenario=happy model=claude-haiku-4-5-20251001 max_tokens=64
+POST http://localhost:8086/v1/chat/completions  agent="Research Orchestrator" user=u_bob flow=4b843edf-61a5-4870-93f9-6fe7dc8c6d04 scenario=truncated model=claude-haiku-4-5-20251001 max_tokens=32
+POST http://localhost:8086/v1/chat/completions  agent="Research Orchestrator" user=u_bob flow=4b843edf-61a5-4870-93f9-6fe7dc8c6d04 scenario=expensive model=claude-opus-4-6 max_tokens=512
+…
+gateway pass: sent=15 failed=0
 ```
 
-That preview was eleven requests in total at `--flows-per-agent 1`; the default
-of 4 is roughly four times that, and the scenario cursor cycles all seven
-Quickstart scenarios (`cmd/demo-traffic/gateway.go:147`), one of which is
-`claude-opus-4-6` at 512 output tokens. This spends real money on the vendor
-account behind the demo tenant, and raising `--flows-per-agent` or
-`--max-tokens` raises the bill proportionally. Point `--gateway-url` at the
-deployed gateway to reach the real pipeline; the flag defaults to
+The fence shows the first three of that run's 15 requests and its final line; with `--seed` the
+preview is reproducible. Without it the flow shapes are random, and at
+`--flows-per-agent 1` seeds 1–10 and 42 gave between 11 and 16 requests on
+2026-09-21. The default of 4 is roughly four times that. The
+scenario cursor cycles all seven Quickstart scenarios
+(`cmd/demo-traffic/gateway.go:147`), each with its own model and output cap:
+`expensive` is `claude-opus-4-6` at 512 output tokens and `long-context` sends a
+~2k-token prompt with a 1024-token cap. This spends real money on the vendor
+account behind the demo tenant. `--flows-per-agent` is the dial that scales the
+bill; `--max-tokens` does not, because the per-scenario caps override it.
+
+**What a pass costs, at most.** This is a ceiling derived from code, not a
+measured bill. Rates come from the gateway's own pricing table
+(`pkg/clear/cost.go:32-44`): `claude-haiku-4-5-20251001` at $0.0008 in / $0.004
+out per 1K tokens, `claude-opus-4-6` at $0.015 / $0.075, `gpt-4o-mini` at
+$0.00015 / $0.0006. Input tokens are prompt length ÷ 4, the gateway's own
+conversion (`pkg/clear/cost.go:88`); output is assumed to hit every cap.
+
+| Target | Requests per pass | Ceiling per pass |
+|---|---|---|
+| `gateway`, one cycle of the seven scenarios | 7 | ≈ $0.049, of which $0.039 is the single `expensive` Opus request |
+| `gateway`, `--flows-per-agent 1` | 11–16 | ≈ $0.09–0.10 (the Opus scenario runs twice) |
+| `gateway`, default `--flows-per-agent 4` | 52–61 (seeds 1–5 and 42) | ≈ $0.38–0.45 |
+| `flows`, all seven | 36, fixed | ≈ $0.05 (~10.3K input + 10,688 capped output tokens, all Haiku) |
+| `fingerprint-eval`, default | 20 (5 personas × 4) | under $0.001 (`gpt-4o-mini`, 12-token cap) |
+
+Cache hits on `flows` and outputs that stop short of the cap both make the real
+number lower. With `--interval`, multiply by the passes you leave running.
+Point `--gateway-url` at the deployed gateway to reach the real pipeline; the flag defaults to
 `http://localhost:8086` for local work.
 
 ```bash
@@ -141,11 +188,34 @@ go run ./cmd/demo-traffic --target=flows --dry-run --flow ticket-triage
    5. probe      Classify this support ticket into one category: "I can log in, but billing is w…
 ```
 
-Against a live gateway the same run adds a per-flow summary comparing measured
-hit rate to the flow's modeled expectation, and reports probe rejections
-separately. Add `--cache-bust` when re-running inside the exact-match cache's
+A `flows` pass is sized by which flows you select, not by a count flag. The
+seven flows have fixed step counts — `it-helpdesk` 6, `security-questionnaire`
+6, `contract-review` 3, `ticket-triage` 5, `incident-burst` 9, `research-rag` 4,
+`coding-agent` 3 — so a default pass is 36 requests. Against a live gateway
+the same run adds a per-flow summary comparing measured hit rate to the flow's
+modeled expectation, and reports probe rejections separately. Add `--cache-bust` when re-running inside the exact-match cache's
 retention window, or every step — including the seed — answers from cache and
 the run proves nothing.
+
+`fingerprint-eval` previews the same way. `--flows-per-agent` is reused as
+*requests per persona*, so this is five requests; the default of 4 sends 20:
+
+```bash
+go run ./cmd/demo-traffic --target=fingerprint-eval --dry-run --flows-per-agent 1
+# fingerprint-eval: 5 personas × 1 requests untagged → http://localhost:8086
+event_id,persona
+(dry-run) weather-bot tools=2 model=gpt-4o-mini
+(dry-run) invoice-agent tools=2 model=gpt-4o-mini
+(dry-run) search-assistant tools=2 model=gpt-4o-mini
+(dry-run) code-helper tools=1 model=gpt-4o-mini
+(dry-run) triage-bot tools=2 model=gpt-4o-mini
+# done: sent=0 failed=0
+```
+
+Each real request is a one-line prompt with the persona's tool definitions,
+`max_tokens` 12, and no attribution headers (`cmd/demo-traffic/fpeval.go:90`).
+A live run prints one `event_id,persona` line per success, which is the ground
+truth to join against the gateway's inferred agent.
 
 ### Common failures
 
@@ -156,11 +226,14 @@ gateway pass: sent=0 failed=11
 !! 2 FALSE HIT(S): a near-miss probe was semantically matched to a DIFFERENT question.
 ```
 
-> [!UNVERIFIED] Those four lines are instantiated from the format strings at
-> `cmd/demo-traffic/main.go:111`, `cmd/demo-traffic/flows.go:479`,
-> `cmd/demo-traffic/gateway.go:256`, and `cmd/demo-traffic/flows.go:561`. The
-> wording is exact; the counts and the flow name are filled in, not transcribed
-> from a run.
+The first two were reproduced on 2026-09-21 — run with no token set, and with
+`--flow helpdesk` — and both exit with status 2 (`cmd/demo-traffic/main.go:111`,
+`cmd/demo-traffic/flows.go:479`).
+
+> [!UNVERIFIED] The last two need a live gateway and were not triggered. They are
+> instantiated from the format strings at `cmd/demo-traffic/gateway.go:256` and
+> `cmd/demo-traffic/flows.go:561`; the wording is exact, the counts are filled
+> in, not transcribed from a run.
 
 The first is the most common: no token was found in either `--token` or the
 environment. The second means the id passed to `--flow` is not in the catalog —
@@ -224,8 +297,8 @@ The flags below are the ones that change what a run does; `go run
 | `--insecure` | `true` | skip TLS verification; TAS Loki uses the internal `tas-ca-issuer` authority |
 | `--gateway-url` | `http://localhost:8086` | gateway base URL; chat at `/v1/chat/completions` |
 | `--token` | `$AIQG_TAS_AUTH_TOKEN` | `TAS-Auth` gateway token |
-| `--model` | `claude-haiku-4-5-20251001` | model for `--target=gateway` requests |
-| `--max-tokens` | `8` | output cap for `--target=gateway`; the point is attribution, not content |
+| `--model` | `claude-haiku-4-5-20251001` | printed in the `--target=gateway` banner only; each scenario sets its own model |
+| `--max-tokens` | `8` | no effect on `--target=gateway` sends; each scenario sets its own cap (see Status & scope) |
 | `--users` | `u_alice,u_bob,u_carol,u_dave` | `baggage user.id` pool sampled per flow |
 | `--flow` | all seven | comma-separated flow ids for `--target=flows` |
 | `--print-catalog` | `false` | dump the flow catalog as JSON and exit |
@@ -234,6 +307,22 @@ The flags below are the ones that change what a run does; `go run
 | `--vague-rate` | `0.12` | fraction carrying a vague-input finding |
 | `--hedging-rate` | `0.12` | fraction carrying a hedging finding |
 | `--error-rate` | `0.02` | fraction that failed upstream (`vendor_error`) |
+
+Not every flag reaches every target, and the size dial differs per target.
+This is from the dispatch in `cmd/demo-traffic/main.go:109-144`:
+
+| Target | What sets the size of a pass | Also honoured | Ignored |
+|---|---|---|---|
+| `loki` | `--flows-per-agent` (× 4 agents) plus `--inferred-flows` | `--seed`, `--spread`, `--interval`, the four `*-rate` flags, `--tenant-id`, `--account-id`, `--loki-url`, `--org-id` | gateway flags |
+| `gateway` | `--flows-per-agent` (× 4 agents × each flow's steps) | `--seed`, `--interval`, `--users`, `--gateway-url`, `--token` | `--inferred-flows`, `--spread`, `*-rate`, `--tenant-id`, `--account-id`, `--model`, `--max-tokens` |
+| `flows` | `--flow` (which flows; step counts are fixed) | `--cache-bust`, `--interval`, `--users`, `--seed`, `--gateway-url`, `--token` | `--flows-per-agent`, `*-rate`, `--tenant-id`, `--account-id`, `--model`, `--max-tokens` |
+| `fingerprint-eval` | `--flows-per-agent`, reused as requests per persona (× 5) | `--gateway-url`, `--token` | everything else, including `--interval` — it is always one pass |
+
+The `*-rate` flags shape **only** synthesized `loki` events
+(`cmd/demo-traffic/synth.go:90-128`); the gateway targets send real prompts and
+the gateway's own scanners decide what gets flagged. On every gateway target
+the tenant comes from the token, not from `--tenant-id`. `--dry-run` and
+`--insecure` apply everywhere.
 
 Note that `--insecure` defaults to **true**, which is unusual and deliberate:
 the internal certificate authority is not in most local trust stores. It applies
@@ -313,12 +402,81 @@ q "sum_over_time({namespace=\"tas-llm-router\"} |= \"aiqg response event\" | jso
 # Per-agent cost rollup — the attribution view
 q "sum by (agent_id) (sum_over_time({namespace=\"tas-llm-router\"} |= \"aiqg response event\" | json | tenant_id=\"$TENANT\" | agent_id!=\"\" | unwrap total_cost_usd [15m]))"
 
-# Named versus guessed flows — header / trace / inferred
+# Named versus guessed flows — header / trace / inferred from this tool; baggage, asserted, principal, … from the live gateway
 q "sum by (identity_source) (count_over_time({namespace=\"tas-llm-router\"} |= \"aiqg response event\" | json | tenant_id=\"$TENANT\" | identity_source!=\"\" [15m]))"
 ```
 
-Or open `https://aiqg.tas.scharber.com` as `aiqg-demo` and watch the panels fill
-over the last 15 minutes to an hour. Loki rejects timestamps far in the past, so
+A non-empty result has `"status":"success"` and at least one series under
+`data.result`, each carrying `[timestamp, "value"]` pairs; an empty
+`"result":[]` means nothing matched in the window. For example, the
+named-versus-guessed query above returned this on 2026-09-21 (stats elided):
+
+```json
+{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"identity_source":"principal"},"values":[[1790025000,"1"],[1790025300,"1"]]}]}}
+```
+
+That series is real gateway traffic, not this tool's: the live gateway labels
+identity with a different vocabulary from the `loki` target (see *Keeping it in
+sync with the gateway*).
+
+To tell this tool's synthesized lines apart from real gateway traffic, filter
+on the stream label the `loki` target sets on every push,
+`source="demo-traffic-generator"` (`cmd/demo-traffic/main.go:96-101`), next to
+`namespace="tas-llm-router"` — the label every dashboard query selects on:
+
+```bash
+q "sum(count_over_time({namespace=\"tas-llm-router\", source=\"demo-traffic-generator\"} |= \"aiqg response event\" [15m]))"
+```
+
+> [!UNVERIFIED] No `loki`-target push landed in the 30 days before 2026-09-21 —
+> Loki's label-values endpoint returned no values for `source` — so it was not
+> confirmed that Loki keeps that label as pushed. If the query is empty right
+> after a successful push, drop the `source` matcher.
+
+**Confirming the Kafka → TimescaleDB path (gateway targets only).** A Loki hit
+proves the gateway logged the request, not that it reached TimescaleDB. For
+that, call the dashboard backend's rollups on `https://api.aiqg.tas.scharber.com`
+and read the `source` field in the response (the `agents` handler, in
+`internal/handlers/agents.go` of the `aiqg-dashboard-be` repository):
+
+```bash
+curl -sS "https://api.aiqg.tas.scharber.com/api/v1/metrics/agents?days=1" \
+  -H "Authorization: Bearer $KEYCLOAK_ACCESS_TOKEN" | jq '{source, groups, agents: [.agents[] | {key, packets, total_cost_usd}]}'
+curl -sS "https://api.aiqg.tas.scharber.com/api/v1/flows?days=1&limit=5" \
+  -H "Authorization: Bearer $KEYCLOAK_ACCESS_TOKEN" | jq '{source, count}'
+```
+
+> [!UNVERIFIED] These two calls were not run for this revision: no Keycloak
+> session for the `aiqg-demo` account was available. The routes, query
+> parameters, auth requirement, and the `source` field are read from
+> `aiqg-dashboard-be` at `c5a1dd8`.
+<!-- unverified-example -->
+
+These routes do **not** accept the gateway token. They need a Keycloak access
+token from the `aether` realm for a user provisioned into the `aiqg-demo`
+account, because the tenant is read from the token's claims; a user with no
+tenant gets 403 `tenant_unprovisioned` (`TenantRequired`, in
+`internal/middleware/auth.go` of that repository). The aiqg-ui sends
+exactly this bearer on its own API calls, so a signed-in session is the easiest
+place to copy it from.
+
+`"source": "timescale"` with the four demo agents (Research Orchestrator,
+Coding Copilot, Support Bot, Data Extractor) in `agents` means the gateway
+pass made it through Kafka and Spark. `"source": "loki"` is **not** proof of
+failure on its own: the handler falls back to Loki whenever TimescaleDB errors,
+is not configured, or holds only unattributed rows (the TimescaleDB-first
+branch of the same `agents` handler). The same field is on
+`/api/v1/flows`.
+
+> [!UNVERIFIED] How long a gateway event takes to appear in TimescaleDB is not
+> recorded. The Spark job that writes it is
+> `aether-shared/k8s-shared-infrastructure/spark/aiqg-aggregator-sparkapp.yaml`,
+> and neither it nor the dashboard backend states a trigger interval, so no safe
+> wait can be quoted. Re-check over several minutes before treating
+> `"source": "loki"` as a failure.
+
+The quickest visual check is to open `https://aiqg.tas.scharber.com` as
+`aiqg-demo` and watch the panels fill over the last 15 minutes to an hour. Loki rejects timestamps far in the past, so
 generate near "now" and use `--interval` to build history forward rather than
 back-dating a week in one pass.
 
@@ -335,6 +493,16 @@ promoted field, update the field map in `synth.go` and the matcher list in
 (`cmd/demo-traffic/synth.go:48`) mirror the four categories in
 `aiqg-dashboard-be/internal/handlers/avoidable_cost.go` — if those diverge, the
 "potential savings" figure in the run summary stops matching the dashboard's.
+
+One coupling has already drifted. The `loki` target stamps `identity_source`
+as `header`, `trace`, or `inferred` (`cmd/demo-traffic/main.go:252-273`), but
+the live gateway emits `baggage`, `asserted`, `otel`, `trace`, `linked`,
+`principal`, `transport`, or `unattributed`
+(`pkg/aiqg/events/builder.go:344-365`). Only `trace` is shared. So a panel or
+query that splits by `identity_source` shows synthesized and real traffic in
+different buckets, and the gateway targets — which send `baggage: user.id` —
+land under `baggage`. Aligning the synthesized values is an edit to `main.go`,
+not made here.
 
 The `flows` target has a fourth coupling that is not code: its prompts are
 hand-mirrored against the ones in `aiqg-ui`, the same way the seven gateway
