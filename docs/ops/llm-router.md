@@ -34,8 +34,10 @@ verified_against: "tas-llm-router@06038b9, 2026-09-23"
 >
 > **The code and the cluster have diverged for one deployment, and this document
 > describes both.** On 2026-09-21 `llm-router-aiqg` moved to `aiqg-v5.87`, built
-> from `e6c24c0`, which contains everything merged through `552d869` plus the
-> semantic-cache embedder switch (#222, #223). The internal `llm-router` still
+> from `e6c24c0`, which contains everything merged through `552d869` (#223). The
+> semantic-cache embedder switch (#222) arrived separately, as configuration:
+> revision 120 carried it on the *previous* image `aiqg-v5.86`, thirteen minutes
+> before `v5.87` shipped. The internal `llm-router` still
 > runs `aiqg-v5.75`, the image it ran in August, and has none of it — not the
 > metrics rewrite, a Kafka outage no longer being fatal, the wired
 > error/auth/rate-limit counters, the model registry and its admin API, nor the
@@ -1495,9 +1497,10 @@ REVISION  CHANGE-CAUSE
 115       <none>
 ```
 
-**There is history to roll back to** — eleven revisions, 105 through 115, on
-2026-08-25, eleven again on 2026-09-21, then 109 through 119, and on 2026-09-23
-111 through 121. What is missing is `CHANGE-CAUSE`: every row reads `<none>`, so the
+**There is history to roll back to** — as of 2026-09-23, eleven revisions are
+retained, 111 through 121. The oldest five date from 2026-08-25; 116 and 117
+from 2026-09-17 and -18; and the four newest, 118 through 121, were all created
+on 2026-09-21. Nothing has been deployed since. What is missing is `CHANGE-CAUSE`: every row reads `<none>`, so the
 list tells you revisions exist but not what any of them contained. Do not read
 the empty column as an empty history.
 
@@ -1706,10 +1709,13 @@ the moment a new pod starts, before any traffic. Run the Prometheus query from
 the which-exporter test under "Health & signals"; the `instance` rows it returns
 are the pods that have the code.
 
-`aiqg-v5.87` also brought one change that is not in the table below because it
-is configuration rather than code: the semantic-cache embedder moved from
-Ollama `all-minilm` to TEI `langcache-embed-v3-small` (#222). See "How it works
-end to end".
+One change is not in the table below because it is configuration rather than
+code, and it did **not** arrive with `aiqg-v5.87`: the semantic-cache embedder
+moved from Ollama `all-minilm` to TEI `langcache-embed-v3-small` (#222) at
+revision 120, which still ran `aiqg-v5.86`. `v5.87` followed as revision 121
+thirteen minutes later. That distinction matters for rollback — see "Rolling
+back" — because returning to `v5.86` keeps TEI while going back further does
+not. See also "How it works end to end".
 
 | Change | What you will see differently | Where |
 |---|---|---|
