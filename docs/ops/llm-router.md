@@ -14,14 +14,16 @@ answers:
   - "Which hostnames reach this service, and why does /health return 404 or 403 on some of them?"
   - "Which behaviours described here change when the next image is deployed, and how do I tell which code a pod is running?"
 depth: standard
-verified_against: "tas-llm-router@06038b9, 2026-09-23"
+verified_against: "tas-llm-router@dc1957b, 2026-09-24"
 ---
 
 # LLM Router — Operations
 
-> **Verified 2026-09-23 against `tas-llm-router@06038b9`**, a targeted refresh
-> of the 2026-09-21 pass against `552d869`, itself refreshing an earlier pass
-> against `eee4b24` on 2026-08-25. The 2026-09-23 refresh re-checked what the
+> **Verified 2026-09-24 against `tas-llm-router@dc1957b`**, a code-only refresh
+> for judge-score provenance (#233), on top of the 2026-09-23 pass against
+> `06038b9`. That pass refreshed the 2026-09-21 pass against `552d869`, itself
+> refreshing an earlier pass against `eee4b24` on 2026-08-25. The 2026-09-23
+> refresh re-checked what the
 > `llm-router-aiqg` image bump and semantic-cache embedder switch changed; lines
 > that carry an older date were observed on that date and not re-run. Re-verify
 > before trusting any number here.
@@ -244,6 +246,29 @@ sample of responses the gateway sends to a second model to grade, which costs
 money the gateway itself spends; **shadow replays** re-run a sample of requests
 against an alternative model for comparison, which also costs money. All three
 belong to `llm-router-aiqg` only.
+
+**Judge scores and the dashboard's judged-efficacy figure.** The judge posts
+each score to `aiqg-dashboard-be`. From `dc1957b` onward each score also records
+which model served the response, which model graded it, and whether they were
+the same model (`self_judged`) (`internal/server/judge.go:156`,
+`internal/server/judge.go:561`). A self-judged score is still recorded, but the
+dashboard leaves it out of `efficacy_judged`, its per-model quality figure.
+The dashboard treats a score with no `self_judged` field as self-judged, and it
+skips a score that names no model
+(`aiqg-dashboard-be/internal/store/quality.go:200`). So a router without
+this change is still charged for judging, but none of its scores count toward
+`efficacy_judged`. The judge model is `AIQG_JUDGE_MODEL`, currently
+`claude-haiku-4-5-20251001` (`k8s/configmap.yaml:97`). Every response from
+that model is therefore self-judged. A code comment records a 2026-09-24
+measurement, taken before this flag existed: 179 of 464 judged scores were
+self-graded (`internal/server/judge.go:149`).
+
+> [!UNVERIFIED] Neither running image contains `dc1957b`. Both were built before
+> it (see "What the next deploy changes"), so neither currently sends the new
+> fields. Whether the deployed `aiqg-dashboard-be` already applies this
+> exclusion was not checked against the cluster. If it does, `efficacy_judged`
+> will stay empty however many judge calls `aiqg_judge_calls_total` shows,
+> until the router is redeployed. That is expected, not an outage.
 
 **How the semantic cache measures "close enough".** It turns each prompt into a
 384-number vector (an *embedding*) and compares vectors by similarity; a stored
@@ -1726,6 +1751,19 @@ not. See also "How it works end to end".
 | Strict mode fails closed with no token source (#173) | If the AIQG deployment is ever started with neither a token list nor a dashboard address, every request gets `401` rather than being let through | "Failure modes" |
 | Semantic-cache, evaluation-spend, and prompt-cache metrics (#184, #199, #219) | New `llm_router_semcache_*`, `aiqg_judge_*`, `aiqg_shadow_*`, `aiqg_eval_*`, `aiqg_prompt_cache_*` series | "Series that arrive with the next deploy" |
 | Model registry (#202–#208) | Admin endpoints answer `503` instead of `404`; no routing change while disabled | "Model registry admin endpoints" |
+| Judge-score provenance (#233, `dc1957b`) — **on neither deployment yet** | Judge scores start carrying `vendor`, `model`, `judge_model`, `self_judged`, and `efficacy_judged` can begin to fill for models other than the judge model | "Judge scores and the dashboard's judged-efficacy figure" under "How it works end to end" |
+
+The last row is the one exception to "merged at `552d869`". It landed after
+`e6c24c0`, so `llm-router-aiqg` needs a new image too. It adds no metric series,
+so the two-series test above cannot detect it. The router does not log it at
+startup, and no image carries a commit label. There is no check you can run
+against the pod itself, only two indirect ones. The first is the image tag: a
+tag built from `dc1957b` or later has it, and `aiqg-v5.87` does not. The
+second is the rows the pod writes. Look in `aiqg.response_feedback` in the
+dashboard's config Postgres for the newest `signal_type = 'judge'` rows. If
+their `metadata` has `judge_model` and `self_judged` keys, the pod that wrote
+them has the change (`aiqg-dashboard-be/internal/handlers/internal_judge.go:135`).
+Those rows are not labelled by pod, so this shows only that some pod has it.
 
 **Deploy one deployment at a time and re-run triage steps 1 and 2 after each.**
 The two running tags are now twelve version numbers apart. `llm-router-aiqg`

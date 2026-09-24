@@ -14,20 +14,23 @@ answers:
   - "Why is it designed this way rather than the obvious alternative?"
   - "Can the gateway run a different model from the one I named, and how would I know?"
 depth: deep
-verified_against: "tas-llm-router@552d869, 2026-09-21"
+verified_against: "tas-llm-router@dc1957b, 2026-09-24"
 ---
 
 # LLM Router — Developer Guide
 
-> **Verified against `tas-llm-router@552d869` on 2026-09-21** (previous
-> verification: `eee4b24`, 2026-08-25). Wire behaviour and the model catalogue
+> **Verified against `tas-llm-router@dc1957b` on 2026-09-24** (previous
+> verifications: `552d869`, 2026-09-21; `eee4b24`, 2026-08-25). The only code
+> change since `552d869` is the judge's score provenance (#233), described under
+> "Evaluation calls about your traffic can bill your key". Wire behaviour and the model catalogue
 > were first captured from live probes against `gateway.aiqg.tas.scharber.com`
 > on 2026-08-24 and 2026-08-25; the authentication rejections, the `415`, the
 > read surfaces, and `/metrics` were re-probed on 2026-09-21. Responses shown are
 > real captures. Where a behaviour was read from source rather than observed, it
 > says so.
 >
-> **The code and the cluster have diverged, and this refresh widens the gap.**
+> **History, as of 2026-09-21 (superseded for `llm-router-aiqg` by the update
+> below): the code and the cluster had diverged.**
 > On 2026-09-21 `kubectl get deploy -n tas-llm-router` still showed
 > `llm-router-aiqg` on image `aiqg-v5.86` and `llm-router` on `aiqg-v5.75` — the
 > same tags as on 2026-08-25 — and both still served the old hand-rolled
@@ -41,6 +44,25 @@ verified_against: "tas-llm-router@552d869, 2026-09-21"
 > Sections that describe such behaviour say **committed, not yet deployed**.
 > Treat them as the contract you will get after the next rollout, and the
 > live probes quoted beside them as the contract you get today.
+>
+> **Update 2026-09-24: that rollout has happened for the customer-facing
+> gateway.** `kubectl get deploy -n tas-llm-router` now shows `llm-router-aiqg`
+> on `aiqg-v5.87` (`llm-router` is still on `aiqg-v5.75`). The release commit
+> `c89bd2c` (#223) records `aiqg-v5.87` as built from `e6c24c0`, which contains
+> `552d869`, so everything labelled **committed, not yet deployed** below should
+> now be live on `gateway.aiqg.tas.scharber.com` but not on the internal
+> `llm-router`. The exporter probe under failure modes agrees on both hosts:
+> on 2026-09-24 `gateway.aiqg.tas.scharber.com/metrics` had no
+> `llm_router_security_score` and did expose `llm_router_request_duration_seconds`
+> (new exporter), while `llm-router.tas.scharber.com/metrics` still returned
+> `llm_router_security_score` (old exporter). The judge
+> provenance from `dc1957b` came after `e6c24c0` and is not deployed anywhere.
+>
+> [!UNVERIFIED] Apart from those `/metrics` checks, the "committed, not yet
+> deployed" sections and the live captures quoted beside them were not re-probed
+> after `aiqg-v5.87` rolled out. The labels and captures below are still the
+> 2026-09-21 text. Re-probe a behaviour before depending on it against
+> `llm-router-aiqg`.
 
 ## Why this exists
 
@@ -176,7 +198,7 @@ healthiest right now, and able to survive one vendor failing without the caller
 writing failover logic.
 
 Two of those promises need qualifying against what the code does today (verified
-at `552d869`):
+at `dc1957b`):
 
 - **Cost routing happens only when your model name does not pin a vendor.** A
   model name that exactly one provider lists — every name in the current
@@ -655,7 +677,7 @@ around them.
 internal hosts (the public `gateway.air-ops.net` does not route them). Every row
 below was re-probed anonymously against the live gateway on 2026-08-25;
 `/v1/models`, `/v1/providers`, `/v1/capabilities`, and `/v1/breaker` again on
-2026-09-21:
+2026-09-21, and `/v1/breaker` once more on 2026-09-24:
 
 | Endpoint | Returns |
 |---|---|
@@ -665,7 +687,7 @@ below was re-probed anonymously against the live gateway on 2026-08-25;
 | `/v1/providers` | `{"count":2,"providers":["openai","anthropic"]}` |
 | `/v1/capabilities` | Per-provider capability matrix including `max_context_window` |
 | `/v1/health`, `/health` | Provider health with per-provider `response_time_ms` |
-| `/v1/breaker` | Provider-fleet circuit-breaker state: `enabled`, `targets` (ejected providers), and the breaker `config`. Since `3c7eb27` (#185), committed but not deployed, `enabled` means "ejection is on by default for a request with no tenant override" rather than "the breaker object exists", and two fields are added: `constructed` and `state` (`unavailable`, `off`, or `on`) (`internal/server/breaker_status.go:25`–`81`). Returns `500` with `breaker status unavailable: …` if the breaker store cannot be read (`internal/server/breaker_status.go:63`). The live gateway still returns the older shape without `state` |
+| `/v1/breaker` | Provider-fleet circuit-breaker state: `enabled`, `targets` (ejected providers), and the breaker `config`. Since `3c7eb27` (#185), `enabled` means "ejection is on by default for a request with no tenant override" rather than "the breaker object exists", and two fields are added: `constructed` and `state` (`unavailable`, `off`, or `on`) (`internal/server/breaker_status.go:25`–`81`). Returns `500` with `breaker status unavailable: …` if the breaker store cannot be read (`internal/server/breaker_status.go:63`). On 2026-09-21 the live gateway still returned the older shape without `state`. On 2026-09-24 `gateway.aiqg.tas.scharber.com` (`aiqg-v5.87`) returned the new shape: `"constructed":true,"enabled":false,"state":"off","targets":[]`. `llm-router.tas.scharber.com` (`aiqg-v5.75`) returned `404 page not found` for this path the same day |
 
 The catalogue on 2026-08-24 was `claude-haiku-4-5-20251001`, `claude-opus-4-6`,
 `claude-sonnet-4-6`, `gpt-3.5-turbo`, `gpt-4o`, `gpt-4o-mini`. Query the endpoint
@@ -674,7 +696,7 @@ rather than trusting that list — it is the authority, this document is not.
 There are **no** `/v1/openai/*` or `/v1/anthropic/*` passthrough routes. Requests
 are never reverse-proxied verbatim.
 
-### Model registry admin API — committed, not yet deployed
+### Model registry admin API — deployed on `llm-router-aiqg`, registry disabled
 
 Five routes, registered unconditionally at `internal/server/server.go:965`–`969`
 and implemented in `internal/server/registry_admin.go` (added `e4548af`, closes
@@ -682,8 +704,11 @@ and implemented in `internal/server/registry_admin.go` (added `e4548af`, closes
 callers. **None is authenticated**: they are plain `api.HandleFunc` routes with
 no `wrapAIQG`, like the other management endpoints, and they are absent from the
 public `gateway.air-ops.net` allowlist. On 2026-09-21 the live internal gateway
-returned `404` for `GET /v1/registry/status`, because the deployed image
-predates them. With the registry disabled — the default — every one of them
+returned `404` for `GET /v1/registry/status`, because the image deployed then
+predated them. On 2026-09-24 `gateway.aiqg.tas.scharber.com` (`aiqg-v5.87`)
+returned `503 model registry is not enabled` for the same `GET`, so the routes
+are now deployed there with the registry off. `llm-router.tas.scharber.com`
+(`aiqg-v5.75`) still returned `404`. With the registry disabled — the default — every one of them
 returns `503` (`internal/server/registry_admin.go:82`–`88`).
 
 | Route | Does | Body / response | Vendor calls |
@@ -753,7 +778,7 @@ caches automatically.
 > threaded only when the content decodes as `[]types.ContentPart`, but JSON
 > decoding produces `[]interface{}` (the same mechanism that breaks vision,
 > below), so a part-level breakpoint in an HTTP body is probably lost. Inferred
-> from the types at `552d869`; not exercised with a request. Put breakpoints on
+> from the types at `dc1957b`; not exercised with a request. Put breakpoints on
 > the message instead.
 
 ### Feature support, and what the translation layer drops
@@ -834,14 +859,14 @@ and the per-model one still cannot.
 > [!UNVERIFIED] The vision finding is a code-path reading, not an executed
 > request — no valid token was available to send a multimodal body through. The
 > types and the missing default arm are verified at `eee4b24` and unchanged at
-> `552d869`; the end-to-end consequence (an image request losing its text as
+> `dc1957b`; the end-to-end consequence (an image request losing its text as
 > well, on the OpenAI path) is inferred from them. Confirm with a real request
 > before filing or relying on it.
 
 > [!UNVERIFIED] Streaming responses served by OpenAI appear never to carry token
 > usage: the provider builds the upstream request without `StreamOptions`
 > (`internal/providers/openai/provider.go:539`–`544`) and a search of the
-> repository at `552d869` still finds no `StreamOptions` or `include_usage`
+> repository at `dc1957b` still finds no `StreamOptions` or `include_usage`
 > anywhere, which is what OpenAI requires before it emits usage on a stream.
 > Since `cddd372` the streaming path feeds `tokens_total` and `cost_total`
 > whenever a stream reports usage, so this gap now decides whether an
@@ -849,12 +874,16 @@ and the per-model one still cannot.
 
 ### Telemetry surfaces
 
-**Short answer: on the running images, trust none of the `/metrics` series.
-After the next deploy, the table below applies.** Both deployed images
-(`aiqg-v5.86`, `aiqg-v5.75`) still serve the old hand-rolled exporter, whose
+**Short answer: it depends on the host.** As of 2026-09-24,
+`gateway.aiqg.tas.scharber.com` (`llm-router-aiqg`, `aiqg-v5.87`) serves the
+new exporter, so the table below applies there. The families were checked
+against a live scrape, but the individual label sets and values were not
+re-checked; see the header's `[!UNVERIFIED]` note.
+`llm-router.tas.scharber.com` (`llm-router`, `aiqg-v5.75`) still serves the old
+hand-rolled exporter, so trust none of its series. The old exporter's
 values are derived from the clock rather than from traffic (see design
-rationale). Scraped from `gateway.aiqg.tas.scharber.com` on 2026-09-21, it
-emits these families: `llm_router_requests_total`, `llm_router_tokens_total`,
+rationale). Scraped from `gateway.aiqg.tas.scharber.com` on 2026-09-21, before
+`aiqg-v5.87` rolled out, it emitted these families: `llm_router_requests_total`, `llm_router_tokens_total`,
 `llm_router_cost_total`, `llm_router_errors_total`,
 `llm_router_auth_attempts_total`, `llm_router_blocked_requests_total`,
 `llm_router_provider_health`, `llm_router_active_connections`,
@@ -864,7 +893,7 @@ emits these families: `llm_router_requests_total`, `llm_router_tokens_total`,
 `llm_router_input_sanitized_total`, `llm_router_audit_events_total`, and
 `llm_router_active_api_keys`. Several names match the new table, but the values
 behind them are not measurements, and there is no `request_duration_seconds`.
-Everything below describes the code at `552d869`, including the
+Everything below describes the code at `dc1957b`, including the
 streaming-fed token and cost figures.
 
 Two scrape endpoints, both `GET`, both unauthenticated, both served straight from
@@ -906,7 +935,7 @@ series, and `9e2653e` (#6) the registry series.
 
 **`/aiqg/metrics`** is a separate registry defined in
 `pkg/aiqg/metrics/metrics.go` (declared at `:27`, registered at `:387`), plus
-the semantic-cache judge series in `internal/server/semjudge.go`. At `552d869`
+the semantic-cache judge series in `internal/server/semjudge.go`. At `dc1957b`
 it holds: event emission (`aiqg_events_emitted_total`,
 `aiqg_emit_duration_seconds`, `aiqg_emitter_degraded`); traffic
 (`aiqg_requests_total`, `aiqg_request_tier_total`, `aiqg_scan_findings_total`);
@@ -1016,11 +1045,12 @@ seeded with explicit zeros at startup: every `auth_attempts_total` result,
 committed code.** At `eee4b24`, `errors_total`, `auth_attempts_total`, and
 `rate_limit_hits_total` were declared and registered
 (`internal/metrics/metrics.go:225`–`227`) with no call site anywhere. At
-`552d869` each is incremented at the sites in the table above. Two limits
+`dc1957b` each is incremented at the sites in the table above. Two limits
 remain: `errors_total` counts only a completion that failed after routing, not
 refusals such as a `402` or `422`; and `rate_limit_hits_total` stays at zero
-while the rate limiter is off. On the deployed images none of this applies —
-they serve the old exporter.
+while the rate limiter is off. As of 2026-09-24 this applies on
+`gateway.aiqg.tas.scharber.com`, which serves the new exporter, but not on
+`llm-router.tas.scharber.com`, which still serves the old one.
 
 Those combine into four distinct ways a query returns no rows, worth
 distinguishing before you conclude the gateway is idle: the series is fed only
@@ -1076,6 +1106,9 @@ rationale.
 > that no request produced. Confirm the shape against a pod built from `b6070a0`
 > or later before treating the labels as deployed. Re-checked 2026-09-21: still
 > `aiqg-v5.86`, still the old exporter (`llm_router_security_score{service="llm-router"} 85`).
+> Re-checked 2026-09-24: `llm-router-aiqg` is on `aiqg-v5.87` (built from
+> `e6c24c0` per release commit `c89bd2c`, which includes `b6070a0`) and serves
+> the new exporter. Its label sets were not compared with the capture above.
 
 ## Data model & contracts
 
@@ -1213,6 +1246,33 @@ linked to the response it scored through `parent_step_id`
 (`internal/server/eval_attribution.go:70`–`164`). That is how evaluation spend on
 your key can be reconciled against your own traffic in the dashboard backend.
 
+**Each judge score records what it graded and which model graded it.** Since
+`dc1957b` (#233; committed, not yet deployed), a score posted to
+`aiqg-dashboard-be` carries `vendor` and `model` for the response it scored,
+`judge_model` for the grader, and `self_judged`
+(`internal/server/judge.go:550`–`566`). `vendor` and `model` come from the
+routing snapshot, not from the response body (`internal/server/judge.go:140`–`145`).
+The response event takes its `model` from the same routing decision
+(`pkg/aiqg/events/builder.go:710`–`711`), and the judge code says that event
+feeds `aiqg.event_metrics.model`. These fields
+are how a judge score joins back to your traffic. The two tables are on
+different database servers, so they cannot be joined in SQL.
+
+`self_judged` is true when the served model equals the configured judge model
+(`internal/server/judge.go:156`). **Those scores are still recorded, not
+skipped.** The code comment says `aiqg-dashboard-be` leaves them out of the
+`efficacy_judged` aggregate, which stops a model from grading its own routing
+eligibility, but keeps them for display (`internal/server/judge.go:146`–`155`).
+If you read raw judge rows, filter on `self_judged` yourself. The same comment
+reports that on 2026-09-24, 179 of 464 judged rows had been graded by the model
+that produced them. Scores written before this change have no provenance fields
+and cannot be classified after the fact. Tests for both cases are in
+`internal/server/judge_provenance_test.go:38` and `:62`.
+
+> [!UNVERIFIED] The `efficacy_judged` exclusion and the 179-of-464 figure come
+> from comments in `internal/server/judge.go`. The `aiqg-dashboard-be` code and
+> the stored rows were not checked in this refresh.
+
 ### Compatibility guarantees: there are none stated
 
 **No stability policy exists in this repository.** There is no CHANGELOG, no
@@ -1331,7 +1391,7 @@ charge, not a free correction.
 | `500` | `internal/server/server.go:2462` | `Streaming failed: …` — a `"stream": true` request could not open a stream with the chosen provider or any `fallback_config` provider, before any byte was sent | Possibly, if a vendor accepted and then failed | Only deliberately |
 | `403` | `internal/server/server.go:1961` | `response blocked by content policy` — the vendor **answered** and the outbound scan blocked the answer (non-streaming only) | **Yes** — the vendor call completed | Rarely useful: the same prompt tends to produce a blocked answer again |
 | `500` | `internal/server/server.go:1949` | `response content scan failed` — the vendor answered, the outbound scanner errored, and the gatekeeper fails closed | **Yes** | Yes, knowing it bills again |
-**Not emitted at `552d869`: `413` and `429` on the completion routes.** Earlier
+**Not emitted at `dc1957b`: `413` and `429` on the completion routes.** Earlier
 versions of this table listed `413 Request entity too large` and `429 Rate
 limited`, citing `internal/server/anthropic_messages.go:581` and `:583`. Those
 lines are the status-to-type table the Anthropic error renderer uses, not places
@@ -1365,7 +1425,7 @@ unless a source is given:
 | Condition | Status | Body |
 |---|---|---|
 | Any path not in the public allowlist, on `gateway.air-ops.net` (including every `GET` route) | `404` | nginx's default web page (not JSON), `<title>404 Not Found</title>` — the request never reaches the router (`k8s/ingress-gateway-airops.yaml:83`–`133`) |
-| A path or method the router does not register, on the internal hosts — for example `GET /v1/chat/completions`, or `/v1/registry/*` on today's images | `404` | plain text `404 page not found` (the router library's default; there is no `405`) |
+| A path or method the router does not register, on the internal hosts — for example `GET /v1/chat/completions`, or `/v1/registry/*` on `llm-router` (`aiqg-v5.75`, observed 2026-09-24; `llm-router-aiqg` now returns `503` there instead) | `404` | plain text `404 page not found` (the router library's default; there is no `405`) |
 | `GET /v1/models/{model}` for a model no provider lists | `404` | `{"error":{"code":404,"message":"Model nope-model not found","type":"api_error"},"timestamp":…}` — also when the Anthropic SDK asks for a non-Anthropic model, since that listing holds Anthropic models only (`internal/server/server.go:2783`–`2808`) |
 | `GET /v1/providers/{name}` or `/v1/health/{name}` for an unknown provider | `404` | `Provider <name> not found`, standard envelope (`internal/server/server.go:2817`, `:2873`) |
 | `GET /v1/breaker` when the breaker store cannot be read | `500` | `breaker status unavailable: …`, standard envelope (`internal/server/breaker_status.go:63`) |
@@ -1385,8 +1445,8 @@ for why, and note that this gap is tracked as issue #172 rather than settled.
 
 | Version | What the client receives after a vendor dies mid-stream |
 |---|---|
-| **Deployed images** (`aiqg-v5.86`, `aiqg-v5.75`; they predate `76fa529`) | Status `200` already sent; the stream stops and ends with the normal terminator — `data: [DONE]` on the OpenAI surfaces, `content_block_stop`/`message_stop` on `/v1/messages`. No error text anywhere. The only signal is a missing or empty `finish_reason`/`stop_reason` |
-| **Committed at `552d869`** (#172) | Status `200`; a final error event in the surface's dialect, with no normal completion event after it on `/v1/messages` and `/v1/responses`. Shapes are under "Streaming has no error channel" below |
+| **Images that predate `76fa529`**: `llm-router` on `aiqg-v5.75` (as of 2026-09-24), and `llm-router-aiqg`, which was on `aiqg-v5.86` when probed on 2026-09-21 and on `aiqg-v5.87` by 2026-09-24 | Status `200` already sent; the stream stops and ends with the normal terminator — `data: [DONE]` on the OpenAI surfaces, `content_block_stop`/`message_stop` on `/v1/messages`. No error text anywhere. The only signal is a missing or empty `finish_reason`/`stop_reason` |
+| **Committed at `dc1957b`** (#172); expected on `llm-router-aiqg` `aiqg-v5.87` from its build commit, not probed live | Status `200`; a final error event in the surface's dialect, with no normal completion event after it on `/v1/messages` and `/v1/responses`. Shapes are under "Streaming has no error channel" below |
 
 Code written against both — check for an error event *and* for a missing
 `finish_reason`/`stop_reason` — works before and after the rollout.
@@ -1485,7 +1545,11 @@ tenant configuration you cannot see from the response.
 Every status above assumes the response headers have not been sent yet. Once a
 stream starts they cannot be used, and the streaming path has no substitute.
 
-This subsection describes the **deployed** images. At `eee4b24`,
+This subsection describes the images that predate #172. As of 2026-09-24 that
+is only `llm-router` (`aiqg-v5.75`). `llm-router-aiqg`'s `aiqg-v5.87` build
+(`e6c24c0`) includes #172. That is inferred from the build commit and has not
+been re-probed with a failing stream (see the header's `[!UNVERIFIED]` note).
+At `eee4b24`,
 `handleStreamingCompletion` wrote `200` and the server-sent events (SSE) headers
 before it read the first chunk, then ranged over the provider's chunk channel and
 called `done()` when the channel closed. The chunk type carried no error field
@@ -1860,8 +1924,8 @@ error, `500 Completion failed`. (Until 2026-09-21 this entry said a `503` meant
 your client appended `; charset=utf-8` or another parameter. Send the bare
 value. Observed 2026-09-21.
 
-**A `401` from the strict gateway saying `no_resolver_configured`** (after the
-next rollout) — the operators' token list is empty. Nothing about your token is
+**A `401` from the strict gateway saying `no_resolver_configured`** (possible on
+`llm-router-aiqg` since `aiqg-v5.87`; not probed) — the operators' token list is empty. Nothing about your token is
 wrong; report it.
 
 **`404` on `GET /v1/models` from `gateway.air-ops.net`** — the public host routes
@@ -1904,8 +1968,12 @@ is derived from wall-clock time. `0` means `b6070a0` or later. On 2026-08-25 bot
 Deployments answered `1`: `llm-router-aiqg` on `aiqg-v5.86` and `llm-router` on
 `aiqg-v5.75`. Neither has the fix yet, so the skew affects both hosts, not only
 the customer-facing one. On 2026-09-21 `llm-router-aiqg` still answered `1` on
-the same image. The same probe doubles as a test for everything this document
-marks "committed, not yet deployed": while it answers `1`, none of that is live.
+the same image. On 2026-09-24, after the `aiqg-v5.87` rollout,
+`gateway.aiqg.tas.scharber.com` answered `0` and `llm-router.tas.scharber.com`
+still answered `1`. The same probe doubles as a rough test for everything this
+document marks "committed, not yet deployed": while a host answers `1`, none of
+that is live there. A `0` shows only that the host is at `b6070a0` or later. It
+does not prove any particular later commit is deployed.
 (The internal host still serves `/metrics`; the public `gateway.air-ops.net`
 returns `404` for it.)
 
@@ -1917,17 +1985,20 @@ traffic** — they are fed only from the non-streaming completion paths
 integration streams, these two series are not a spend figure; the AIQG event
 stream (defined under vocabulary) is, and you read it through the dashboard
 backend rather than through this gateway. That was the code at `eee4b24`. It
-is not the deployed behaviour either: the deployed images serve the old
-exporter, whose token and cost numbers are not measurements at all (see
-telemetry). Since `cddd372` (#171), committed but not deployed, a stream that reports usage
+is not what `llm-router.tas.scharber.com` does either: as of 2026-09-24 it
+still serves the old exporter, whose token and cost numbers are not
+measurements at all (see telemetry). Since `cddd372` (#171), which the
+`aiqg-v5.87` build on `llm-router-aiqg` includes, a stream that reports usage
 feeds both series (`internal/server/server.go:1872`–`1876`). Anthropic streams
 report usage in their final chunk; OpenAI streams, per the marker under feature
-support, appear never to. So after the next rollout the under-count narrows to
+support, appear never to. So on `llm-router-aiqg` the under-count should now narrow to
 OpenAI-served streams and to Anthropic streams that broke before their final
-chunk.
+chunk. That is inferred from the build commit and not measured against a live
+stream.
 
-**A stream ends with an error event instead of a normal end** (after the next
-rollout) — the vendor failed mid-stream. The status line still says `200`. Treat
+**A stream ends with an error event instead of a normal end** (on
+`llm-router-aiqg` since `aiqg-v5.87`, inferred from its build commit and not
+re-probed; `llm-router` on `aiqg-v5.75` still ends silently) — the vendor failed mid-stream. The status line still says `200`. Treat
 the response as failed, and expect that the tokens generated before the break
 were billed — the code comment says as much (`internal/server/server.go:1870`–`1871`).
 
@@ -1988,7 +2059,9 @@ independent image tags — observed on 2026-08-25 as `aiqg-v5.75` and `aiqg-v5.8
 respectively, eleven releases apart. Behaviour verified against one is not
 guaranteed on the other; see the operations document, and use the exporter probe
 under failure modes to establish what a given pod is actually running. Unchanged
-on 2026-09-21, when both tags were read again with `kubectl`. Commit `000394a`
+on 2026-09-21, when both tags were read again with `kubectl`. On 2026-09-24
+`kubectl` showed `aiqg-v5.75` and `aiqg-v5.87`: the gap widened, and the two
+hosts now serve different `/metrics` exporters. Commit `000394a`
 (OPS-27) now records each Deployment's real tag in its manifest
 (`k8s/deployment.yaml:59`, `k8s/deployment-aiqg-strict.yaml:71`) instead of a
 shared `latest`.
