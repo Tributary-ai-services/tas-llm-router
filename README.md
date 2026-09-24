@@ -13,7 +13,7 @@ answers:
   - "Which settings change behaviour, and where do the secrets live?"
   - "How much of what is merged on main is actually running in production?"
   - "What is the model registry, and is it switched on?"
-verified_against: "tas-llm-router@552d869, 2026-09-21"
+verified_against: "tas-llm-router@06038b9, 2026-09-23"
 depth: standard
 ---
 
@@ -26,13 +26,13 @@ customer-facing deployment is literally named `llm-router-aiqg`, and every
 governance behaviour below — token authentication, prompt scanning, spend
 attribution, event emission — happens on the way through it.
 
-> **Verified 2026-09-21 against `tas-llm-router@552d869`**, with read-only
-> probes against both live deployments (`/health`, `/v1/providers`,
-> `/v1/models`, `/v1/breaker`, `/metrics`, the registry admin routes) and one
-> authenticated, non-billing call through `gateway.air-ops.net`. The two
-> completion examples in the quick start were executed on 2026-08-26 and not
-> re-run on this pass, because a completion bills a vendor; the token path
-> they depend on was re-exercised on 2026-09-21. Image tags move; re-check
+> **Verified 2026-09-23 against `tas-llm-router@06038b9`**, with read-only
+> probes against both live deployments (`/v1/providers`, `/v1/models`,
+> `/metrics`, the registry admin routes), the deployments' live image and
+> environment, and one authenticated, non-billing call through
+> `gateway.air-ops.net`. The two completion examples in the quick start were
+> executed on 2026-08-26 and not re-run on this pass, because a completion
+> bills a vendor; the token path they depend on was re-exercised on 2026-09-23. Image tags move; re-check
 > before trusting a version number. Throughout, `#n` is a pull request in this
 > repository and `SEC-n` / `OPS-n` are security and operations items in the
 > TAS backlog; they are cited so a claim can be traced, not because the reader
@@ -45,7 +45,7 @@ Point a client at this gateway instead of at `api.openai.com` or
 give you: one credential instead of per-vendor keys, a routing decision that
 can pick a cheaper model than the one you asked for, a scan of the prompt
 before it leaves the cluster, and a priced event per call attributed to a
-tenant. Requests and responses stay in the vendor's own wire format, so most
+tenant — the customer account a gateway token belongs to. Requests and responses stay in the vendor's own wire format, so most
 clients need only a changed base URL and a changed key.
 
 It is not a model host — every completion is served by Anthropic or OpenAI over
@@ -58,19 +58,19 @@ a firewall does.
 
 ## Status & scope
 
-**As of 2026-09-21**, two deployments run in namespace `tas-llm-router`, on
+**As of 2026-09-23**, two deployments run in namespace `tas-llm-router`, on
 independent image tags that routinely skew:
 
 | Deployment | Image tag today | Reached at | Auth |
 |---|---|---|---|
 | `llm-router` | `aiqg-v5.75` | `llm-router.tas.scharber.com` (all routes), in-cluster `llm-router.tas-llm-router:8086`, publicly `llm.air-ops.net` (completion paths only, behind Cloudflare Access) | permissive — serves completions with no credential |
-| `llm-router-aiqg` | `aiqg-v5.86` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
+| `llm-router-aiqg` | `aiqg-v5.87` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
 
 Both are `2/2` ready and both answered live probes on the verification date.
 Since 2026-09-21 the cluster has two nodes, `um773dev` and `pinova01`, and
 each deployment keeps one replica on each through a
 `topologySpreadConstraints` rule (#220), so either deployment survives losing
-a node; pod placement was confirmed one-per-node on that date.
+a node; pod placement was confirmed one-per-node on 2026-09-23.
 
 The permissive deployment exists because internal callers predate the token
 scheme; `aether-be` and `tas-agent-builder` still point at it by cluster
@@ -80,29 +80,37 @@ anonymous request gets Cloudflare's 403 page — so the unauthenticated path is
 not reachable from the open internet. It is reachable from anywhere inside the
 cluster or on the cluster's network.
 
-**The running images are older than most of `main`.** Neither deployment has
-taken a new image since before `b6070a0`, the `/metrics` rebuild that landed
-shortly before `eee4b24` (2026-08-26, the commit the previous version of this
-file was verified against): on 2026-09-21 both
-still exported the pre-rebuild metric series (`llm_router_security_score`,
-`llm_router_threat_level`), and both answered `/v1/registry/status` with the
-HTTP router's bare `404 page not found`, where any build carrying the registry
-code answers 503 even with the registry switched off. The 2026-09-21 rollout
-for node spreading re-created the pods on the same two images. Everything
-listed as "merged" below exists in code and passes its tests; none of it is
-serving traffic. What *did* reach production through manifests alone: the
-public-host path allowlists (SEC-1, SEC-23), password authentication to both
-Redis instances (SEC-24, SEC-26), removal of the unused `wait-for-postgres`
-init container (#177), and the replica spread. In short: no Go code merged
-from `b6070a0` onward is live, and of the work merged since 2026-08-26 only
-the Kubernetes manifest changes are.
+**The two deployments run very different code.** The strict gateway has run
+`aiqg-v5.87` since 2026-09-21 (#223), which that release commit records as
+built from `main` at `e6c24c0` — 33 commits past `aiqg-v5.86`. The only
+commits on `main` after `e6c24c0`, up to `06038b9`, are that release commit
+(#223, a one-line image-tag change in `k8s/deployment-aiqg-strict.yaml`) and
+two documentation refreshes (#221, #230) that touch only Markdown, so no Go
+code on `main` is missing from the strict gateway. What is in the image but
+not active there is switched off by configuration, not absent: the model
+registry, and the serving of semantic-cache hits (shadow mode), both below. The permissive deployment is still
+on `aiqg-v5.75`, which predates `b6070a0`, the `/metrics` rebuild that landed
+shortly before `eee4b24` (2026-08-26). The difference is observable from
+outside. On 2026-09-23 `llm-router-aiqg` exported the rebuilt series
+(`llm_router_request_duration_seconds`, the `llm_router_semcache_*` counters)
+and none of the old ones, and answered `/v1/registry/status` with
+`503 "model registry is not enabled"`, which is what a build carrying the
+registry code says while the registry is off. `llm-router` still exported the
+pre-rebuild series (`llm_router_security_score`, `llm_router_threat_level`) and
+answered that route with the HTTP router's bare `404 page not found`. Below,
+"live on the strict gateway" means merged code running in `aiqg-v5.87`; none
+of the Go code merged from `b6070a0` onward runs on the permissive deployment.
+What reached both deployments through manifests alone: the public-host path
+allowlists (SEC-1, SEC-23), password authentication to both Redis instances
+(SEC-24, SEC-26), removal of the unused `wait-for-postgres` init container
+(#177), and the replica spread.
 
-> [!UNVERIFIED] The exact commit behind each image is not recorded — there are
-> no git tags, and neither the image nor `--version` carries a commit. What is
-> established is an upper bound (both predate `b6070a0`) and an ordering:
-> `aiqg-v5.86` is the later build, so the strict gateway can have behaviour the
-> permissive deployment lacks. Which behaviours differ between the two was not
-> determined.
+> [!UNVERIFIED] The commit behind `aiqg-v5.75` is not recorded — there are no
+> git tags, and neither the image nor `--version` carries a commit. What is
+> established is an upper bound: it predates `b6070a0`. The `e6c24c0` mapping
+> for `aiqg-v5.87` comes from the release commit (#223), which also reports
+> that response events are stamped `gateway_version e6c24c0`; that stamp was
+> not re-checked on 2026-09-23.
 
 Three subsystems that older copies of this file listed as unstarted are
 running in production and have been for months: request and cost telemetry
@@ -117,7 +125,7 @@ repository as a load-bearing production service, not an early prototype.
 
 Genuinely unfinished or in flight, stated plainly:
 
-- **The model registry is merged, off by default, and not deployed.** PRs
+- **The model registry is deployed on the strict gateway but switched off.** PRs
   #202–#208 added `internal/registry/`: a background sync engine that
   discovers models (OpenAI through its list-models endpoint; Anthropic, which
   has no list endpoint, by sending each configured model a minimal probe
@@ -133,21 +141,25 @@ Genuinely unfinished or in flight, stated plainly:
   (`config.example.yaml` shows every field; `enabled: false` is the default) —
   there is no environment-variable override. The image starts the binary with
   `--config configs/config.yaml` (`docker/Dockerfile`), and that baked-in file
-  has no `registry:` block, so turning it on in the cluster needs the block
-  added there (or a mounted replacement) as well as a new image. Its admin routes
+  has no `registry:` block, so turning it on for `llm-router-aiqg` needs the
+  block added there (or a mounted replacement); the permissive deployment would
+  also need a new image. Its admin routes
   (`/v1/registry/status`, `/models`, `/models/{provider}`, `/sync`,
   `/validate`) are documented in [`docs/openapi.yaml`](docs/openapi.yaml),
-  return 503 while it is disabled, and are mounted without the gateway-token
+  return 503 while it is disabled (observed on the strict gateway on
+  2026-09-23), and are mounted without the gateway-token
   check, so they are reachable only on the internal hosts.
-- **The `/metrics` rebuild is merged but not deployed.** Commit `b6070a0`
-  replaced an exporter that derived counters from wall-clock time with a real
-  Prometheus registry and deleted eight series that had no data source; later
-  merges added prompt-cache savings, semantic-cache, judge-spend, and registry
-  series on top of it. Scraping either running deployment on 2026-09-21 still
-  returned the old series, and the new `llm_router_request_duration_seconds`
-  was absent from both. Until a rollout carries `b6070a0` or later, numbers on
-  the router dashboards built from `/metrics` are not measurements.
-- **Other merged, undeployed behaviour** a reader of the code will meet:
+- **The `/metrics` rebuild is live on the strict gateway only.** Commit
+  `b6070a0` replaced an exporter that derived counters from wall-clock time
+  with a real Prometheus registry and deleted eight series that had no data
+  source; later merges added prompt-cache savings, semantic-cache, judge-spend,
+  and registry series on top of it. Since the `aiqg-v5.87` rollout on
+  2026-09-21, `llm-router-aiqg` exports those series; `llm-router` still
+  returned the old ones on 2026-09-23. Numbers on the router dashboards built
+  from `/metrics` are measurements for the strict gateway from 2026-09-21
+  onward, and not for the permissive deployment or for earlier dates.
+- **Other merged behaviour, live on the strict gateway and absent from the
+  permissive deployment**, that a reader of the code will meet:
   Kafka loss at startup now degrades to log-only events instead of exiting
   (#191); the prompt-cache `auto` mode now places `cache_control` breakpoints
   itself instead of passing requests through (#197–#201); the calls the
@@ -159,10 +171,20 @@ Genuinely unfinished or in flight, stated plainly:
   empty (#188).
 - **The semantic cache runs in shadow.** `AIQG_SEMCACHE_SHADOW=true` on
   `llm-router-aiqg`, so near-miss hits are recorded and scored but not served
-  unless a tenant's own cache configuration opts in. It embeds with Ollama's
-  `all-minilm` at a 0.87 similarity threshold; an August cut-over to a
-  dedicated embedding server found no genuine paraphrase hits and was rolled
-  back by hand, and git now records the rollback (#218).
+  unless a tenant's own cache configuration opts in. Since 2026-09-21 (#222)
+  it embeds with a dedicated Text Embeddings Inference (TEI) server,
+  `tei.tas-shared:8080`, serving `redis/langcache-embed-v3-small`, at a 0.87
+  similarity threshold. An August cut-over to the same model (#146) also
+  raised the threshold to 0.93, found no genuine paraphrase hits, and was
+  rolled back to Ollama's `all-minilm` (#218). A side-by-side measurement on
+  2026-09-20 blamed the threshold, not the model: at 0.87, `all-minilm` scored
+  "Can I cancel" against "Can't I cancel" at 0.9595, a false hit it would
+  serve, while langcache scored the pair 0.7694. So the second cut-over changed
+  only the embedder. 0.87 is still a prediction from 13 hand-written pairs, not
+  a measurement on traffic; on 2026-09-23 every outcome of
+  `llm_router_semcache_lookups_total` on the strict gateway read 0. The pods'
+  startup log still reports `"embed_model":"all-minilm"`; that field feeds only
+  the Ollama path, and TEI serves the one model fixed by its own `--model-id`.
 - **`make build` does not work from a standalone clone.** See
   [Build and test](#build-and-test) — this repository needs three sibling
   repositories on disk.
@@ -175,8 +197,19 @@ publicly, `aiqg.tas.scharber.com` internally), open its Tokens page, and issue
 one. The same thing over HTTP is `/api/v1/account/tokens` on
 `https://api.aiqg.tas.scharber.com`, authenticated with your Keycloak-issued
 JSON Web Token (JWT); the tenant comes from your login, and the plaintext token
-is shown once at creation and never again. Tokens carry the prefix
-`tas_qg_live_`, and the gateway accepts one in any of three headers —
+is shown once at creation and never again. The dashboard signs in against the
+`aether` realm of Keycloak at `keycloak.tas.scharber.com` (client `aiqg-ui`),
+and that realm does not allow self-registration: on 2026-09-23 its
+registration endpoint answered HTTP 400 "Registration not allowed", and the
+dashboard's `/signup` page is a placeholder. A newcomer therefore needs an
+account created for them in that realm before they can issue a token.
+
+> [!UNVERIFIED] Who creates `aether` realm accounts for AIQG users, and how a
+> new account is tied to a tenant, is not recorded in this repository or in the
+> dashboard code checked on 2026-09-23. Ask the platform owner rather than
+> guessing.
+
+Tokens carry the prefix `tas_qg_live_`, and the gateway accepts one in any of three headers —
 `TAS-Auth`, `Authorization: Bearer`, or `x-api-key` — because a stock vendor
 SDK can only populate its own credential slot. All three are lifted onto the
 same path at `internal/middleware/aiqg.go:154`.
@@ -193,7 +226,7 @@ deployment with its whole route table. A TAS service inside the cluster calls
 `http://llm-router.tas-llm-router:8086`, the permissive deployment.
 
 Call it without a token and you get the failure you are most likely to hit
-first (re-run 2026-09-21):
+first (re-run 2026-09-23):
 
 ```bash
 curl -sS -w '\nHTTP %{http_code}\n' https://gateway.air-ops.net/v1/chat/completions \
@@ -237,7 +270,7 @@ router picked.
 
 The cheapest way to prove a real token works is token counting, which the
 gateway answers from Anthropic's free count endpoint, so it bills nothing.
-This call was run on 2026-09-21 with the test token described under
+This call was run on 2026-09-23 with the test token described under
 [Configuration](#configuration):
 
 ```bash
@@ -253,7 +286,8 @@ curl -sS https://gateway.air-ops.net/v1/messages/count_tokens \
 A completion additionally needs a vendor key to bill. Either store your own
 on the dashboard's Provider keys page (`/provider-keys`), or leave the
 account-wide "BYOK-only" box on that page unticked (only a dashboard admin
-sees it), which lets the gateway fall back to the shared TAS key; with no
+sees it — a user holding the `aiqg-admin` realm role, which existing admins
+grant from Settings ▸ Admin), which lets the gateway fall back to the shared TAS key; with no
 stored key and BYOK-only ticked, the completion is refused with the 402
 described above. With that in place, a completion in the
 OpenAI dialect (executed 2026-08-26):
@@ -285,7 +319,7 @@ way to confirm you are talking to the right thing before you have a token.
 They are served only on the internal hosts; on `gateway.air-ops.net` they
 return nginx's 404 page. The internal ingress certificate comes from the
 cluster's own `tas-ca-issuer`, which your machine will not trust, hence `-k`
-(re-run 2026-09-21):
+(re-run 2026-09-23):
 
 ```bash
 curl -sSk https://gateway.aiqg.tas.scharber.com/v1/providers
@@ -313,7 +347,7 @@ flowchart LR
   G -->|validate token, tenant cache config| D[aiqg-dashboard-be]
   G -->|events| K[Kafka tas.aiqg.events.v1]
   G -->|caches, multi-step flow linkage| RD[redis-shared + redis-semcache]
-  G -->|semantic-cache embeddings| O[Ollama all-minilm]
+  G -->|semantic-cache embeddings| O[TEI langcache-embed-v3-small]
 ```
 
 Both deployments listen on container port **8086**, which is also the service
@@ -329,20 +363,20 @@ that fails to load, and no usable provider key — with neither `OPENAI_API_KEY`
 your configuration and API keys`. A failure to initialise the prompt scanner
 (Gatekeeper, a sibling repository compiled in) is logged as a warning and
 leaves scanning disabled; the process keeps serving.
-**Kafka is a hard startup dependency for the images running today, and is not
-at `HEAD`.** In the deployed builds, with `AIQG_EMITTER_TYPE=both`, a broker
-failure while the emitter is constructed aborts server construction and the
-process exits 1, so a pod with no reachable broker crash-loops. Code merged in
-#191 changes that: `internal/server/server.go:201` now falls back to the log
-emitter, raises the `aiqg_emitter_degraded` gauge to 1, and keeps serving —
-a Kafka outage costs telemetry, not availability — but only once a new image
-ships.
+**Kafka is a hard startup dependency for the permissive deployment, and not
+for the strict gateway.** In the `aiqg-v5.75` build that `llm-router` runs,
+with `AIQG_EMITTER_TYPE=both`, a broker failure while the emitter is
+constructed aborts server construction and the process exits 1, so a pod with
+no reachable broker crash-loops. Code merged in #191, which `aiqg-v5.87`
+carries, changes that: `internal/server/server.go:201` falls back to the log
+emitter, raises the `aiqg_emitter_degraded` gauge to 1, and keeps serving — a
+Kafka outage costs `llm-router-aiqg` telemetry, not availability.
 
-> [!UNVERIFIED] The crash-loop behaviour of the running images is inferred,
-> not exercised on 2026-09-21: it is what the code did at `eee4b24`, and the
-> images demonstrably predate that commit (see [Status & scope](#status--scope)).
-> Nobody took Kafka down to watch it happen, and the image-to-commit mapping
-> for `aiqg-v5.75` and `aiqg-v5.86` is not recorded anywhere in this repository.
+> [!UNVERIFIED] Neither behaviour was exercised on 2026-09-23. The crash loop
+> is what the code did at `eee4b24`, which `aiqg-v5.75` demonstrably predates
+> (see [Status & scope](#status--scope)), and that image's commit is not
+> recorded; the fallback is what the code at `e6c24c0` does. Nobody took Kafka
+> down to watch either happen.
 
 Redis is quieter: a running pod tolerates losing it, but the
 `wait-for-redis` init container blocks every *new* pod, so a Redis outage
@@ -372,13 +406,13 @@ These are the ones that change behaviour rather than tune it:
 | `LLM_ROUTER_PORT` | Listen port | `8080` | `8086` on both deployments |
 | `AIQG_ENABLED` | Turns the governance layer on | off | `true` |
 | `AIQG_STRICT` | No token means 401 instead of pass-through | `false` | `true` on `llm-router-aiqg` only |
-| `AIQG_EMITTER_TYPE` | Where priced events go | `log` | `both` — log and Kafka, making Kafka required for the deployed images |
+| `AIQG_EMITTER_TYPE` | Where priced events go | `log` | `both` — log and Kafka, making Kafka required for the permissive deployment's image |
 | `GATEKEEPER_ENABLED` / `GATEKEEPER_FAIL_OPEN` | Prompt scanning, and what happens when the scanner errors | off | `true` / `true` — a scanner failure lets the request through |
 | `AIQG_RESPONSE_CACHE_ENABLED` | Exact-match response cache | off | `true`, `AIQG_RESPONSE_CACHE_TTL=10m` |
 | `AIQG_SEMCACHE_ENABLED` / `AIQG_SEMCACHE_SHADOW` | Semantic cache, and whether it serves or only observes | off / `true` | `true` / `true` — observing, on `llm-router-aiqg` |
-| `AIQG_SEMCACHE_EMBED_PROVIDER` / `AIQG_SEMCACHE_MIN_SIMILARITY` | Embedder and match threshold; the two move together, because each model scores the same pair differently | — | `ollama` / `0.87` |
+| `AIQG_SEMCACHE_EMBED_PROVIDER` / `AIQG_SEMCACHE_MIN_SIMILARITY` | Embedder and match threshold; the two move together, because each model scores the same pair differently | — | `tei` (TEI serving `redis/langcache-embed-v3-small`) / `0.87` |
 | `LLM_ROUTER_DEFAULT_STRATEGY` | Routing when the request does not name a model | `cost_optimized` | `cost_optimized` |
-| `registry.enabled` (YAML only) | Model registry: discovery, aliases, fallback | `false` | off — the baked-in `configs/config.yaml` has no `registry:` block, and the running images predate the code |
+| `registry.enabled` (YAML only) | Model registry: discovery, aliases, fallback | `false` | off — the baked-in `configs/config.yaml` has no `registry:` block; the code runs only in `aiqg-v5.87` |
 
 Secrets are referenced here by location only. Provider keys and the internal
 dashboard token live in the `llm-router-secret` Opaque secret in namespace
