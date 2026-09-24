@@ -127,11 +127,33 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedEmpty).Inc()
 		return // tool-call-only / empty — nothing semantic to judge
 	}
-	workflow, expID, variant := "", "", ""
+	// vendor/model are the JOIN KEY, not decoration. Judge scores are stored by
+	// aiqg-dashboard-be in the config Postgres; the (model, workflow) a response
+	// belongs to lives in aiqg.event_metrics on TimescaleDB. Those are separate
+	// servers, so no cross-database join exists and the judged row has to carry
+	// the model itself or it can never be aggregated per candidate.
+	//
+	// Taken from the routing snapshot rather than resp.Model because
+	// event_metrics.model is written from exactly this field
+	// (pkg/aiqg/events/builder.go:711). A different source would join on a
+	// value that usually matches, which is worse than one that never does.
+	workflow, expID, variant, vendor, model := "", "", "", "", ""
 	if r := middleware.RoutingFromContext(ctx); r != nil {
 		snap := r.Snapshot()
 		workflow, expID, variant = snap.Workflow, snap.ExperimentID, snap.ExperimentVariant
+		vendor, model = snap.Vendor, snap.Model
 	}
+	// The judge grading its own output. pkg/aiqg/judge's package doc says the
+	// caller enforces this ("the judge model MUST differ from the model that
+	// produced the response") and no caller ever did — measured 2026-09-24,
+	// 179 of 464 judged rows were self-graded, because AIQG_JUDGE_MODEL is set
+	// to the model this tenant serves most.
+	//
+	// Recorded rather than skipped. The score is still worth having on a
+	// dashboard, and the routing aggregate is where the conflict of interest
+	// actually bites: a candidate that grades itself would be voting on its own
+	// eligibility. dashboard-be excludes these from efficacy_judged.
+	selfJudged := model != "" && model == jr.judge.Model
 	promptText := promptFromMessages(req)
 	tenantID := tok.TenantID
 
@@ -174,7 +196,8 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 			}
 			// The gateway knows the experiment/variant (routing snapshot), so
 			// the score carries its own attribution — no event re-resolution.
-			if err := jr.recorder.record(jctx, tenantID, eventID, expID, variant, score); err != nil {
+			if err := jr.recorder.record(jctx, tenantID, eventID, expID, variant,
+				gradedSubject{Vendor: vendor, Model: model, JudgeModel: jr.judge.Model, SelfJudged: selfJudged}, score); err != nil {
 				jr.log.WithError(err).Debug("aiqg judge: record failed")
 			}
 		}()
@@ -506,8 +529,25 @@ type judgeRecorder struct {
 	auth    string
 }
 
+// gradedSubject is the provenance of one judged score: what was graded, and by
+// whom.
+//
+// Vendor/Model are the join key (see maybeJudge). JudgeModel is what makes a
+// grader swap measurable: judge.RubricVersion versions the RUBRIC, not the
+// grader, so two models scoring under "v1" produce rows that look comparable
+// and are not. Without the grader on the row there is no way to compare across
+// a swap, re-score an old window, or show that a replacement judge beat the one
+// it replaced — and that comparison cannot be reconstructed later, because
+// nothing else records which model did the grading.
+type gradedSubject struct {
+	Vendor     string
+	Model      string
+	JudgeModel string
+	SelfJudged bool
+}
+
 // record posts a pointwise judge score (signal_type=judge, value=overall).
-func (jr *judgeRecorder) record(ctx context.Context, tenantID, eventID, experimentID, variant string, s judge.Score) error {
+func (jr *judgeRecorder) record(ctx context.Context, tenantID, eventID, experimentID, variant string, g gradedSubject, s judge.Score) error {
 	return jr.post(ctx, map[string]any{
 		"signal_type":        "judge",
 		"tenant_id":          tenantID,
@@ -518,6 +558,10 @@ func (jr *judgeRecorder) record(ctx context.Context, tenantID, eventID, experime
 		"overall":            s.Overall,
 		"dimensions":         s.Dimensions,
 		"rubric_version":     s.RubricVersion,
+		"vendor":             g.Vendor,
+		"model":              g.Model,
+		"judge_model":        g.JudgeModel,
+		"self_judged":        g.SelfJudged,
 	})
 }
 
