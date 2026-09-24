@@ -196,9 +196,10 @@ Two of those rows surprise people — the third and the fourth.
 **`Streaming failed` is free, and that is provable rather than likely.** The
 Anthropic adapter's only error return happens while converting your request,
 before anything is sent (`internal/providers/anthropic/provider.go:141-147`). The
-OpenAI adapter's only error return is the stream-open call itself
-(`internal/providers/openai/provider.go:159-163`), which fails at connect or on
-the vendor's HTTP rejection — in both cases before generation starts. Neither can
+OpenAI adapter returns an error in two places — the same request conversion, and
+the stream-open call itself (`internal/providers/openai/provider.go:159-163`),
+which fails at connect or on the vendor's HTTP rejection. Both are before
+generation starts. Neither can
 return this error once tokens are flowing; once they are, you have a `200` and
 the row below applies.
 
