@@ -101,7 +101,9 @@ per-model, per-workflow mean of judge grades on a 0–100 scale
 judged-efficacy query treats a grade with no model or no flag as
 unattributable and skips it (`aiqg-dashboard-be/internal/store/quality.go:200`),
 so until this reaches an image, judge grades reach the dashboard but add
-nothing to judged efficacy. What is in the image but
+nothing to judged efficacy. Neither does anything else: the dashboard build
+carrying that query is not deployed either, and its columns do not yet exist
+(see the note below). What is in the image but
 not active there is switched off by configuration, not absent: the model
 registry, and the serving of semantic-cache hits (shadow mode), both below. The permissive deployment is still
 on `aiqg-v5.75`, which predates `b6070a0`, the `/metrics` rebuild that landed
@@ -127,8 +129,17 @@ allowlists (SEC-1, SEC-23), password authentication to both Redis instances
 > that response events are stamped `gateway_version e6c24c0`; that stamp was
 > not re-checked on 2026-09-23.
 
-> [!UNVERIFIED] Whether the `aiqg-dashboard-be` build carrying the
-> judged-efficacy query cited above is deployed was not checked on 2026-09-24.
+> **Neither side of judged efficacy is deployed** (checked 2026-09-25).
+> `aiqg-dashboard-be` runs `0.4.0-rc85`, rolled out on 2026-09-17, a week
+> before #165 merged — so the query cited above is on `main` and in no running
+> image. Its migration has not run either: `aiqg.model_quality` still has
+> eight columns, with `efficacy_judged`, `efficacy_judged_coverage` and
+> `judged_samples` absent, and `aiqg.schema_migrations` tops out at **34**
+> against the `035` that adds them. So the gap is wider than the gateway:
+> judged efficacy is not merely unfed, it has nowhere to be stored, and no
+> quality gate can read it. Both sides need a build and a deploy — the
+> `registry-api`-versus-`ghcr` split in OPS-42 is why that does not follow
+> from a merge.
 
 Three subsystems that older copies of this file listed as unstarted are
 running in production and have been for months: request and cost telemetry
