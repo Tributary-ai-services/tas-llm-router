@@ -13,7 +13,7 @@ answers:
   - "Which settings change behaviour, and where do the secrets live?"
   - "How much of what is merged on main is actually running in production?"
   - "What is the model registry, and is it switched on?"
-verified_against: "tas-llm-router@06038b9, 2026-09-23"
+verified_against: "tas-llm-router@dc1957b, 2026-09-24"
 depth: standard
 ---
 
@@ -26,7 +26,9 @@ customer-facing deployment is literally named `llm-router-aiqg`, and every
 governance behaviour below — token authentication, prompt scanning, spend
 attribution, event emission — happens on the way through it.
 
-> **Verified 2026-09-23 against `tas-llm-router@06038b9`**, with read-only
+> **Verified 2026-09-23 against `tas-llm-router@06038b9`, and re-checked
+> 2026-09-24 against `tas-llm-router@dc1957b`** (code diff plus both
+> deployments' live image tags; the probes were not re-run), with read-only
 > probes against both live deployments (`/v1/providers`, `/v1/models`,
 > `/metrics`, the registry admin routes), the deployments' live image and
 > environment, and one authenticated, non-billing call through
@@ -82,11 +84,26 @@ cluster or on the cluster's network.
 
 **The two deployments run very different code.** The strict gateway has run
 `aiqg-v5.87` since 2026-09-21 (#223), which that release commit records as
-built from `main` at `e6c24c0` — 33 commits past `aiqg-v5.86`. The only
-commits on `main` after `e6c24c0`, up to `06038b9`, are that release commit
-(#223, a one-line image-tag change in `k8s/deployment-aiqg-strict.yaml`) and
-two documentation refreshes (#221, #230) that touch only Markdown, so no Go
-code on `main` is missing from the strict gateway. What is in the image but
+built from `main` at `e6c24c0` — 33 commits past `aiqg-v5.86`. Of the
+commits on `main` after `e6c24c0`, up to `dc1957b`, all but one are that
+release commit (#223, a one-line image-tag change in
+`k8s/deployment-aiqg-strict.yaml`) and documentation refreshes that touch only
+Markdown (#221, #230, #232). The exception is #233, and it is the only Go code
+on `main` that the strict gateway does not run. It concerns the judge, a
+second model that grades a sample of responses and posts each grade to
+`aiqg-dashboard-be`. Those grades now carry which vendor and model were
+graded, which model graded them, and a `self_judged` flag set when the two
+models are the same (`internal/server/judge.go:156`). Self-judged grades are
+still recorded, but the dashboard leaves them out of judged efficacy, its
+per-model, per-workflow mean of judge grades on a 0–100 scale
+(`aiqg-dashboard-be/internal/store/quality.go:194`). On 2026-09-24 `llm-router-aiqg` was still on
+`aiqg-v5.87`, so grades it posts today carry none of these fields — and the
+judged-efficacy query treats a grade with no model or no flag as
+unattributable and skips it (`aiqg-dashboard-be/internal/store/quality.go:200`),
+so until this reaches an image, judge grades reach the dashboard but add
+nothing to judged efficacy. Neither does anything else: the dashboard build
+carrying that query is not deployed either, and its columns do not yet exist
+(see the note below). What is in the image but
 not active there is switched off by configuration, not absent: the model
 registry, and the serving of semantic-cache hits (shadow mode), both below. The permissive deployment is still
 on `aiqg-v5.75`, which predates `b6070a0`, the `/metrics` rebuild that landed
@@ -111,6 +128,18 @@ allowlists (SEC-1, SEC-23), password authentication to both Redis instances
 > for `aiqg-v5.87` comes from the release commit (#223), which also reports
 > that response events are stamped `gateway_version e6c24c0`; that stamp was
 > not re-checked on 2026-09-23.
+
+> **Neither side of judged efficacy is deployed** (checked 2026-09-25).
+> `aiqg-dashboard-be` runs `0.4.0-rc85`, rolled out on 2026-09-17, a week
+> before #165 merged — so the query cited above is on `main` and in no running
+> image. Its migration has not run either: `aiqg.model_quality` still has
+> eight columns, with `efficacy_judged`, `efficacy_judged_coverage` and
+> `judged_samples` absent, and `aiqg.schema_migrations` tops out at **34**
+> against the `035` that adds them. So the gap is wider than the gateway:
+> judged efficacy is not merely unfed, it has nowhere to be stored, and no
+> quality gate can read it. Both sides need a build and a deploy — the
+> `registry-api`-versus-`ghcr` split in OPS-42 is why that does not follow
+> from a merge.
 
 Three subsystems that older copies of this file listed as unstarted are
 running in production and have been for months: request and cost telemetry

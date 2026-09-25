@@ -14,8 +14,8 @@ answers:
   - "How do I retry a failed request without paying for the generation twice?"
   - "Can this gateway substitute a different model for the one I named?"
 depth: deep
-verified_against: "tas-llm-router@e574173 (code), 2026-09-23"
-captures: "INHERITED, not re-taken. This refresh is code-only: no request was sent to any gateway for it. Every live capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). The gateway now runs image aiqg-v5.87, which its events stamp as commit e6c24c0; e6c24c0 is byte-identical to e574173 across routing, server, middleware, providers and config, so the code described here IS the deployed code, while the captures remain from the older build."
+verified_against: "tas-llm-router@dc1957b (code), 2026-09-24"
+captures: "INHERITED, not re-taken. This refresh is code-only: no request was sent to any gateway for it. Every live capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). The gateway still runs image aiqg-v5.87 (Deployment re-read 2026-09-24), which its events stamp as commit e6c24c0; e6c24c0 differs from dc1957b across routing, server, middleware, providers and config only in internal/server/judge.go (judge score provenance, not yet deployed), so every routing behaviour described here IS the deployed code, while the captures remain from the older build."
 ---
 
 # Routing in the TAS LLM Router
@@ -41,8 +41,10 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > and whether you can reach it is a question the forensics section settles.
 >
 > **Two commits, and how far apart they now are.** Every line citation in this
-> document is against `tas-llm-router@e574173`, re-checked line by line for this
-> refresh. Every live capture was taken on 2026-08-27 from the deployed strict
+> document is against `tas-llm-router@dc1957b` (2026-09-24). The only code change
+> since the previous refresh at `e574173` is in `internal/server/judge.go`, which
+> no citation in the routing and server paths below points into, so those
+> citations carry over unchanged. Every live capture was taken on 2026-08-27 from the deployed strict
 > gateway `gateway.aiqg.tas.scharber.com` (deployment `llm-router-aiqg` in
 > namespace `tas-llm-router`, image tag `aiqg-v5.86`), whose events stamp
 > `gateway_version: 39e8d77`. **No capture in this document was re-taken for this
@@ -71,13 +73,16 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > value. `e6c24c0` is `feat(semcache): switch to TEI + langcache-embed-v3-small,
 > keeping 0.87 (#222)`, dated 2026-09-21 — a change to the embedding service
 > behind the semantic response cache, text-embeddings-inference (TEI), which
-> touches no routing code at all. It is an ancestor of `e574173`, behind
-> by two commits: the documentation refresh this text belongs to, and the release
-> commit that recorded the tag.
+> touches no routing code at all. It is an ancestor of `dc1957b`, behind
+> by five commits: the release commit that recorded the tag, three documentation
+> refreshes, and `dc1957b` itself, which changes what the quality judge records
+> (see "Efficacy" below). The Deployment still named `aiqg-v5.87` when re-read on
+> 2026-09-24, so that judge change is merged but not running.
 >
 > That resolution settles the question this document would otherwise leave open.
-> `git diff e6c24c0..e574173` across `internal/routing`, `internal/server`,
-> `internal/middleware`, `internal/providers` and `internal/config` is **empty** —
+> `git diff e6c24c0..dc1957b` across `internal/routing`, `internal/server`,
+> `internal/middleware`, `internal/providers` and `internal/config` touches only
+> `internal/server/judge.go` and its test —
 > `router.go` and `server.go` are byte-identical between the running build and
 > the source cited here. So every behaviour described below, including the three
 > that arrived in September (the pin-versus-model check, the registry hook, and
@@ -296,13 +301,13 @@ through `gateway.aiqg.tas.scharber.com` on 2026-08-27 and the outcome was read
 from the response, the log, or the event — or, for the gateway-configuration
 rows, that the running Deployment and ConfigMap were read directly rather than
 inferred from a manifest in the repository. *Source* means it was read from the
-code at `e574173` and no live traffic exercised it. That distinction earns its
+code at `dc1957b` and no live traffic exercised it. That distinction earns its
 place here: this same document found four configuration knobs that parse cleanly,
 validate at startup, and change nothing, so "the code says so" is weaker evidence
 than it looks.
 
-**No *Observed* row below was re-observed for the 2026-09-23 refresh**, which was
-code-only. Each was re-checked a weaker way instead: the code path it rests on
+**No *Observed* row below was re-observed for the 2026-09-23 or 2026-09-24
+refreshes**, both code-only. Each was re-checked a weaker way instead: the code path it rests on
 was compared against the build that produced it, and none of those paths has lost
 a line. The gateway-configuration rows are the exception — those were re-read
 from the live `llm-router-aiqg` Deployment and the `llm-router-config` ConfigMap
@@ -332,6 +337,39 @@ for how well a model and workflow pair has been answering; a rule sets a minimum
 scanning has found for that pair, and a rule sets the highest severity it will
 still accept. Both are defined against the model-and-workflow pair, never against
 a vendor.
+
+Efficacy comes in two forms, and a rule can floor each separately. *Structural*
+efficacy is read from how the vendor said the answer ended, so it sees
+truncation and filtering but not a wrong answer. *Judged* efficacy is the mean
+score a second model — the judge — gave a sample of responses, and it has its
+own floor (`aether-shared/go-aiqg-resilience/signals.go:122-135`). That floor
+only acts once the model-and-workflow pair has enough *judged* samples, counted
+separately from its structural ones: the rule's `min_samples`, or 200 if the rule
+sets none (`aether-shared/go-aiqg-resilience/signals.go:155`,
+`aether-shared/go-aiqg-resilience/signals.go:176-181`). Below that count the
+gate does not guess. By default it **admits** the candidate and records a reason
+beginning "judged efficacy gate abstained"; only a rule that sets
+`on_insufficient_data: exclude` removes it instead
+(`aether-shared/go-aiqg-resilience/signals.go:303-318`).
+
+One consequence of the judged form is worth knowing before you set that floor.
+When the judge model is the same model that served the response, the score is
+still recorded but marked `self_judged` (`internal/server/judge.go:156`), and
+the aggregate that routing reads leaves those scores out — as it does any score
+that does not carry the flag at all
+(`aiqg-dashboard-be/internal/store/quality.go:182-200`). So a model never votes
+on its own eligibility. The cost is evidence: if your judge is the model you
+serve most, most of that model's judged samples do not count, and a judged floor
+on it is more likely to sit below the sample count and admit it by default than
+to test it. The provenance flag arrived in `dc1957b`, after the build the
+gateway runs (`aiqg-v5.87`), so today's judged scores are written without it.
+`[!UNVERIFIED]` Whether the deployed dashboard already applies the exclusion was
+not checked. If it does, every judged score written until a release that sets
+the flag is deployed counts as self-judged, so no model has judged evidence, and
+every judged floor admits every candidate by default until new scores
+accumulate. Under `on_insufficient_data: exclude` it would reject them all, and
+the routing gate then yields and keeps the whole set rather than fail the request
+(`internal/routing/signals.go:76-110`), so the outcome is the same.
 
 **Verbosity** is how long a model's answers tend to be — specifically the mean
 number of output tokens it produces for a given workflow, measured from past
@@ -382,7 +420,7 @@ and a row marked *Observed* describes what an older build did on one day.
 | Rule fallback chain | Does not run — the walk has no reachable caller, for any tenant | Gateway | Observed (absent) |
 | Rule selection `expected_cost` | Runs and abstains, picking what the price table would have picked. Whether it runs at all depends on your rule; that it abstains depends on the measurement floor, which is gateway-wide | Tenant (runs) / Gateway (abstains) | Observed |
 | Rule selection `weighted` | Splits traffic by relative weights, hashing the conversation identity so a conversation stays put. Whether configuring it changes anything is untested | Tenant | Source |
-| Rule quality gates | Remove candidates below an efficacy floor or above an assurance severity, before pricing, and yield rather than empty the set. Whether configuring them changes anything is untested | Tenant | Source |
+| Rule quality gates | Remove candidates below an efficacy floor (structural, judged, or both) or above an assurance severity, before pricing, and yield rather than empty the set. Whether configuring them changes anything is untested | Tenant | Source |
 | Rule context / output limits | Do not run — same unreachable branch as the chain, for any tenant | Gateway | Observed (absent) |
 | Image content in a request | No vendor advertises vision any more, so a request that mixes image parts with tools or an explicit `required_features` has an empty candidate set and fails routing. Image parts on a plain request are dropped by the translator instead | Gateway | Source |
 
@@ -421,11 +459,11 @@ gains a breaker or affinity line only when one of them actually moved a decision
 
 **Facts about the code that no configuration can change**
 
-Rows marked *Source* here are current as of `e574173`, which for these files is
+Rows marked *Source* here are current as of `dc1957b`, which for these files is
 the same code the gateway is running. Rows marked *Observed* are from the
 2026-08-27 captures against image `aiqg-v5.86`.
 
-| Fact | Consequence | Evidence (Source = `e574173`; Observed = 2026-08-27, `v5.86`) |
+| Fact | Consequence | Evidence (Source = `dc1957b`; Observed = 2026-08-27, `v5.86`) |
 |---|---|---|
 | `completeWithFallback` has no reachable caller | The rule chain, pre-flight context check, tenant output cap, and served-affinity recording all never run | Source (call graph) confirmed by Observed: an over-window prompt that the pre-flight check would have caught was forwarded to the vendor and returned 200 |
 | `round_robin` is unreachable | Nothing can select it; it is not an option | Source. `determineStrategy` returns only the other three and no other caller sets it; no configuration path reaches the constant |
@@ -1073,8 +1111,8 @@ the fact.
 > [!UNVERIFIED] Whether this is a regression or a staged rollout is still not
 > recorded. The chain landed in `626060d` ("walk the fallback chain;
 > `provider_override` becomes a real pin"), and no commit message, code comment,
-> or issue found at `e574173` explains why the retry-variant handlers were left
-> calling the older path. Re-checked on this refresh: 86 commits later the call
+> or issue found at `dc1957b` explains why the retry-variant handlers were left
+> calling the older path. Re-checked on this refresh: 89 commits after `39e8d77` the call
 > graph is unchanged and nothing has been written down about it. Confirm with the
 > service owner before relying on a configured chain.
 
@@ -1085,7 +1123,7 @@ One request, followed hop by hop with the values it actually produced. Sent on
 no-store` bypasses the response cache so the routing path runs rather than a
 cached answer being replayed.
 
-**These values were not re-captured for the 2026-09-23 refresh.** They are the
+**These values were not re-captured for the 2026-09-23 or 2026-09-24 refreshes.** They are the
 original capture, against image `aiqg-v5.86`; the Deployment now names
 `aiqg-v5.87`, whose code is byte-identical to the source cited here. Every hop
 below was re-read against that source and none of the code it describes has
@@ -1721,7 +1759,8 @@ conversation. The weakest input to a routing decision.
 **Assurance** — one of the two quality dimensions a gate can read. Not a score: it
 is the worst content-scan finding severity observed for that model and workflow,
 and a floor sets the highest severity still allowed
-(`aether-shared/go-aiqg-resilience/signals.go:260-265`).
+(`aether-shared/go-aiqg-resilience/signals.go:136-138`,
+`aether-shared/go-aiqg-resilience/signals.go:255-256`).
 
 **Breaker (passive outlier detection)** — ejects a vendor whose real requests are
 failing, independently of the active health probe. Off by default on this
@@ -1749,11 +1788,14 @@ in shared Redis so all replicas agree.
 
 **Efficacy** — the other quality dimension a gate can read: a 0–100 score for a
 model and workflow, against which a rule sets a minimum
-(`aether-shared/go-aiqg-resilience/signals.go:256-259`). Scored from how a
+(`aether-shared/go-aiqg-resilience/signals.go:114-121`). Scored from how a
 response ended: a clean stop or a tool call is 100, a length cut-off 60, and a
 content-filter block or a stream that died mid-answer 0
 (`pkg/clear/efficacy.go:38-47`). The broken-stream case was added in 2026-09; a
-truncated stream used to score as a clean completion.
+truncated stream used to score as a clean completion. That is *structural*
+efficacy; *judged* efficacy, a sampled score from a second model, has its own
+floor and leaves out scores a model gave its own responses — see the definition
+near the top.
 
 **Hysteresis** — resistance to changing a decision that is already made. Here it
 means the extra margin an alternative vendor must beat before `expected_cost` is
