@@ -68,7 +68,7 @@ spec:
 
       containers:
       - name: llm-router
-        image: llm-router:aiqg-v5.87
+        image: llm-router:aiqg-v5.88
         imagePullPolicy: Always
         ports:
         - containerPort: 8086
