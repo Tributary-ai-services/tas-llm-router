@@ -270,6 +270,15 @@ type ResponseEvent struct {
 	ChunkCount        int  `json:"chunk_count"`
 	ContentChunkCount int  `json:"content_chunk_count"`
 
+	// Efficacy sub-metric applicability (Plan #17a Tier 2, Phase 0a): did the
+	// caller ask for a response schema, or declare a toolset. Pointers because
+	// "declared nothing" and "never observed" are different facts and the
+	// applicability RATE is what these exist to measure — a false that was
+	// never looked for would bias it downward. Both omitted together when the
+	// routing sidecar was never stamped.
+	SchemaRequested *bool `json:"schema_requested,omitempty"`
+	ToolsDeclared   *bool `json:"tools_declared,omitempty"`
+
 	// Embedded timing block — see event-timestamps.md
 	EventTimestamps instrumentation.Snapshot `json:"event_timestamps"`
 

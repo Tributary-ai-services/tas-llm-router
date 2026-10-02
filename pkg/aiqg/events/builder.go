@@ -74,16 +74,23 @@ type RoutingView struct {
 	// breakpoints that actually reached the vendor.
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
-	AffinityHeld           bool
-	AffinityEpoch          string
-	AffinityReason         string
-	EnforcementMode        string
-	EnforcementOutcome     string
-	EnforcementPatterns    []string
-	Findings               []Finding
-	FindingsTruncated      int
-	SignalsExcluded        []ExcludedCandidate
-	SignalsNote            string
+
+	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
+	// ApplicabilitySet=false means the sidecar was never stamped, and both
+	// flags are then omitted from the event rather than emitted as false.
+	SchemaRequested     bool
+	ToolsDeclared       bool
+	ApplicabilitySet    bool
+	AffinityHeld        bool
+	AffinityEpoch       string
+	AffinityReason      string
+	EnforcementMode     string
+	EnforcementOutcome  string
+	EnforcementPatterns []string
+	Findings            []Finding
+	FindingsTruncated   int
+	SignalsExcluded     []ExcludedCandidate
+	SignalsNote         string
 
 	// Token usage from the vendor response (stamped by handlers via
 	// middleware.StampTokenUsage). UsageSet distinguishes "vendor
@@ -736,6 +743,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Streamed:                   snap.ChunkCount > 0,
 		ChunkCount:                 snap.ChunkCount,
 		ContentChunkCount:          snap.ContentChunkCount,
+		SchemaRequested:            boolPtrIf(routing.ApplicabilitySet, routing.SchemaRequested),
+		ToolsDeclared:              boolPtrIf(routing.ApplicabilitySet, routing.ToolsDeclared),
 		EventTimestamps:            snap,
 		TokenAccounting:            tokenAcct,
 		Assurance:                  assuranceSummary,
@@ -827,6 +836,17 @@ func clientIP(r *http.Request) string {
 // populate AssuranceSummary.InboundCount / OutboundCount so dashboards
 // have a concrete number to aggregate even on clean scans (where the
 // per-severity maps would be stripped by omitempty).
+// boolPtrIf returns &v when the value was actually observed, and nil when it
+// was not. Keeps "false" and "never looked" distinguishable on the wire, which
+// is the §6.3 "nil is a value" discipline applied to a boolean: an omitted
+// field is unknown, a present false is a measurement.
+func boolPtrIf(observed, v bool) *bool {
+	if !observed {
+		return nil
+	}
+	return &v
+}
+
 func sumCounts(m map[string]int) int {
 	total := 0
 	for _, v := range m {

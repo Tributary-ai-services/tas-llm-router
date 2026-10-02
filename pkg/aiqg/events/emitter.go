@@ -283,6 +283,16 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 			respFields["clear_composite"] = *c.Composite
 		}
 	}
+	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a) — promoted so
+	// the applicability RATE is a LogQL aggregation rather than a JSONB scan.
+	// Omitted when never observed, so `count without(...)` over these fields
+	// measures declared-vs-not and never counts unobserved requests as "no".
+	if v := resp.Data.SchemaRequested; v != nil {
+		respFields["schema_requested"] = *v
+	}
+	if v := resp.Data.ToolsDeclared; v != nil {
+		respFields["tools_declared"] = *v
+	}
 	// Assurance summary — counts always emit, worst severity when set.
 	if a := resp.Data.Assurance; a != nil {
 		respFields["assurance_inbound_count"] = a.InboundCount

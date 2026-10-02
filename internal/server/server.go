@@ -1180,6 +1180,11 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	middleware.StampModel(r.Context(), req.Model)
 	middleware.StampStreaming(r.Context(), req.Stream)
 	middleware.StampWorkflow(r.Context(), wf)
+	// AIQG (Plan #17a T2 Phase 0a): whether this request asked for anything a
+	// body-derived Efficacy sub-metric could check. Stamped here, after any
+	// experiment override, so it describes the config actually served.
+	middleware.StampEfficacyApplicability(r.Context(),
+		req.ResponseFormat != nil, len(req.Tools) > 0)
 	// AIQG (linked tier): tool_call_ids this request echoes (role=tool) so
 	// the middleware can prove which flow/step it continues.
 	middleware.StampEchoedToolCalls(r.Context(), echoedToolCallIDs(&req))

@@ -57,6 +57,20 @@ type Routing struct {
 	promptCacheBreakpoints int
 	finishReason           string
 
+	// Efficacy sub-metric APPLICABILITY (Plan #17a Tier 2, Phase 0a). Not
+	// scores — just whether the caller asked for something a body-derived
+	// sub-metric could check: a response schema (structural validity) or a
+	// toolset (tool validity).
+	//
+	// applicabilitySet is the tri-state flag, and it is the point of the
+	// exercise. "The caller declared no schema" and "we never looked" are
+	// different facts, and conflating them would corrupt the one number this
+	// stamp exists to collect — the share of real traffic a sub-metric can
+	// apply to at all. Same discipline as streamSet / usageSet / retrySet.
+	schemaRequested  bool
+	toolsDeclared    bool
+	applicabilitySet bool
+
 	// BYOK credential attribution (Plan #14): which key served the vendor
 	// call — "upstream_header" | "stored" | "tas_shared" — and the stored
 	// credential id (empty unless credentialSource=="stored"). Never the key.
@@ -198,6 +212,13 @@ type RoutingSnapshot struct {
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
 
+	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
+	// ApplicabilitySet=false means never stamped — the event omits both flags
+	// rather than publishing a false that was never observed.
+	SchemaRequested  bool
+	ToolsDeclared    bool
+	ApplicabilitySet bool
+
 	// Affinity outcome: whether it held, which epoch, and why not when it did
 	// not.
 	AffinityHeld         bool
@@ -310,6 +331,9 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		AffinityReason:             r.affinityReason,
 		PromptCacheMode:            r.promptCacheMode,
 		PromptCacheBreakpoints:     r.promptCacheBreakpoints,
+		SchemaRequested:            r.schemaRequested,
+		ToolsDeclared:              r.toolsDeclared,
+		ApplicabilitySet:           r.applicabilitySet,
 		CredentialSource:           r.credentialSource,
 		CredentialID:               r.credentialID,
 		AttemptCount:               r.attemptCount,
@@ -850,6 +874,34 @@ func StampFinishReason(ctx context.Context, reason string) {
 	if r.finishReason == "" {
 		r.finishReason = reason
 	}
+}
+
+// StampEfficacyApplicability records whether this request asked for anything a
+// body-derived Efficacy sub-metric could check (Plan #17a Tier 2, Phase 0a):
+// schemaRequested when the caller set response_format (optionally with a
+// json_schema), toolsDeclared when it declared a toolset.
+//
+// Measurement only — no body is read and nothing is scored. It exists because
+// a sub-metric that can never apply is worth nothing however well it
+// discriminates, and nothing in the event today records whether a schema was
+// ever asked for. The flags also become the denominators for per-sub-metric
+// coverage, so a cell measured over schema-declaring traffic is never silently
+// compared against one that never asked.
+//
+// Unlike the other stampers this is NOT first-write-wins: it is called once
+// per request, after any experiment override has been applied, so the flags
+// describe the config that was actually served. A second call overwrites,
+// which is the correct behaviour if a later layer rewrites the request shape.
+func StampEfficacyApplicability(ctx context.Context, schemaRequested, toolsDeclared bool) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.schemaRequested = schemaRequested
+	r.toolsDeclared = toolsDeclared
+	r.applicabilitySet = true
 }
 
 // StampRetryMetadata records the routing layer's per-request retry
