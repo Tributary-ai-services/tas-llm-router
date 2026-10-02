@@ -14,48 +14,56 @@ answers:
   - "Why is it designed this way rather than the obvious alternative?"
   - "Can the gateway run a different model from the one I named, and how would I know?"
 depth: deep
-verified_against: "tas-llm-router@43fc830, 2026-10-02"
+verified_against: "tas-llm-router@db5ae56, 2026-10-02"
 ---
 
 # LLM Router — Developer Guide
 
-> **Verified against `tas-llm-router@43fc830` on 2026-10-02** (previous
-> verifications: `dc1957b`, 2026-09-24; `552d869`, 2026-09-21; `eee4b24`,
-> 2026-08-25). The only code change since `dc1957b` is that the AIQG event now
-> records whether a request asked for a response schema or declared tools (#236),
-> described under "Evaluation calls about your traffic can bill your key"; it
-> changes no response a caller sees. Citations into `internal/server/server.go`
-> and `internal/middleware/aiqg.go` were re-pointed for the lines it shifted. The
-> change before that, since `552d869`, is the judge's score provenance (#233),
-> described in the same place. Wire behaviour and the model catalogue
+> **Verified against `tas-llm-router@db5ae56` on 2026-10-02** (previous
+> verifications: `43fc830`, 2026-10-02; `dc1957b`, 2026-09-24; `552d869`,
+> 2026-09-21; `eee4b24`, 2026-08-25). The only code change since `43fc830` is
+> that streamed responses are now buffered and can be scored by the LLM judge (a
+> second model the gateway calls to grade a sample of responses for quality)
+> (#238), described under "Evaluation calls about your traffic can bill your
+> key"; it changes no byte a caller receives. Citations into
+> `internal/server/server.go`, `internal/server/judge.go`,
+> `internal/config/config.go`, and `pkg/aiqg/metrics/metrics.go` were re-pointed
+> for the lines it shifted. Before that, `43fc830` made the AI Quality Gateway
+> (AIQG) event — the per-request record this gateway emits — record
+> whether a request asked for a response schema or declared tools (#236), and
+> `dc1957b` added the judge's score provenance (#233), both described in the
+> same place. Wire behaviour and the model catalogue
 > were first captured from live probes against `gateway.aiqg.tas.scharber.com`
 > on 2026-08-24 and 2026-08-25; the authentication rejections, the `415`, the
 > read surfaces, and `/metrics` were re-probed on 2026-09-21. Responses shown are
-> real captures. Where a behaviour was read from source rather than observed, it
-> says so.
+> real captures unless marked otherwise; the authenticated completion under
+> "Getting started" is the exception and says so. Where a behaviour was read
+> from source rather than observed, it says so.
 >
 > **History, as of 2026-09-21 (superseded for `llm-router-aiqg` by the update
 > below): the code and the cluster had diverged.**
 > On 2026-09-21 `kubectl get deploy -n tas-llm-router` still showed
 > `llm-router-aiqg` on image `aiqg-v5.86` and `llm-router` on `aiqg-v5.75` — the
 > same tags as on 2026-08-25 — and both still served the old hand-rolled
-> `/metrics` exporter, which was removed at `b6070a0`. Because `b6070a0` is an
+> `/metrics` exporter (the code that publishes the Prometheus series on
+> `/metrics`), which was removed at `b6070a0`. Because `b6070a0` is an
 > ancestor of `eee4b24`, **nothing committed between `eee4b24` and `552d869` is
 > running in the cluster**: not the model registry (an optional component that
 > can rewrite the model name you send), not the in-band streaming errors (an
 > error event sent inside a stream that has already started), not the corrected
 > vision flag, not the fail-closed token check (rejecting every token when the
 > gateway has no way to look tokens up). Each is defined properly below.
-> Sections that describe such behaviour say **committed, not yet deployed**.
-> Treat them as the contract you will get after the next rollout, and the
-> live probes quoted beside them as the contract you get today.
+> Sections that describe such behaviour said **committed, not yet deployed**
+> at the time. As of 2026-10-02 those labels read "on `llm-router-aiqg` from
+> `aiqg-v5.87`", because every one of those commits is contained in that
+> image's recorded build commit (below); none of it is on `llm-router`.
 >
 > **Update 2026-09-24: that rollout has happened for the customer-facing
 > gateway.** `kubectl get deploy -n tas-llm-router` now shows `llm-router-aiqg`
 > on `aiqg-v5.87` (`llm-router` is still on `aiqg-v5.75`). The release commit
 > `c89bd2c` (#223) records `aiqg-v5.87` as built from `e6c24c0`, which contains
-> `552d869`, so everything labelled **committed, not yet deployed** below should
-> now be live on `gateway.aiqg.tas.scharber.com` but not on the internal
+> `552d869`, so everything formerly labelled **committed, not yet deployed**
+> should now be live on `gateway.aiqg.tas.scharber.com` but not on the internal
 > `llm-router`. The exporter probe under failure modes agrees on both hosts:
 > on 2026-09-24 `gateway.aiqg.tas.scharber.com/metrics` had no
 > `llm_router_security_score` and did expose `llm_router_request_duration_seconds`
@@ -69,14 +77,29 @@ verified_against: "tas-llm-router@43fc830, 2026-10-02"
 > Commit `610dc8c` (#235) pins `aiqg-v5.88` in
 > `k8s/deployment-aiqg-strict.yaml:71` and records it as built from `dc2fe59`,
 > which contains `dc1957b`, so the judge provenance (#233) is now live on
-> `gateway.aiqg.tas.scharber.com`. The schema/tools applicability flags (#236)
-> came after `dc2fe59` and are not deployed anywhere.
+> `gateway.aiqg.tas.scharber.com`.
 >
-> [!UNVERIFIED] Apart from those `/metrics` checks, the "committed, not yet
-> deployed" sections and the live captures quoted beside them were not re-probed
-> after `aiqg-v5.87` rolled out. The labels and captures below are still the
-> 2026-09-21 text. Re-probe a behaviour before depending on it against
-> `llm-router-aiqg`.
+> **Later on 2026-10-02 (about 19:08 UTC):** `llm-router-aiqg` runs
+> `aiqg-v5.90`, rolled out at about 19:05 UTC after roughly 3.5 hours on
+> `aiqg-v5.89`. `llm-router` is unchanged on `aiqg-v5.75`. Its `/aiqg/metrics`
+> (port 8086) exports `aiqg_stream_buffer_truncated_total 0`, a series that
+> exists only from `db5ae56`, so the streamed-response judging (#238) is live
+> on the customer-facing gateway and not on `llm-router`. The checked-in
+> manifest has not caught up: `k8s/deployment-aiqg-strict.yaml:71` still pins
+> `aiqg-v5.88` at `db5ae56`, and no commit records `aiqg-v5.89` or
+> `aiqg-v5.90`.
+>
+> [!UNVERIFIED] Which commit each of those two images was built from is
+> inferred, not recorded. The images carry no Open Container Initiative (OCI) labels, and the inference
+> rests on registry push times about two minutes after the `43fc830` and
+> `db5ae56` merges. On that reading the schema/tools applicability flags (#236)
+> are live on `llm-router-aiqg` too.
+>
+> [!UNVERIFIED] Apart from those `/metrics` checks and the 2026-10-02
+> `/v1/capabilities` vision probe, the sections relabelled "on `llm-router-aiqg`
+> from `aiqg-v5.87`" are inferred from the build commit and were not re-probed
+> live, and the captures quoted beside them are still the 2026-09-21 text.
+> Re-probe a behaviour before depending on it against `llm-router-aiqg`.
 
 ## Why this exists
 
@@ -138,13 +161,15 @@ is what it governs.
   "both"`, `k8s/configmap.yaml:117`): to `logrus`, and therefore to Loki, which is
   the read path the AIQG dashboard backend uses; and to the Kafka topic
   `tas.aiqg.events.v1` (`k8s/configmap.yaml:119`), consumed by a Spark aggregator
-  that materializes the `aiqg.event_metrics` hypertable in TimescaleDB
+  (an Apache Spark job outside this repository, which only names it — in
+  `k8s/configmap.yaml` and in the design notes under
+  `aether-shared/data-models/aiqg/`) that materializes the `aiqg.event_metrics` hypertable in TimescaleDB
   (`k8s/configmap.yaml:111`–`115`). **It is not a surface an integrator calls.**
   There is no endpoint on this gateway that reads events back. If you need your
   own spend or attribution figures, the reachable surface is the AIQG dashboard
   backend at `aiqg-dashboard-be` (`k8s/configmap.yaml:109`), not this service —
   ask the AIQG owners for access rather than expecting a route here. Since
-  `d8da473` (committed, not yet deployed), a Kafka broker that is unreachable at
+  `d8da473` (on `llm-router-aiqg` since `aiqg-v5.87`, not on `llm-router`), a Kafka broker that is unreachable at
   startup no longer stops the gateway from serving: it drops to the log sink
   alone and raises the gauge `aiqg_emitter_degraded` to `1`
   (`internal/server/server.go:226`–`236`). Your requests are unaffected; the
@@ -225,11 +250,11 @@ at `dc1957b`):
   mechanism: send `fallback_config` with `"enabled": true` in the request body
   (`internal/types/requests.go:33`, fields at `:209`–`214`) and a failed attempt
   is retried on each other configured provider in turn
-  (`internal/server/server.go:2509`–`2512`, `:2591`–`2619`); add `retry_config`
+  (`internal/server/server.go:2555`–`2558`, `:2637`–`2665`); add `retry_config`
   to retry the same provider first. Without either, one vendor failure is one
   `500`. Each extra attempt may bill. Note that this loop passes your request
   on **with the same model name** and picks "every provider except the one that
-  failed" (`internal/server/server.go:2696`–`2708`), so for a model only one
+  failed" (`internal/server/server.go:2742`–`2754`), so for a model only one
   vendor serves, the fallback call will most likely be rejected by the other
   vendor as well — not exercised live, so treat that consequence as inferred.
 
@@ -272,8 +297,8 @@ Five abstractions carry the design.
 
 **Surfaces** are wire dialects, not pipelines. `/v1/chat/completions`,
 `/v1/messages`, and `/v1/responses` translate at the boundary and converge on one
-shared pipeline (`internal/server/server.go:934`, `internal/server/server.go:938`,
-`internal/server/server.go:947`). The surface you
+shared pipeline (`internal/server/server.go:946`, `internal/server/server.go:950`,
+`internal/server/server.go:959`). The surface you
 called determines only how the request is parsed and how the response and errors
 are rendered — **not** which vendor serves it. An Anthropic-dialect request can
 be cost-routed to OpenAI and comes back shaped as Anthropic.
@@ -291,12 +316,13 @@ block (`internal/server/enforcement.go:64`).
 (`internal/metrics/middleware.go:59`) wraps every completion route and records
 count, latency, and in-flight depth; the completion handlers themselves add token
 and cost samples. The registry it writes into is served verbatim at `/metrics`
-(`internal/server/server.go:982`). Telemetry is an abstraction here and not a
+(`internal/server/server.go:994`). Telemetry is an abstraction here and not a
 detail because its ordering relative to the other four is a contract, not an
 implementation choice — see the middleware ordering paragraph below.
 
 **The model registry** is a sixth, optional abstraction, committed since
-`eee4b24` and not yet deployed. When `registry.enabled` is set in configuration
+`eee4b24` and in the `llm-router-aiqg` image since `aiqg-v5.87` (not in
+`llm-router`), though switched off there. When `registry.enabled` is set in configuration
 (`internal/config/config.go:37`–`49`; off by default, and not set in any manifest
 under `k8s/`), `Route` calls `resolveViaRegistry` before it picks a strategy
 (`internal/routing/router.go:249`–`255`). That step may rewrite the model name
@@ -321,29 +347,29 @@ gateway entirely.
 
 A request arrives at the customer ingress and passes three router-wide checks
 before anything specific to its route. They are registered with `r.Use` on the
-whole router (`internal/server/server.go:898`–`913`), so they run ahead of
+whole router (`internal/server/server.go:910`–`925`), so they run ahead of
 authentication and apply to every path: the security middleware, whose request
 validator rejects a disallowed method, a body over 10 MiB, or a `Content-Type`
 outside `application/json` and `text/plain` with `400`
-(`internal/security/validation.go:92`–`111`, `internal/config/config.go:1109`–`1115`);
+(`internal/security/validation.go:92`–`111`, `internal/config/config.go:1121`–`1127`);
 the request logger; and `contentTypeMiddleware`, which rejects any `POST` or
 `PUT` whose `Content-Type` is not **exactly** `application/json` with `415`
-(`internal/server/server.go:1047`–`1058`). The string comparison is literal, so
+(`internal/server/server.go:1059`–`1070`). The string comparison is literal, so
 `application/json; charset=utf-8` is refused — observed live on 2026-09-21. The
 first check allows `text/plain` and the third refuses it, so in practice only the
 bare `application/json` value reaches authentication. A fourth hook, the
-OpenAPI schema validator registered at `internal/server/server.go:904`, is inert
+OpenAPI schema validator registered at `internal/server/server.go:916`, is inert
 in this binary: `ToServerConfig` never sets its configuration
-(`internal/config/config.go:1003`–`1011`), so no request body is schema-checked
+(`internal/config/config.go:1014`–`1022`), so no request body is schema-checked
 before authentication. A live probe on 2026-09-21 agreed — a schema-invalid body
 with no token got the `401`, not a `400`.
 
 The request is then counted before it is
-authenticated. `wrapAIQG` (`internal/server/server.go:922`) composes each
+authenticated. `wrapAIQG` (`internal/server/server.go:934`) composes each
 completion route as `metrics.Middleware(aiqgMiddleware(handler))`, so the
 metrics wrapper is the outermost layer and sees every request the gateway later
 refuses. That ordering is deliberate and stated as such at
-`internal/server/server.go:927`: an authentication failure is traffic, and an
+`internal/server/server.go:939`: an authentication failure is traffic, and an
 exporter blind to it cannot show an auth outage. The practical consequence for
 you is that a `401` you caused appears in `llm_router_requests_total` with
 `provider="none"`, not as a gap.
@@ -358,7 +384,7 @@ That ordering is why a malformed token and an unknown token produce different
 status codes — see error semantics.
 
 The surface handler parses the body in its own dialect. `handleChatCompletion`
-(`internal/server/server.go:1063`) reads OpenAI shape; `handleMessages`
+(`internal/server/server.go:1075`) reads OpenAI shape; `handleMessages`
 (`internal/server/anthropic_messages.go:487`) reads Anthropic shape, including
 top-level `system` and required `max_tokens`. Both produce the same internal
 request, and both are wrapped by `wrapAIQG`, which is what attaches the
@@ -374,7 +400,7 @@ enabled, `Route` first lets it rewrite the model name
 (`internal/routing/router.go:252`), and records any rewrite on the routing
 metadata (`internal/routing/router.go:290`–`298`). A route rule that pins a
 provider is honoured only if that provider is permitted, configured, healthy,
-and — since `6d57096` (#151), committed but not deployed — actually lists the
+and — since `6d57096` (#151), on `llm-router-aiqg` from `aiqg-v5.87` — actually lists the
 requested model; otherwise the pin is set aside with the reason recorded
 (`internal/routing/router.go:1272`–`1293`). On failure the attempt is
 classified **twice**, by two functions that deliberately disagree:
@@ -389,15 +415,15 @@ larger-window tier serves it unchanged. If the failure class is in the tenant's
 > [!UNVERIFIED] **The chain walk described above does not appear to be reachable
 > from any HTTP route** (new finding, 2026-09-21). The walk lives in
 > `completeWithFallback` (`internal/server/fallback.go:44`), whose only caller is
-> `handleNonStreamingCompletion` (`internal/server/server.go:1761`), whose only
+> `handleNonStreamingCompletion` (`internal/server/server.go:1773`), whose only
 > caller is the streaming-unsupported branch of `handleStreamingCompletion`
-> (`internal/server/server.go:1894`) — and nothing calls
+> (`internal/server/server.go:1930`) — and nothing calls
 > `handleStreamingCompletion`. `handleChatCompletion` always dispatches to the
 > older `handleStreamingCompletionWithRetry` or
-> `handleNonStreamingCompletionWithRetry` (`internal/server/server.go:1412`–`1417`),
+> `handleNonStreamingCompletionWithRetry` (`internal/server/server.go:1424`–`1429`),
 > and that path makes one attempt, retries only if the request body carried a
 > `retry_config`, and tries other providers only if it carried a
-> `fallback_config` (`internal/server/server.go:2499`–`2588`). Both are request
+> `fallback_config` (`internal/server/server.go:2545`–`2634`). Both are request
 > body fields (`internal/types/requests.go:32`–`33`, copied from `extra_body` on
 > the Anthropic surface at `internal/server/tas_extensions.go:34`–`39`), and no
 > code fills them with a default. The bypass
@@ -412,13 +438,13 @@ The response is rendered back in the dialect of the surface that was called.
 
 On the way out, two things are recorded that you can later query. The completion
 handler stamps the routing decision into `X-TAS-Router-*` response headers
-(`internal/server/server.go:1811`) and, when the vendor reported usage, feeds the
+(`internal/server/server.go:1823`) and, when the vendor reported usage, feeds the
 same token counts and the same `clear.DollarCost` result into the metrics
-registry that the spend record uses (`internal/server/server.go:1777` and
-`internal/server/server.go:1779`; the fallback-walking variant repeats it at
-`internal/server/server.go:2000` and `internal/server/server.go:2002`; since
-`cddd372`, committed but not deployed, the streaming path does the same at
-`internal/server/server.go:1877`–`1881`). Sharing
+registry that the spend record uses (`internal/server/server.go:1789` and
+`internal/server/server.go:1791`; the fallback-walking variant repeats it at
+`internal/server/server.go:2041` and `internal/server/server.go:2043`; since
+`cddd372`, on `llm-router-aiqg` from `aiqg-v5.87`, the streaming path does the same at
+`internal/server/server.go:1912`–`1916`). Sharing
 one cost call is the point: `llm_router_cost_total` and the billing record are
 computed from the same numbers, so they cannot drift apart. Only then does the
 metrics middleware, unwinding outermost, read the provider back off the response
@@ -463,6 +489,14 @@ curl -sS -k https://gateway.aiqg.tas.scharber.com/v1/chat/completions \
 {"id":"chatcmpl-...","object":"chat.completion","model":"claude-sonnet-4-6","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}]}
 ```
 
+> [!UNVERIFIED] This response is not a recorded capture. It has been in the
+> document unchanged since its first version (`24fcacc`, 2026-08-24), with no
+> record of the call that produced it, and no later refresh had a valid token to
+> reproduce it. It is also abbreviated: `created` is always serialized and
+> `usage` whenever the vendor reported it (`internal/types/responses.go:11`,
+> `:14`), and both are absent here. Read it as the shape of a success, not as
+> verbatim output.
+
 **Which deployment you are talking to.** `gateway.aiqg.tas.scharber.com` is the
 Ingress for the `llm-router-aiqg` Service on port 8086
 (`k8s/ingress-aiqg-strict.yaml:41`, `:48`, `:50`), which fronts the
@@ -491,7 +525,8 @@ Ingress comment gives the reason: the read routes carry no authentication, and
 publishing them was the exposure SEC-1 closed
 (`k8s/ingress-gateway-airops.yaml:27`–`35`).
 
-**Getting a token — you self-serve.** Issuance does not live in this repository
+**Getting a token — self-serve once someone has provisioned your account.**
+Issuance does not live in this repository
 and is not an ops ticket. It is a first-class API on the AIQG dashboard backend
 (the `aiqg-dashboard-be` repository), hosted at `https://api.aiqg.tas.scharber.com`
 and surfaced in the dashboard user interface (UI) at `/tokens`. Three routes —
@@ -554,7 +589,7 @@ when you are debugging a `401`.** The gateway only ever *consumes* tokens. It
 reads them from the Kubernetes Secret `llm-router-aiqg-tokens` in namespace
 `tas-llm-router` via the `AIQG_TOKENS_FILE` environment variable
 (`k8s/deployment-aiqg-strict.yaml:102`, loaded at
-`internal/config/config.go:860`), and the copy checked into this repository ships
+`internal/config/config.go:871`), and the copy checked into this repository ships
 empty on purpose (`k8s/secret-aiqg-tokens.yaml:1`–`6`). Each entry binds a token
 to a `tenant_id`, an `aiqg_account_id`, a `source_app` string, and a `suspended`
 flag (`k8s/secret-aiqg-tokens.yaml:10`–`16`) — the mechanism behind "tenant
@@ -567,7 +602,7 @@ document.
 **That Secret is only the fallback, and production does not use it.** The
 gateway prefers a `DashboardResolver` whenever `AIQG_DASHBOARD_URL` and
 `AIQG_DASHBOARD_INTERNAL_AUTH_TOKEN` are both set, and falls back to the Secret
-list only otherwise (`internal/server/server.go:454`–`476`). The URL is in the
+list only otherwise (`internal/server/server.go:466`–`488`). The URL is in the
 ConfigMap (`k8s/configmap.yaml:109`), the shared secret comes from
 `llm-router-secret`, and Loki shows both strict pods logging `AIQG token
 resolver: DashboardResolver (HTTP client of aiqg-dashboard-be)` at startup on
@@ -606,7 +641,7 @@ work, right up until the list is populated and the same token starts returning
 real — a value that "works" against an empty list proves nothing.
 
 That gotcha now applies only to the permissive `llm-router` Deployment. Since
-`d15ccfc` (#173), committed but not yet deployed, a **strict** ingress with an
+`d15ccfc` (#173), on `llm-router-aiqg` from `aiqg-v5.87`, a **strict** ingress with an
 empty token list and no dashboard resolver fails closed: every request carrying
 a well-formed token gets `401` with reason `no_resolver_configured`
 (`internal/middleware/aiqg.go:234`–`243`, body at `:1060`), and the gateway logs
@@ -628,7 +663,7 @@ or `x-api-key` (Anthropic SDK) by prefix, **deletes that header so the
 `tas_qg_live_` secret is never forwarded to the vendor**
 (`internal/middleware/aiqg.go:158`–`169`), and then selects the effective
 upstream key itself — your stored credential if you have one, otherwise the TAS
-shared key (`internal/server/server.go:1430`–`1480`). Both constructor forms are
+shared key (`internal/server/server.go:1442`–`1492`). Both constructor forms are
 named as the worked examples in the source comment that describes this path
 (`internal/middleware/aiqg.go:149`–`150`):
 
@@ -643,10 +678,10 @@ header is parsed but never logged (`internal/middleware/aiqg_headers.go:49`,
 lifted at `:173`), is stripped from the request before it reaches the vendor
 along with every other `TAS-*` header
 (`internal/middleware/aiqg_headers.go:309`), and takes precedence over any
-stored credential (`internal/server/server.go:1445`–`1454`). The raw
+stored credential (`internal/server/server.go:1457`–`1466`). The raw
 `Authorization` header is deliberately **not** used for this: clients
 historically sent placeholders there, so injecting it would break them
-(`internal/server/server.go:1446`–`1450`). The `base_url` values differ by vendor
+(`internal/server/server.go:1458`–`1462`). The `base_url` values differ by vendor
 convention: the OpenAI SDK appends paths under `/v1`, the Anthropic SDK supplies
 its own.
 
@@ -662,7 +697,7 @@ to 0 unless you have decided the duplicate spend is acceptable.
 `application/json; charset=utf-8` — gets `415` with body
 `{"error":{"code":415,"message":"Content-Type must be application/json","type":"api_error"},"timestamp":…}`
 before its token is even examined (observed 2026-09-21; the literal comparison is
-at `internal/server/server.go:1051`).
+at `internal/server/server.go:1063`).
 
 ## API reference
 
@@ -676,15 +711,15 @@ worth reporting. Registration lines are cited so you can jump to the handler.
 | Endpoint | Dialect | Notes |
 |---|---|---|
 | `/v1/chat/completions` | OpenAI | `"stream": true` for server-sent events |
-| `/v1/completions` | OpenAI | Compatibility shim — the handler delegates straight to `handleChatCompletion` (`internal/server/server.go:1749`–`1753`), so it decodes the **chat** body: `messages[]`, and a legacy `prompt` field is ignored |
+| `/v1/completions` | OpenAI | Compatibility shim — the handler delegates straight to `handleChatCompletion` (`internal/server/server.go:1761`–`1765`), so it decodes the **chat** body: `messages[]`, and a legacy `prompt` field is ignored |
 | `/v1/messages` | Anthropic | Top-level `system`, **`max_tokens` required**, content block arrays, native named-event streaming |
 | `/v1/messages/count_tokens` | Anthropic | Returns `{"input_tokens": N}` from the vendor's own count endpoint (`internal/server/count_tokens.go:66`); `max_tokens` not required |
 | `/v1/embeddings` | OpenAI | Routes to the embeddings-capable provider. `encoding_format` is forwarded upstream (`internal/providers/openai/embeddings.go:27`), but the client library transparently decodes a base64 vendor response, so you receive float vectors either way (`internal/providers/openai/embeddings.go:15`–`17`) |
 | `/v1/responses` | OpenAI Responses | Input items or string translated to messages; `output[]` / `output_text` returned |
 
-All six are registered together in `internal/server/server.go:934`–`947`, if you
+All six are registered together in `internal/server/server.go:946`–`959`, if you
 are extending rather than calling. Each is wrapped by `wrapAIQG`
-(`internal/server/server.go:922`), which is also what puts the metrics middleware
+(`internal/server/server.go:934`), which is also what puts the metrics middleware
 around them.
 
 **Read surfaces** — `GET`, no authentication enforced, and reachable only on the
@@ -712,7 +747,7 @@ are never reverse-proxied verbatim.
 
 ### Model registry admin API — deployed on `llm-router-aiqg`, registry disabled
 
-Five routes, registered unconditionally at `internal/server/server.go:965`–`969`
+Five routes, registered unconditionally at `internal/server/server.go:977`–`981`
 and implemented in `internal/server/registry_admin.go` (added `e4548af`, closes
 #6). They exist for operators managing the registry, not for completion
 callers. **None is authenticated**: they are plain `api.HandleFunc` routes with
@@ -758,7 +793,7 @@ Anthropic bills a cached prompt prefix at a fraction of the normal input rate,
 but only if the request marks where the cacheable prefix ends. The gateway
 decides per request what happens to those marks, through the `TAS-Prompt-Cache`
 request header (`pkg/aiqg/promptcache/mode.go:59`–`62`), applied before routing
-(`internal/server/server.go:1152`, `internal/server/prompt_cache.go:30`–`75`):
+(`internal/server/server.go:1164`, `internal/server/prompt_cache.go:30`–`75`):
 
 - `passthrough` (alias `pass`) — forward exactly the breakpoints you sent. The
   default.
@@ -775,7 +810,7 @@ then the gateway-wide `prompt_cache.default_mode` configuration value (added
 than four breakpoints are clamped to the earliest four, because a fifth is a
 vendor `400` (`internal/server/prompt_cache.go:53`–`62`).
 
-What survives to the vendor, since `7c9066e` (#197, committed but not deployed):
+What survives to the vendor, since `7c9066e` (#197; on `llm-router-aiqg` from `aiqg-v5.87`, not on `llm-router`):
 a `cache_control` on a message or on a tool definition in the OpenAI-dialect body
 reaches Anthropic as an `ephemeral` breakpoint
 (`internal/providers/anthropic/provider.go:521`–`528`, `:590`–`596`). Before that
@@ -821,7 +856,7 @@ warns you: unsupported fields are dropped silently, not rejected.
 | `temperature`, `top_p`, `stop` | Forwarded (`internal/providers/openai/provider.go:542`, `:553`) | Forwarded (`internal/providers/anthropic/provider.go:560`, `:564`, `:568`) |
 | `seed`, `presence_penalty`, `frequency_penalty` | Forwarded (`internal/providers/openai/provider.go:556`–`564`) | **Dropped** (no vendor equivalent) |
 | `max_tokens` | Forwarded (`internal/providers/openai/provider.go:550`) | Forwarded; **defaults to 1024 when unset** (`internal/providers/anthropic/provider.go:557`) |
-| `cache_control` (message, tool) | Ignored — OpenAI caches automatically | Forwarded since `7c9066e`, committed but not deployed — see prompt caching above |
+| `cache_control` (message, tool) | Ignored — OpenAI caches automatically | Forwarded since `7c9066e` (on `llm-router-aiqg` from `aiqg-v5.87`) — see prompt caching above |
 | `top_k` | Not representable | Not representable — absent from `ChatRequest` entirely |
 | `n`, `logprobs`, `logit_bias`, `user`, `stream_options` | Not representable — absent from `ChatRequest` | Not representable |
 | Image / vision content | See below | See below |
@@ -847,11 +882,11 @@ for now" (`internal/providers/anthropic/provider.go:693`). The problem is that
 `[]types.ContentPart` is not the type that arrives: `Content` is declared
 `interface{}` (`internal/types/requests.go:43`), and content that has been
 through JSON decoding arrives as `[]interface{}` of maps — which this repository
-states in its own comment at `internal/server/server.go:2366`. `/v1/messages`
+states in its own comment at `internal/server/server.go:2407`. `/v1/messages`
 reaches the same decoder, because `handleMessages` re-marshals the translated
 request and hands it to the shared OpenAI handler
 (`internal/server/anthropic_messages.go:498`–`509`, decoded at
-`internal/server/server.go:1065`). Send text-only requests until this is fixed.
+`internal/server/server.go:1077`). Send text-only requests until this is fixed.
 
 **Do not take `/v1/capabilities` as the authority on vision.** Both providers
 advertised `SupportsVision: true` in their capability matrix at `eee4b24`, and a
@@ -861,14 +896,16 @@ layer, which drops image parts on both paths as described above. Commit
 `a9f160a` (#174) changed the provider-level flag to report the gateway's
 effective capability: both providers now return `SupportsVision: false`
 (`internal/providers/anthropic/provider.go:91`,
-`internal/providers/openai/provider.go:89`). That fix is committed but not
-deployed — the probe on 2026-09-21 still returned the provider-level
-`"supports_vision":true` — and it does not reach the **per-model**
-`supports_vision` entries inside `supported_models`, which are read from model
-configuration (`configs/config.yaml:81`, `:90`, `:99`) and still say `true`. The
-Anthropic entry also still lists `supported_image_formats`. Today neither flag
-can be trusted for vision; after the next rollout the provider-level flag can,
-and the per-model one still cannot.
+`internal/providers/openai/provider.go:89`). That fix is live on
+`llm-router-aiqg`: on 2026-10-02 its `/v1/capabilities` returned provider-level
+`"supports_vision":false` for both providers (the 2026-09-21 probe, before the
+rollout, still returned `true`). It is not on `llm-router` (`aiqg-v5.75`). It
+does not reach the **per-model** `supports_vision` entries inside
+`supported_models`, which are read from model configuration
+(`configs/config.yaml:81`, `:90`, `:99`): on the same 2026-10-02 probe all three
+Anthropic models still said `true`. The Anthropic entry also still lists
+`supported_image_formats`. On `llm-router-aiqg` the provider-level flag can be
+trusted for vision and the per-model one cannot; on `llm-router` neither can.
 
 > [!UNVERIFIED] The vision finding is a code-path reading, not an executed
 > request — no valid token was available to send a multimodal body through. The
@@ -915,8 +952,8 @@ a registry through `promhttp` with no handwritten formatting in between:
 
 | Endpoint | Registry | Registered at |
 |---|---|---|
-| `/metrics` | `internal/metrics.Registry` — router telemetry | `internal/server/server.go:982` |
-| `/aiqg/metrics` | `pkg/aiqg/metrics.Registry` — AIQG event and token counters | `internal/server/server.go:986` |
+| `/metrics` | `internal/metrics.Registry` — router telemetry | `internal/server/server.go:994` |
+| `/aiqg/metrics` | `pkg/aiqg/metrics.Registry` — AIQG event and token counters | `internal/server/server.go:998` |
 
 Treat `/metrics` as an interface, not an implementation detail: dashboards and
 alerts are callers of it, and the series below are what they may depend on. Every
@@ -927,11 +964,11 @@ name is prefixed `llm_router_`.
 | `requests_total` | counter | `provider`, `method`, `status_code` | `internal/metrics/middleware.go:74` |
 | `request_duration_seconds` | histogram | `provider`, `method` | `internal/metrics/middleware.go:75` |
 | `active_connections` | gauge | none | `internal/metrics/middleware.go:61` |
-| `tokens_total` | counter | `provider`, `type` (`input`/`output`) | `internal/server/server.go:1777`, `internal/server/server.go:2000`; streaming at `internal/server/server.go:1878` |
-| `cost_total` | counter | `provider`, `model` | `internal/server/server.go:1779`, `internal/server/server.go:2002`; streaming at `internal/server/server.go:1880` |
+| `tokens_total` | counter | `provider`, `type` (`input`/`output`) | `internal/server/server.go:1789`, `internal/server/server.go:2041`; streaming at `internal/server/server.go:1913` |
+| `cost_total` | counter | `provider`, `model` | `internal/server/server.go:1791`, `internal/server/server.go:2043`; streaming at `internal/server/server.go:1915` |
 | `blocked_requests_total` | counter | `direction` (`inbound`/`outbound`) | `internal/server/enforcement.go:127` |
-| `provider_health` | gauge | `provider` | `internal/server/server.go:403`, collected at scrape time |
-| `errors_total` | counter | `provider`, `error_type` | `internal/server/server.go:1764`, `internal/server/server.go:1934` — `error_type` is always `completion_failed` |
+| `provider_health` | gauge | `provider` | `internal/server/server.go:415`, collected at scrape time |
+| `errors_total` | counter | `provider`, `error_type` | `internal/server/server.go:1776`, `internal/server/server.go:1975` — `error_type` is always `completion_failed` |
 | `auth_attempts_total` | counter | `result` | `internal/middleware/aiqg.go:206`, `:247`, `:1020`, `:1064`, `:1160` |
 | `rate_limit_hits_total` | counter | `tier` | `internal/security/ratelimit.go:277` — only when the rate limiter is enabled. It is off in `configs/config.yaml:147`, and the `RATE_LIMIT_ENABLED` key in `k8s/configmap.yaml:39` is read by no Go code; the strict gateway sent no `X-RateLimit-*` headers on 2026-09-21 |
 | `semcache_lookups_total` | counter | `outcome` | `internal/server/semcache_metrics.go:18`–`41` |
@@ -942,14 +979,14 @@ name is prefixed `llm_router_`.
 | `model_validation_total` | counter | `provider`, `model`, `result` | `internal/server/registry_admin.go:183` |
 | `model_status` | gauge (always `1`) | `provider`, `model`, `status` | collected at scrape time, registered only with the registry enabled (`cmd/llm-router/main.go:214`) |
 
-Everything from `errors_total` down changed or appeared after `eee4b24` and is
-committed but not deployed: `1d89669` and `2f8994c` (#170, #175) wired the
+Everything from `errors_total` down changed or appeared after `eee4b24`, and is
+on `llm-router-aiqg` from `aiqg-v5.87` but not on `llm-router`: `1d89669` and `2f8994c` (#170, #175) wired the
 three counters that had no call site, `8e641ca` (#219) added the semantic-cache
 series, and `9e2653e` (#6) the registry series.
 
 **`/aiqg/metrics`** is a separate registry defined in
-`pkg/aiqg/metrics/metrics.go` (declared at `:27`, registered at `:387`), plus
-the semantic-cache judge series in `internal/server/semjudge.go`. At `dc1957b`
+`pkg/aiqg/metrics/metrics.go` (declared at `:27`, registered at `:418`), plus
+the semantic-cache judge series in `internal/server/semjudge.go`. At `db5ae56`
 it holds: event emission (`aiqg_events_emitted_total`,
 `aiqg_emit_duration_seconds`, `aiqg_emitter_degraded`); traffic
 (`aiqg_requests_total`, `aiqg_request_tier_total`, `aiqg_scan_findings_total`);
@@ -958,13 +995,30 @@ evaluation spend (`aiqg_shadow_replays_total`, `aiqg_shadow_tokens_total`,
 `aiqg_judge_tokens_total`, `aiqg_unbilled_spend_usd_total`,
 `aiqg_unpriced_eval_calls_total`, `aiqg_judge_excluded_total`,
 `aiqg_eval_credential_source_total`, `aiqg_eval_events_total`,
-`aiqg_eval_events_failed_total`); prompt caching
+`aiqg_eval_events_failed_total`); streaming capture
+(`aiqg_stream_buffer_truncated_total`, since `db5ae56`, which also added the
+`stream_error` and `stream_buffer_disabled` reasons to
+`aiqg_judge_excluded_total`, though that counter's help text still lists only
+the original four); prompt caching
 (`aiqg_prompt_cache_requests_total`, `aiqg_prompt_cache_read_tokens_total`,
 `aiqg_prompt_cache_creation_tokens_total`, `aiqg_prompt_cache_savings_usd_total`);
 and `aiqg_semcache_judge_*`. None carries a tenant label; per-tenant figures
 live in the AIQG event stream. The deployed image, scraped on 2026-09-21, exposed
 only `aiqg_requests_total` and twelve `aiqg_semcache_judge_*` families, because
 a counter appears only once something increments it.
+
+**Both endpoints are scraped by the shared Prometheus.** The
+`prometheus-shared-config` ConfigMap in `tas-shared` has a job `llm-router`
+for `/metrics` and a separate job `aiqg-metrics` with
+`metrics_path: /aiqg/metrics` and a 15-second interval. Each discovers
+endpoints in namespace `tas-llm-router` and keeps services matching
+`llm-router.*`, so both deployments are covered. That config lives in the
+cluster, not in this repository. The pod annotation on `llm-router-aiqg`
+(`prometheus.io/path: /metrics`) does not drive it. On 2026-10-02
+`up{job="aiqg-metrics"}` was `1` for both pods of each deployment, and
+`aiqg_stream_buffer_truncated_total` was present for the two `llm-router-aiqg`
+pods only, with value `0`. Query these series with `job="aiqg-metrics"` and
+`service="llm-router-aiqg"` or `service="llm-router"`.
 
 Label value sets, so a query can be written without guessing. `provider` is a
 provider name (`openai`, `anthropic` on the current fleet) or the literal `none`;
@@ -980,7 +1034,7 @@ completion routes are counted; `status_code` is the decimal status as a string;
 `miss_rejected` (a candidate was found and thrown out), or `miss_no_candidate`
 (nothing close was stored). `provider_health` is `1`
 for healthy and `0` for anything else, with "healthy" meaning the router's own
-health record reads exactly `healthy` (`internal/server/server.go:406`).
+health record reads exactly `healthy` (`internal/server/server.go:418`).
 `request_duration_seconds` uses explicit buckets, not the library defaults —
 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120 seconds
 (`internal/metrics/metrics.go:77`), stretched past a normal web service level
@@ -990,13 +1044,17 @@ longer.
 
 ### Scoping a query
 
-Prometheus discovers these pods by annotation — `prometheus.io/scrape`,
-`prometheus.io/port: "8086"`, `prometheus.io/path: "/metrics"`
-(`k8s/deployment.yaml:18`–`20` and `k8s/deployment-aiqg-strict.yaml:40`–`42`) —
-and attaches the target labels that scope every query. Observed on the live
-Prometheus on 2026-08-25: `job="llm-router"`, `namespace="tas-llm-router"`,
-`instance="<pod-ip>:8086"`, and `service` carrying either `llm-router` or
-`llm-router-aiqg`. **`service` is the label that separates the two
+Prometheus finds these pods through the `llm-router` job in the cluster's
+`prometheus-shared-config` (endpoint discovery in `tas-llm-router`, keeping
+services that match `llm-router.*`), described under "`/aiqg/metrics`" above.
+The `prometheus.io/*` annotations on the pod templates
+(`k8s/deployment.yaml:18`–`20` and `k8s/deployment-aiqg-strict.yaml:40`–`42`)
+do not drive discovery; on 2026-10-02 every `tas-llm-router` target carried
+`job="llm-router"` or `job="aiqg-metrics"` and no other job. That job attaches
+the target labels that scope every query. Observed on the live Prometheus on
+2026-08-25 and again on 2026-10-02: `job="llm-router"`,
+`namespace="tas-llm-router"`, `instance="<pod-ip>:8086"`, and `service`
+carrying either `llm-router` or `llm-router-aiqg`. **`service` is the label that separates the two
 deployments**, and it is the one to scope on:
 
 ```promql
@@ -1018,24 +1076,24 @@ histogram_quantile(0.95,
 Four contracts a query author needs and cannot read off the tables above.
 
 **`service` is Prometheus's label, not the exporter's — and the exporter's own
-copy is about to disappear.** The old handler stamped a constant
+copy is gone from `llm-router-aiqg`.** The old handler stamped a constant
 `service="llm-router"` onto every sample it produced. Because Prometheus already
 attaches a `service` target label, that constant collides and is renamed on
-ingest, which is why the live series currently carry **both**
-`service="llm-router-aiqg"` (the target label, correct) and
-`exported_service="llm-router"` (the exporter's constant, useless — it reads
-`llm-router` on both deployments). The new registry stamps no constant labels at
-all, so `exported_service` vanishes after the deploy while `service` keeps
-working. A query selecting on `service` is safe; one selecting on
-`exported_service` breaks.
+ingest to `exported_service="llm-router"` (useless — it read `llm-router` on
+both deployments). The new registry stamps no constant labels at all. On
+2026-10-02 `llm_router_requests_total` carried `exported_service` only on the
+`llm-router` series (`aiqg-v5.75`, still the old exporter); the
+`llm-router-aiqg` series, on the new exporter since `aiqg-v5.87`, had none. A
+query selecting on `service` works on both; one selecting on
+`exported_service` matches only the old exporter.
 
 **Only the completion routes are counted.** `metrics.Middleware` is applied
 through `wrapAIQG`, which wraps only the six `POST` completion surfaces
-(`internal/server/server.go:934`–`947`). Every `GET` — `/v1/models`,
+(`internal/server/server.go:946`–`959`). Every `GET` — `/v1/models`,
 `/v1/models/{model}`, `/v1/providers`, `/v1/providers/{name}`, `/v1/capabilities`,
 `/v1/health`, `/v1/health/{name}`, `/v1/breaker`, the three `GET
 /v1/registry/*` routes, `/health`, and `/metrics` itself — is registered without
-it (`internal/server/server.go:949`–`982`) and contributes nothing. `POST
+it (`internal/server/server.go:961`–`994`) and contributes nothing. `POST
 /v1/routing/decision`, `POST /v1/registry/sync`, and `POST /v1/registry/validate`
 are unwrapped too. A panel titled
 "total gateway traffic" built on `requests_total` therefore measures completions
@@ -1075,7 +1133,7 @@ has a producer but nothing has incremented it on this pod yet; you are querying
 the fourth, and the least visible — `provider_health` failed to register.
 `RegisterProviderHealth` is called once per `NewServer` and a duplicate
 registration is swallowed as `prometheus.AlreadyRegisteredError`
-(`internal/server/server.go:410`). That tolerance is what lets a second
+(`internal/server/server.go:422`). That tolerance is what lets a second
 `NewServer` in one process work, but it also means any registration failure of
 that class is discarded without a log line, and the gauge is then absent
 from the registry with nothing anywhere reporting why. Absent `provider_health`
@@ -1159,7 +1217,8 @@ and **ignores `req.Model` entirely** for that choice
 not error — it silently becomes "whatever is cheapest".
 
 **With the model registry enabled, the name you sent may not be the name that
-runs** (committed, not yet deployed; off by default). `resolveViaRegistry` runs
+runs** (in the `llm-router-aiqg` image from `aiqg-v5.87`; off by default and
+not enabled in any manifest). `resolveViaRegistry` runs
 before `determineStrategy`, so everything above applies to the *rewritten* name
 (`internal/routing/router.go:95`–`142`). It does three things and only three:
 
@@ -1184,7 +1243,7 @@ stamped at `internal/routing/router.go:290`–`298`). Those fields travel in the
 header for them. What you can see on every surface is `X-TAS-Router-Model`,
 which carries the model that actually ran, and `X-TAS-Router-Fallback-Used:
 true` — the **same** header a fallback-chain hop sets, so on its own it does not
-tell you which of the two happened (`internal/server/server.go:1819`–`1828`).
+tell you which of the two happened (`internal/server/server.go:1831`–`1840`).
 To detect a substitution portably, compare `X-TAS-Router-Model` with the model
 you sent. That header is the only per-response signal on every surface, and it
 is also on the unstable list under compatibility guarantees, so treat a missing
@@ -1199,7 +1258,7 @@ may pin a provider itself, and that pin is preferred over the strategy though it
 is not absolute — an unusable pin falls through to normal selection and is
 recorded as not honoured (`internal/routing/router.go:257`–`263`). "Unusable"
 has four causes: tenant constraints deny the provider, it is not configured, it
-is unhealthy, or — added by `6d57096` (#151), committed but not deployed — its
+is unhealthy, or — added by `6d57096` (#151), on `llm-router-aiqg` from `aiqg-v5.87` — its
 configured model list is non-empty and does not include the requested model
 (`internal/routing/router.go:1272`–`1293`). Before that fourth check, a pin to a
 vendor that could not serve the model went through anyway and surfaced as an
@@ -1236,7 +1295,8 @@ is the part that changes meaning.
 calls on its own initiative: an LLM judge that scores a sample of responses, and
 shadow replays that re-run a sampled request through an experiment's other
 variants to compare them. Until `8425da4` (#214) those always used the gateway's
-configured vendor key. In the committed code, not yet deployed, the key is chosen
+configured vendor key. On `llm-router-aiqg` from `aiqg-v5.87` (not on
+`llm-router`), the key is chosen
 per evaluation, after routing picks the vendor
 (`internal/server/eval_credentials.go:27`–`54`):
 
@@ -1261,12 +1321,12 @@ linked to the response it scored through `parent_step_id`
 your key can be reconciled against your own traffic in the dashboard backend.
 
 **Each judge score records what it graded and which model graded it.** Since
-`dc1957b` (#233; live on `llm-router-aiqg` since `aiqg-v5.88`, not on
-`llm-router`), a score posted to
+`dc1957b` (#233; live on `llm-router-aiqg` from `aiqg-v5.88` onward, and so on
+the `aiqg-v5.90` it runs as of 2026-10-02; not on `llm-router`), a score posted to
 `aiqg-dashboard-be` carries `vendor` and `model` for the response it scored,
 `judge_model` for the grader, and `self_judged`
-(`internal/server/judge.go:550`–`566`). `vendor` and `model` come from the
-routing snapshot, not from the response body (`internal/server/judge.go:140`–`145`).
+(`internal/server/judge.go:598`–`614`). `vendor` and `model` come from the
+routing snapshot, not from the response body (`internal/server/judge.go:188`–`193`).
 The response event takes its `model` from the same routing decision
 (`pkg/aiqg/events/builder.go:717`–`718`), and the judge code says that event
 feeds `aiqg.event_metrics.model`. These fields
@@ -1274,10 +1334,12 @@ are how a judge score joins back to your traffic. The two tables are on
 different database servers, so they cannot be joined in SQL.
 
 `self_judged` is true when the served model equals the configured judge model
-(`internal/server/judge.go:156`). **Those scores are still recorded, not
+(`internal/server/judge.go:204`). **Those scores are still recorded, not
 skipped.** The code comment says `aiqg-dashboard-be` leaves them out of the
-`efficacy_judged` aggregate, which stops a model from grading its own routing
-eligibility, but keeps them for display (`internal/server/judge.go:146`–`155`).
+`efficacy_judged` aggregate — the dashboard backend's per-model quality figure
+built from judge scores, a column of its `aiqg.model_quality` table (per the
+repository's top-level read-me file (README), `README.md:132`–`137`), which this repository does not compute — which stops a model from grading its own routing
+eligibility, but keeps them for display (`internal/server/judge.go:194`–`203`).
 If you read raw judge rows, filter on `self_judged` yourself. The same comment
 reports that on 2026-09-24, 179 of 464 judged rows had been graded by the model
 that produced them. Scores written before this change have no provenance fields
@@ -1288,12 +1350,70 @@ and cannot be classified after the fact. Tests for both cases are in
 > from comments in `internal/server/judge.go`. The `aiqg-dashboard-be` code and
 > the stored rows were not checked in this refresh.
 
+**Streamed responses are judged too.** Since `db5ae56` (#238; live on `llm-router-aiqg` since `aiqg-v5.90`, going by
+its `/aiqg/metrics`, and not on `llm-router`), a `"stream": true` request is eligible for the same judge
+sampling as a non-streaming one. Before that it never was, and nothing counted
+the omission: the judge needs the response text, and the streaming path
+forwarded each chunk to you without keeping any of it. Now the shared streaming
+loop, `streamChunks`, copies each chunk's text into a capped per-stream buffer
+before writing the chunk out, and returns that buffer
+(`internal/server/server.go:1862`–`1918`). Both streaming handlers then pass it
+to `maybeJudgeStream` (`internal/server/server.go:1963`, `:2541`), which shares
+one body, `judgeCompleted`, with the non-streaming `maybeJudge`
+(`internal/server/judge.go:107`–`157`). `judgeCompleted` takes the response
+text and usage rather than a response object, so sampling, attribution, the
+exclusion counts, and shadow replays behave identically on both paths. The
+judge runs after the stream has ended. Nothing you receive changes.
+
+The buffer holds at most 256 KiB of text per in-flight stream
+(`internal/server/stream_buffer.go:18`). Set `AIQG_STREAM_BUFFER_MAX_BYTES`
+(YAML `aiqg.stream_buffer_max_bytes`) to change it: `0` keeps the default,
+and a negative value switches buffering off
+(`internal/config/config.go:109`–`114`, `:703`–`707`;
+`internal/server/server.go:1868`–`1874`). The cap is the only bound on that
+memory, because `llm-router-aiqg` declares no container memory limit, so the
+worst case is concurrent streams × the cap. The buffer stops appending at the
+cap rather than growing and trimming afterwards
+(`internal/server/stream_buffer.go:63`–`90`).
+
+Three streaming outcomes are handled differently, and two of them are counted
+in `aiqg_judge_excluded_total` instead of being scored:
+
+| Stream outcome | Judge | Counted as |
+|---|---|---|
+| Buffering switched off (negative cap) | Not judged | `reason="stream_buffer_disabled"`, once per stream |
+| Vendor failed mid-stream (the terminal error event under "Streaming has no error channel") | Not judged: the text is a fragment, and `finish_reason` is already `error` | `reason="stream_error"` |
+| Text exceeded the cap | **Judged anyway** on the kept prefix | `aiqg_stream_buffer_truncated_total`, once per stream |
+
+These checks happen before sampling (`internal/server/judge.go:136`–`148`),
+like the existing reasons, and only when the judge is configured at all. A
+truncated buffer is not refused because the judge cuts the response to 6,000
+characters itself (`pkg/aiqg/judge/judge.go:136`), so a 256 KiB prefix gives it
+everything it would read from the full body. The truncation counter exists for
+body-derived Efficacy sub-metrics, which the code comment says must abstain on
+a truncated buffer rather than score it as malformed
+(`pkg/aiqg/metrics/metrics.go:283`–`300`); at a correctly sized cap it should
+stay near zero. A stream that sent no text, such as a tool-call-only turn,
+falls through to the existing `empty_response` reason. The contracts are
+pinned in `internal/server/judge_stream_test.go:22`–`110` and
+`internal/server/stream_buffer_test.go:52`–`88`.
+
+> [!UNVERIFIED] The body-derived sub-metrics that abstain on truncation are
+> described in code comments as landing in a later phase; no such sub-metric
+> reads the buffer at `db5ae56`. A client that disconnects mid-stream was not
+> exercised. Read from source, the providers drop the error chunk once the
+> request context is cancelled (`internal/providers/openai/provider.go:184`–`188`,
+> `internal/providers/anthropic/provider.go:172`–`176`), so the buffer is never
+> marked incomplete and the partial text would reach the judge's sampling
+> rather than be counted as `stream_error`.
+
 **The response event records whether you asked for a schema or declared tools.**
-Since `43fc830` (#236; committed, not yet deployed), the shared chat pipeline
+Since `43fc830` (#236; probably live on `llm-router-aiqg` since `aiqg-v5.89`,
+per the inferred build commit in the header, and not on `llm-router`), the shared chat pipeline
 stamps two flags on every request after any experiment override has been
 applied: `schema_requested` is true when the decoded request carries
 `response_format`, and `tools_declared` is true when it declares at least one
-tool (`internal/server/server.go:1186`–`1187`). `/v1/messages` and
+tool (`internal/server/server.go:1198`–`1199`). `/v1/messages` and
 `/v1/responses` delegate to that pipeline after translation
 (`internal/server/anthropic_messages.go:509`,
 `internal/server/responses_api.go:339`), so the flags describe the translated
@@ -1348,7 +1468,9 @@ headers, which are a TAS convenience and not part of either vendor dialect —
 and the same goes for `X-TAS-Stream-Fallback` and the registry fields
 `original_model`, `resolved_model`, and `fallback_reason`, all added in this
 range with no stability statement; the
-`code` and `reason` strings inside error bodies; and the text of the
+`code` and `reason` strings inside error bodies, which no policy versions
+(the status code is the stable part; where you need finer detail, these strings
+are still preferable to `message`, so pin a test against them); and the text of the
 `422` body, which is assembled by string concatenation
 (`internal/server/enforcement.go:134`–`135`) and has no schema. If you must react
 to a policy block, branch on the `422` status, not on its message.
@@ -1365,7 +1487,7 @@ to a policy block, branch on the `422` status, not on its message.
 **Two envelopes, chosen by surface.** Every gateway-written error outside the
 authentication layer uses one of two shapes. The standard one is
 `{"error":{"message":"…","type":"api_error","code":<status as a number>},"timestamp":<unix seconds>}`
-(`internal/server/server.go:2932`–`2946`). On `/v1/messages` the shared pipeline
+(`internal/server/server.go:2978`–`2992`). On `/v1/messages` the shared pipeline
 switches to Anthropic's `{"type":"error","error":{"type":"<type>","message":"…"}}`,
 with the type mapped from the status — `400` → `invalid_request_error`, `401` →
 `authentication_error`, `402`/`403` → `permission_error`, `404` →
@@ -1381,14 +1503,17 @@ non-Anthropic body for these:
 
 | Condition | Status | Body | Retryable | Caller action |
 |---|---|---|---|---|
-| `POST`/`PUT` whose `Content-Type` is not exactly `application/json` (a `; charset=…` suffix counts as different) | `415` | `{"error":{"code":415,"message":"Content-Type must be application/json","type":"api_error"},"timestamp":…}` — observed 2026-09-21 (`internal/server/server.go:1047`–`1058`) | No | Send the bare value |
+| `POST`/`PUT` whose `Content-Type` is not exactly `application/json` (a `; charset=…` suffix counts as different) | `415` | `{"error":{"code":415,"message":"Content-Type must be application/json","type":"api_error"},"timestamp":…}` — observed 2026-09-21 (`internal/server/server.go:1059`–`1070`) | No | Send the bare value |
 | Security validator: `Content-Type` other than `application/json`/`text/plain`, body over 10 MiB, or a method outside the configured list | `400` | `{"error":{"code":400,"details":["Content-Type application/xml not allowed"],"message":"Request validation failed","type":"validation_error"},"timestamp":…}` — observed 2026-09-21; `details` lists every rule that failed (`internal/security/validation.go:92`–`111`, `:235`–`250`) | No | Fix the named rule |
 | Rate limit exceeded — **only if the rate limiter is enabled, which it is not** (see telemetry) | `429` + `Retry-After` | `{"error":{"message":"Rate limit exceeded","type":"rate_limit_error","code":429,"retry_after":N},"timestamp":…}` (`internal/security/ratelimit.go:276`–`293`) | Yes, after the header | Back off |
 
 Auth is resolved **before** body validation, so a bad token masks every body
-error until it is fixed. Rows 1–3 and their `/v1/messages` variants were
-observed live on 2026-09-21; the rest are read from
-`internal/middleware/aiqg.go`. Every `401` also carries the header
+error until it is fixed. In the pre-authentication table above, the `415` and
+`400` rows were observed live on 2026-09-21; the `429` row cannot be observed
+while the rate limiter is off and is read from source. In the authentication
+table that follows, the first three rows (missing, malformed, and unrecognized
+token) and their `/v1/messages` variants were observed live on 2026-09-21; the
+rest are read from `internal/middleware/aiqg.go`. Every `401` also carries the header
 `WWW-Authenticate: TAS realm="aiqg"`. On `/v1/messages` each row renders in
 Anthropic's envelope instead, as noted — error rendering follows the surface.
 
@@ -1401,14 +1526,18 @@ Anthropic's envelope instead, as noted — error rendering follows the surface.
 | Both `TAS-Policy` and `TAS-Policy-Bundle` sent | `400` | `{"error":{"code":"aiqg_header_invalid","message":"aiqg: TAS-Policy and TAS-Policy-Bundle are mutually exclusive"}}`; Anthropic `invalid_request_error` on `/v1/messages` (`internal/middleware/aiqg_headers.go:147`, written at `internal/middleware/aiqg.go:1185`–`1201`) | No | Send one |
 | `TAS-Source-App` longer than 128 characters | `400` | same shape, `"message":"aiqg: TAS-Source-App exceeds 128 characters"` (`internal/middleware/aiqg_headers.go:136`, `:149`) | No | Shorten it |
 | The token resolver's backend is unreachable | `503` | `{"error":{"code":"token_resolver_unavailable","message":"AIQG token resolver is temporarily unavailable; retry"}}`; Anthropic `api_error` on `/v1/messages` (`internal/middleware/aiqg.go:1090`–`1098`) | **Yes**, with backoff — nothing was attempted | Retry |
-| Strict ingress with no token resolver at all — **committed, not yet deployed** (#173) | `401` | `{"error":{"code":"path_a_auth_required","message":"AIQG ingress is not accepting tokens (no token resolver configured)","reason":"no_resolver_configured","docs":"https://docs.tas.scharber.com/aiqg/auth"}}`; Anthropic `authentication_error` with the same message on `/v1/messages` (`internal/middleware/aiqg.go:1045`–`1061`) | No — an operator misconfiguration | Report it; your token is not the problem |
+| Strict ingress with no token resolver at all — on `llm-router-aiqg` from `aiqg-v5.87` (#173) | `401` | `{"error":{"code":"path_a_auth_required","message":"AIQG ingress is not accepting tokens (no token resolver configured)","reason":"no_resolver_configured","docs":"https://docs.tas.scharber.com/aiqg/auth"}}`; Anthropic `authentication_error` with the same message on `/v1/messages` (`internal/middleware/aiqg.go:1045`–`1061`) | No — an operator misconfiguration | Report it; your token is not the problem |
 
 *History:* until the 2026-09-21 refresh this table gave the unknown-token body
 (`"reason":"token_unknown"`) for the missing-token row too, and a separate
 "Same, on `/v1/messages`" row. Neither matched the code at `eee4b24` or the
 live gateway; both rows are corrected above from code and live probes.
 `missing_header` is present only on the missing-token `401`, `reason` only on the
-unknown-token one — branch on `code` and those two fields, never on `message`.
+unknown-token one. If you must tell these cases apart, branch on the HTTP status
+first, then on `code` and those two fields, never on `message`. They are the
+least unstable part of the body, not a contract: like every error string here
+they are unversioned (see "Compatibility guarantees"), so pin a test against
+them.
 
 The second row is the sharp edge: **a bad credential returns `400`, not `401`**,
 because a malformed value never reaches authentication. An integrator debugging
@@ -1422,16 +1551,16 @@ charge, not a free correction.
 
 | Status | Source | Meaning | Billed | Retry |
 |---|---|---|---|---|
-| `400` | `internal/server/server.go:1066` | `Invalid JSON: …` — the OpenAI-dialect body did not decode | No | Never unchanged. Fix the body |
-| `403` | `internal/server/server.go:1245` | `request blocked by content policy` — the gatekeeper's inbound scan blocked the prompt. Distinct from the policy-enforcement `422` below | No — refused before the vendor call | Never. The identical request is blocked again |
-| `500` | `internal/server/server.go:1239` | `content scan failed` — the inbound scanner errored and the gatekeeper is configured to fail closed | No | Yes, with backoff |
-| `402` | `internal/server/server.go:1477` | `provider_key_required: no stored <vendor> credential for this account and shared-key fallback is disabled` | No — refused before any vendor call | Never. Store a credential or enable shared fallback; the identical request fails identically |
+| `400` | `internal/server/server.go:1078` | `Invalid JSON: …` — the OpenAI-dialect body did not decode | No | Never unchanged. Fix the body |
+| `403` | `internal/server/server.go:1257` | `request blocked by content policy` — the gatekeeper's inbound scan blocked the prompt. Distinct from the policy-enforcement `422` below | No — refused before the vendor call | Never. The identical request is blocked again |
+| `500` | `internal/server/server.go:1251` | `content scan failed` — the inbound scanner errored and the gatekeeper is configured to fail closed | No | Yes, with backoff |
+| `402` | `internal/server/server.go:1489` | `provider_key_required: no stored <vendor> credential for this account and shared-key fallback is disabled` | No — refused before any vendor call | Never. Store a credential or enable shared fallback; the identical request fails identically |
 | `422` | `internal/server/enforcement.go:134` | **Blocked by policy** — body `blocked by policy: <pattern names>` | No — refused before the vendor call | Never. The identical request is blocked again |
-| `503` | `internal/server/server.go:1380` | `Routing failed: …` — the router could not **select** a provider | No — this is selection failing, before any attempt | Yes, with backoff. Nothing was spent |
-| `500` | `internal/server/server.go:1765`, `internal/server/server.go:1935` | `Completion failed: …` — the attempt, **including every fallback hop**, failed | **Yes, potentially several times** | Only deliberately. Each prior attempt that reached a vendor may already be billed |
-| `500` | `internal/server/server.go:2467` | `Streaming failed: …` — a `"stream": true` request could not open a stream with the chosen provider or any `fallback_config` provider, before any byte was sent | Possibly, if a vendor accepted and then failed | Only deliberately |
-| `403` | `internal/server/server.go:1966` | `response blocked by content policy` — the vendor **answered** and the outbound scan blocked the answer (non-streaming only) | **Yes** — the vendor call completed | Rarely useful: the same prompt tends to produce a blocked answer again |
-| `500` | `internal/server/server.go:1954` | `response content scan failed` — the vendor answered, the outbound scanner errored, and the gatekeeper fails closed | **Yes** | Yes, knowing it bills again |
+| `503` | `internal/server/server.go:1392` | `Routing failed: …` — the router could not **select** a provider | No — this is selection failing, before any attempt | Yes, with backoff. Nothing was spent |
+| `500` | `internal/server/server.go:1777`, `internal/server/server.go:1976` | `Completion failed: …` — the attempt, **including every fallback hop**, failed | **Yes, potentially several times** | Only deliberately. Each prior attempt that reached a vendor may already be billed |
+| `500` | `internal/server/server.go:2508` | `Streaming failed: …` — a `"stream": true` request could not open a stream with the chosen provider or any `fallback_config` provider, before any byte was sent | Possibly, if a vendor accepted and then failed | Only deliberately |
+| `403` | `internal/server/server.go:2007` | `response blocked by content policy` — the vendor **answered** and the outbound scan blocked the answer (non-streaming only) | **Yes** — the vendor call completed | Rarely useful: the same prompt tends to produce a blocked answer again |
+| `500` | `internal/server/server.go:1995` | `response content scan failed` — the vendor answered, the outbound scanner errored, and the gatekeeper fails closed | **Yes** | Yes, knowing it bills again |
 **Not emitted at `dc1957b`: `413` and `429` on the completion routes.** Earlier
 versions of this table listed `413 Request entity too large` and `429 Rate
 limited`, citing `internal/server/anthropic_messages.go:581` and `:583`. Those
@@ -1467,8 +1596,8 @@ unless a source is given:
 |---|---|---|
 | Any path not in the public allowlist, on `gateway.air-ops.net` (including every `GET` route) | `404` | nginx's default web page (not JSON), `<title>404 Not Found</title>` — the request never reaches the router (`k8s/ingress-gateway-airops.yaml:83`–`133`) |
 | A path or method the router does not register, on the internal hosts — for example `GET /v1/chat/completions`, or `/v1/registry/*` on `llm-router` (`aiqg-v5.75`, observed 2026-09-24; `llm-router-aiqg` now returns `503` there instead) | `404` | plain text `404 page not found` (the router library's default; there is no `405`) |
-| `GET /v1/models/{model}` for a model no provider lists | `404` | `{"error":{"code":404,"message":"Model nope-model not found","type":"api_error"},"timestamp":…}` — also when the Anthropic SDK asks for a non-Anthropic model, since that listing holds Anthropic models only (`internal/server/server.go:2788`–`2813`) |
-| `GET /v1/providers/{name}` or `/v1/health/{name}` for an unknown provider | `404` | `Provider <name> not found`, standard envelope (`internal/server/server.go:2822`, `:2878`) |
+| `GET /v1/models/{model}` for a model no provider lists | `404` | `{"error":{"code":404,"message":"Model nope-model not found","type":"api_error"},"timestamp":…}` — also when the Anthropic SDK asks for a non-Anthropic model, since that listing holds Anthropic models only (`internal/server/server.go:2834`–`2859`) |
+| `GET /v1/providers/{name}` or `/v1/health/{name}` for an unknown provider | `404` | `Provider <name> not found`, standard envelope (`internal/server/server.go:2868`, `:2924`) |
 | `GET /v1/breaker` when the breaker store cannot be read | `500` | `breaker status unavailable: …`, standard envelope (`internal/server/breaker_status.go:63`) |
 
 None of these is retryable except the breaker `500`.
@@ -1479,36 +1608,39 @@ that dies mid-stream produces no status, no error body, and a normal stream
 terminator. The only signal available to a streaming client is the
 `finish_reason` (OpenAI) or `stop_reason` (Anthropic) on the final chunk —
 treat absent or empty as a failure. See "Streaming has no error channel" below
-for why, and note that this gap is tracked as issue #172 rather than settled.
+for why. Issue #172 (`76fa529`) adds a terminal error event to the stream on
+`llm-router-aiqg` from `aiqg-v5.87`; `llm-router` (`aiqg-v5.75`) still ends
+silently, and even with #172 the status stays `200` and a clean early
+end-of-file still looks like success, so keep the `finish_reason` check.
 
 
 **Mid-stream failure, by version:**
 
 | Version | What the client receives after a vendor dies mid-stream |
 |---|---|
-| **Images that predate `76fa529`**: `llm-router` on `aiqg-v5.75` (as of 2026-09-24), and `llm-router-aiqg`, which was on `aiqg-v5.86` when probed on 2026-09-21 and on `aiqg-v5.87` by 2026-09-24 | Status `200` already sent; the stream stops and ends with the normal terminator — `data: [DONE]` on the OpenAI surfaces, `content_block_stop`/`message_stop` on `/v1/messages`. No error text anywhere. The only signal is a missing or empty `finish_reason`/`stop_reason` |
-| **Committed at `dc1957b`** (#172); expected on `llm-router-aiqg` `aiqg-v5.87` from its build commit, not probed live | Status `200`; a final error event in the surface's dialect, with no normal completion event after it on `/v1/messages` and `/v1/responses`. Shapes are under "Streaming has no error channel" below |
+| **Images that predate `76fa529`**: `llm-router` on `aiqg-v5.75` (still so on 2026-10-02), and `llm-router-aiqg` up to `aiqg-v5.86` (probed on 2026-09-21) | Status `200` already sent; the stream stops and ends with the normal terminator — `data: [DONE]` on the OpenAI surfaces, `content_block_stop`/`message_stop` on `/v1/messages`. No error text anywhere. The only signal is a missing or empty `finish_reason`/`stop_reason` |
+| **Images that include `76fa529`** (#172): `llm-router-aiqg` from `aiqg-v5.87` (built from `e6c24c0`, which contains `76fa529`), and so on `aiqg-v5.90` as of 2026-10-02. Inferred from the build commit, not probed with a failing stream | Status `200`; a final error event in the surface's dialect, with no normal completion event after it on `/v1/messages` and `/v1/responses`. Shapes are under "Streaming has no error channel" below |
 
 Code written against both — check for an error event *and* for a missing
 `finish_reason`/`stop_reason` — works before and after the rollout.
 
 **`503` and `500` are the pair people get backwards, and the doc used to as
 well.** `503 Routing failed` comes from `s.router.Route()` returning an error
-(`internal/server/server.go:1380`) — the router could not pick a provider at all,
+(`internal/server/server.go:1392`) — the router could not pick a provider at all,
 so no vendor was contacted and nothing was spent. Chain exhaustion is the *other*
 one: `attemptCompletionWithRetryAndFallback` returning an error surfaces as
-`500 Completion failed` (`internal/server/server.go:1935`), logged internally as
+`500 Completion failed` (`internal/server/server.go:1976`), logged internally as
 `All completion attempts failed`. By definition several vendor calls may have
 been made and billed before you saw it. Retrying a `503` is cheap; retrying a
 `500` re-runs the whole chain and pays for it again. How many calls sit behind
 a `500` on the live path depends on the note under "How it works end to end":
 one, unless your request body carried `retry_config` or `fallback_config`.
 
-The other `503` in the codebase (`internal/server/server.go:2922`) belongs to
+The other `503` in the codebase (`internal/server/server.go:2968`) belongs to
 `POST /v1/routing/decision`, a dry-run endpoint that returns the routing decision
 without completing anything. It is not a completion error and never bills. Its
 body is decoded as a completion request, so a malformed one gets `400 Invalid
-JSON: …` (`internal/server/server.go:2904`). The registry admin routes add two
+JSON: …` (`internal/server/server.go:2955`). The registry admin routes add two
 more `503`s and their own errors, listed in their section.
 
 **No `Retry-After` header is emitted on any of these.** The only `Retry-After`
@@ -1556,8 +1688,8 @@ unless your body asked for retries or fallback.)
 **Every 5xx from the attempt chain arrives as `500`, whatever the vendor said.**
 This is a verified source reading, not an assumption: `handleNonStreamingCompletion`
 and its retrying variant both render any chain failure as
-`500 Completion failed: <wrapped error>` (`internal/server/server.go:1765`,
-`internal/server/server.go:1935`), and no code path maps an upstream `502` or
+`500 Completion failed: <wrapped error>` (`internal/server/server.go:1777`,
+`internal/server/server.go:1976`), and no code path maps an upstream `502` or
 `504` onto the response status. The vendor's own status survives only as text
 inside that message. Do not parse it — it is a `fmt.Errorf` chain, not a
 contract. Branch on `500` and treat the message as a log line.
@@ -1586,9 +1718,9 @@ tenant configuration you cannot see from the response.
 Every status above assumes the response headers have not been sent yet. Once a
 stream starts they cannot be used, and the streaming path has no substitute.
 
-This subsection describes the images that predate #172. As of 2026-09-24 that
-is only `llm-router` (`aiqg-v5.75`). `llm-router-aiqg`'s `aiqg-v5.87` build
-(`e6c24c0`) includes #172. That is inferred from the build commit and has not
+This subsection describes the images that predate #172. As of 2026-10-02 that
+is only `llm-router` (`aiqg-v5.75`). `llm-router-aiqg` has included #172 since
+its `aiqg-v5.87` build (`e6c24c0`) and runs `aiqg-v5.90` today. That is inferred from the build commit and has not
 been re-probed with a failing stream (see the header's `[!UNVERIFIED]` note).
 At `eee4b24`,
 `handleStreamingCompletion` wrote `200` and the server-sent events (SSE) headers
@@ -1607,16 +1739,16 @@ the protocol level.** Your client must decide from the payload: check
 `finish_reason` (OpenAI) or `stop_reason` (Anthropic) on the final chunk and
 treat absent or empty as a failure, rather than trusting that `[DONE]` arrived.
 
-**Committed, not yet deployed: the stream now carries a terminal error event**
+**On `llm-router-aiqg` from `aiqg-v5.87` (not on `llm-router`): the stream now carries a terminal error event**
 (`76fa529`, #172). The status is still `200` — the live streaming path writes it
-before the first chunk (`internal/server/server.go:2488`) — but a provider that
+before the first chunk (`internal/server/server.go:2529`) — but a provider that
 fails mid-stream now sends one last chunk marked as an error instead of closing
 silently (`internal/types/responses.go:64`–`83`; OpenAI at
 `internal/providers/openai/provider.go:182`–`189`, Anthropic at
 `internal/providers/anthropic/provider.go:172`–`176` and `:207`–`211`).
 `streamChunks` turns that chunk into the dialect's error event, records
 `finish_reason` as `error` on the AIQG event, and does **not** send the normal
-terminator (`internal/server/server.go:1843`–`1870`). The encoder interface
+terminator (`internal/server/server.go:1862`–`1905`). The encoder interface
 gained a third method, `writeError`, for this
 (`internal/server/anthropic_messages.go:600`–`606`). What arrives on the wire:
 
@@ -1647,7 +1779,7 @@ call: `completeWithFallback` takes `ctx := r.Context()`
 straight to `provider.ChatCompletion(ctx, req)`
 (`internal/server/fallback.go:194`); the retrying path that live requests
 actually take does the same, passing `r.Context()` down to the same call
-(`internal/server/server.go:1931`, `:2567`). Go's HTTP server cancels that context when
+(`internal/server/server.go:1972`, `:2613`). Go's HTTP server cancels that context when
 the client goes away, so **the upstream vendor call is cancelled too** — the
 gateway does not keep generating tokens for a caller that left.
 
@@ -1669,24 +1801,24 @@ call can cost you the next one.
 > is a second reason to measure: the tier walk itself may not run on live
 > requests (see "How it works end to end"). On the path that does run, a
 > caller-supplied `retry_config` stops at its next backoff wait once the context
-> is cancelled (`internal/server/server.go:2558`–`2563`).
+> is cancelled (`internal/server/server.go:2604`–`2609`).
 
 One more streaming surprise: if the provider does not support streaming at all,
 the request silently becomes non-streaming. `StreamCompletion` returning an error
 falls through to `handleNonStreamingCompletion`
-(`internal/server/server.go:1888`–`1896`), so a request that set `"stream": true`
+(`internal/server/server.go:1924`–`1932`), so a request that set `"stream": true`
 can come back as a single ordinary JSON body with no SSE framing. A client that
 assumes SSE because it asked for SSE will fail to parse a perfectly successful
 response. Branch on the response `Content-Type`, not on what you requested.
 Since `76fa529` that branch also sets the response header
-`X-TAS-Stream-Fallback: true` (`internal/server/server.go:1893`).
+`X-TAS-Stream-Fallback: true` (`internal/server/server.go:1929`).
 
 > [!UNVERIFIED] The fallback in the paragraph above sits in
 > `handleStreamingCompletion`, which no route calls (see the note under "How it
 > works end to end"). On the live dispatch, a stream that cannot be opened goes
 > through `attemptStreamingWithFallback` and ends as `500 Streaming failed: …`
-> rather than as a JSON body (`internal/server/server.go:2464`–`2468`,
-> `:2518`–`2534`). New finding, 2026-09-21; not exercised live. Branching on
+> rather than as a JSON body (`internal/server/server.go:2505`–`2509`,
+> `:2564`–`2580`). New finding, 2026-09-21; not exercised live. Branching on
 > `Content-Type` stays correct either way.
 
 ## Extension points
@@ -1730,12 +1862,14 @@ substituted there without importing `internal/registry`.
 **Adding a wire surface** — translate at the boundary and converge on the shared
 pipeline, as `internal/server/anthropic_messages.go` and
 `internal/server/responses_api.go` both do. Register in the same block at
-`internal/server/server.go:934`, wrapped in `wrapAIQG`; that wrapper is what
+`internal/server/server.go:946`, wrapped in `wrapAIQG`; that wrapper is what
 gives the new surface both governance and telemetry, so a route registered
 outside it is silently uncounted. A new streaming dialect implements
 `streamEncoder` — now three methods, including `writeError`, which must be
 terminal (`internal/server/anthropic_messages.go:600`–`606`) — and is driven by
-the shared `streamChunks` loop, not a copy of it.
+the shared `streamChunks` loop, not a copy of it. A copy would also lose the
+response buffer that loop returns, and with it judge coverage for the new
+surface.
 
 **Adding a metric** has one rule that matters more than the mechanics: declare it
 in `internal/metrics/metrics.go` and add it to the `MustRegister` call at
@@ -1755,7 +1889,7 @@ explains why a mirrored gauge is the same failure arrived at honestly.
 Two mechanical constraints on that path. `RegisterProviderHealth` returns rather
 than panics on a duplicate registration, and the caller tolerates
 `prometheus.AlreadyRegisteredError` specifically so a second `NewServer` in one
-process — which the tests do — is not fatal (`internal/server/server.go:410`).
+process — which the tests do — is not fatal (`internal/server/server.go:422`).
 If you add another scrape-time collector, match that handling or the second
 server construction fails. And anything wrapping a `http.ResponseWriter` in the
 request path must forward `Flush`, as `statusRecorder` does
@@ -1771,7 +1905,7 @@ events without failing anything.
 | Per-tenant strategy, provider pin, limits, chain | **Data, not code.** Route rules are resolved per request from `aiqg-dashboard-be` (`pkg/aiqg/policy/policy.go:141`–`159`) and applied by `routeBySelection` (`internal/routing/selection.go:81`) and `routeWithPin`. Change them in the dashboard, not here | `aiqg-dashboard-be` |
 | Policy patterns and bundles | **Data, outside this repository.** Which patterns a tenant enables, and the action for each, arrive in the resolved bundle from the same dashboard endpoint; the gateway only reads them (`internal/middleware/aiqg.go:1234`–`1244`) | `aiqg-dashboard-be` |
 | Scanner rules (what counts as a finding) | **Outside this repository.** Scanning is the `Gatekeeper` module, imported as `github.com/Tributary-ai-services/Gatekeeper/pkg/scan` (`internal/server/enforcement.go:13`) and resolved to the sibling checkout by a `replace` directive (`go.mod:23`). New detectors are added there | `Gatekeeper` repository |
-| Enforcement actions | **Closed.** `decideEnforcement` knows exactly `log` (and ungoverned — ignored), `block`, and any other value treated as redact; the strongest wins (`internal/server/enforcement.go:64`–`93`). A new action means changing that function and the outcome types in `go-aiqg-resilience` | `internal/server/enforcement.go` |
+| Enforcement actions | **Closed.** `decideEnforcement` knows exactly `log` (and ungoverned — ignored), `block`, and any other value treated as redact; the strongest wins (`internal/server/enforcement.go:64`–`93`). A new action means changing that function and the outcome types in `go-aiqg-resilience` — the shared Go module at `aether-shared/go-aiqg-resilience` that holds the routing health, budget, and enforcement contract this gateway and `aiqg-dashboard-be` must agree on (`go.mod:36`, resolved to the sibling checkout at `go.mod:84`) | `internal/server/enforcement.go` |
 
 **Deliberately closed:** raw passthrough. There is no route that forwards a
 request to a vendor unparsed, and adding one would bypass scanning, enforcement,
@@ -1952,7 +2086,7 @@ surface that matches your client, not the vendor you expect to serve it.
 Read the `model` field to learn who served the request.
 
 **`503 Routing failed: …`** — the router could not *select* a provider, so no
-vendor was called (`internal/server/server.go:1380`). The text after the colon
+vendor was called (`internal/server/server.go:1392`). The text after the colon
 names the reason; the common ones, from `internal/routing/router.go`, are `provider <name> is not
 healthy` (you named a model only that provider serves, and it is down, `:640`);
 `no healthy providers available` (`:667`); `no providers support required
@@ -1988,7 +2122,8 @@ with no producer, a series nothing has incremented on this pod yet, `GET` traffi
 that is never counted, or an unregistered `provider_health`. Before any of them,
 though, rule out the pod serving the *old* exporter, in which case the numbers
 are fabricated rather than absent. A query carrying `exported_service` also
-breaks after the change, while one carrying `service` does not.
+returns nothing for `llm-router-aiqg`, which no longer has that label, while one
+carrying `service` does not.
 
 **Which exporter a pod is serving** is not answerable from the image tag: tags
 are release-shaped (`aiqg-v5.86`), not commit-shaped, and this repository
@@ -2012,36 +2147,35 @@ the customer-facing one. On 2026-09-21 `llm-router-aiqg` still answered `1` on
 the same image. On 2026-09-24, after the `aiqg-v5.87` rollout,
 `gateway.aiqg.tas.scharber.com` answered `0` and `llm-router.tas.scharber.com`
 still answered `1`. The same probe doubles as a rough test for everything this
-document marks "committed, not yet deployed": while a host answers `1`, none of
+document marks as arriving after `eee4b24`: while a host answers `1`, none of
 that is live there. A `0` shows only that the host is at `b6070a0` or later. It
 does not prove any particular later commit is deployed.
 (The internal host still serves `/metrics`; the public `gateway.air-ops.net`
 returns `404` for it.)
 
-**`llm_router_tokens_total` and `llm_router_cost_total` under-count your
-traffic** — they are fed only from the non-streaming completion paths
-(`internal/server/server.go:1777` and `internal/server/server.go:2000`). A
-`"stream": true` request is counted in `requests_total` and timed in
-`request_duration_seconds`, but contributes no tokens and no cost. If your
-integration streams, these two series are not a spend figure; the AIQG event
-stream (defined under vocabulary) is, and you read it through the dashboard
-backend rather than through this gateway. That was the code at `eee4b24`. It
-is not what `llm-router.tas.scharber.com` does either: as of 2026-09-24 it
-still serves the old exporter, whose token and cost numbers are not
-measurements at all (see telemetry). Since `cddd372` (#171), which the
-`aiqg-v5.87` build on `llm-router-aiqg` includes, a stream that reports usage
-feeds both series (`internal/server/server.go:1877`–`1881`). Anthropic streams
-report usage in their final chunk; OpenAI streams, per the marker under feature
-support, appear never to. So on `llm-router-aiqg` the under-count should now narrow to
-OpenAI-served streams and to Anthropic streams that broke before their final
-chunk. That is inferred from the build commit and not measured against a live
-stream.
+**`llm_router_tokens_total` and `llm_router_cost_total` under-count streamed
+traffic that reports no usage.** Both series are fed from the non-streaming
+completion paths (`internal/server/server.go:1789` and
+`internal/server/server.go:2041`) and, since `cddd372` (#171), from the
+streaming loop whenever the stream reported usage
+(`internal/server/server.go:1912`–`1916`). Anthropic streams report usage in
+their final chunk; OpenAI streams, per the marker under feature support, appear
+never to. So the gap is OpenAI-served streams and Anthropic streams that broke
+before their final chunk: those are counted in `requests_total` and timed in
+`request_duration_seconds` but add no tokens and no cost. If your integration
+streams, these two series are not a spend figure; the AIQG event stream
+(defined under vocabulary) is, and you read it through the dashboard backend
+rather than through this gateway. That is the behaviour of `llm-router-aiqg`
+from `aiqg-v5.87`, whose build commit includes `cddd372`; it is inferred from
+that commit and not measured against a live stream. `llm-router.tas.scharber.com`
+on `aiqg-v5.75` behaves differently again: it still serves the old exporter,
+whose token and cost numbers are not measurements at all (see telemetry).
 
 **A stream ends with an error event instead of a normal end** (on
 `llm-router-aiqg` since `aiqg-v5.87`, inferred from its build commit and not
 re-probed; `llm-router` on `aiqg-v5.75` still ends silently) — the vendor failed mid-stream. The status line still says `200`. Treat
 the response as failed, and expect that the tokens generated before the break
-were billed — the code comment says as much (`internal/server/server.go:1875`–`1876`).
+were billed — the code comment says as much (`internal/server/server.go:1910`–`1911`).
 
 ## Limits & trade-offs
 
@@ -2053,7 +2187,7 @@ discovery and also a public exposure — treat the catalogue as public informati
 
 **`/metrics` is unauthenticated too, and it now carries real numbers.** It is
 registered on the root router without `wrapAIQG`
-(`internal/server/server.go:982`), so anyone who can reach the endpoint reads it.
+(`internal/server/server.go:994`), so anyone who can reach the endpoint reads it.
 Before `b6070a0` that exposed fiction; afterwards it exposes real request rates,
 real token volumes, and real dollar cost per provider and model. The series carry
 no tenant label, so this is aggregate rather than per-customer disclosure, but
@@ -2063,8 +2197,10 @@ The public hosts now do (SEC-1, SEC-23: `k8s/ingress-gateway-airops.yaml`,
 `k8s/ingress-llm-airops.yaml`); `gateway.aiqg.tas.scharber.com` does not, and
 served `/metrics` anonymously on 2026-09-21.
 
-**Two registry routes spend money without authentication** (committed, not yet
-deployed, and only with the registry enabled). `POST /v1/registry/sync` sends a
+**Two registry routes spend money without authentication** once the registry
+is enabled. The routes are deployed on `llm-router-aiqg` (since `aiqg-v5.87`),
+where they currently return `503 model registry is not enabled` and so spend
+nothing; they do not exist on `llm-router`. `POST /v1/registry/sync` sends a
 billable one-token request per configured Anthropic model, and `POST
 /v1/registry/validate` one per call. The sync route is limited to one pass per
 ten seconds gateway-wide; validate has no limit at all
@@ -2087,7 +2223,7 @@ thing that survives a rollout.
 there is no request-id deduplication: a search of the repository at `eee4b24`
 finds no idempotency key, no replay cache, and no dedup check on the completion
 path. A supplied `id` is not consulted for replay — when absent the handler
-mints a fresh one from the clock (`internal/server/server.go:1070`–`1072`) and
+mints a fresh one from the clock (`internal/server/server.go:1082`–`1084`) and
 otherwise passes yours through as a label. A client retry is a second charge,
 which is why the SDK max-retries advice under Getting started matters.
 
@@ -2103,10 +2239,13 @@ under failure modes to establish what a given pod is actually running. Unchanged
 on 2026-09-21, when both tags were read again with `kubectl`. On 2026-09-24
 `kubectl` showed `aiqg-v5.75` and `aiqg-v5.87`: the gap widened, and the two
 hosts now serve different `/metrics` exporters. On 2026-10-02 `kubectl` showed
-`aiqg-v5.75` and `aiqg-v5.88`. Commit `000394a`
-(OPS-27) now records each Deployment's real tag in its manifest
+`aiqg-v5.75` and `aiqg-v5.90` (`llm-router-aiqg` passed through `aiqg-v5.88`
+and `aiqg-v5.89` that day). The manifest for `llm-router-aiqg` still pins
+`aiqg-v5.88` (`k8s/deployment-aiqg-strict.yaml:71`), so it no longer matches
+what runs. Commit `000394a`
+(OPS-27) made each manifest record its Deployment's own tag
 (`k8s/deployment.yaml:59`, `k8s/deployment-aiqg-strict.yaml:71`) instead of a
-shared `latest`.
+shared `latest`, but as of 2026-10-02 only `llm-router`'s manifest is current.
 
 ## Related
 

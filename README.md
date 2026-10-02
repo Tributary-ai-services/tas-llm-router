@@ -13,7 +13,7 @@ answers:
   - "Which settings change behaviour, and where do the secrets live?"
   - "How much of what is merged on main is actually running in production?"
   - "What is the model registry, and is it switched on?"
-verified_against: "tas-llm-router@43fc830, 2026-10-02"
+verified_against: "tas-llm-router@db5ae56, 2026-10-02"
 depth: standard
 ---
 
@@ -28,10 +28,11 @@ attribution, event emission — happens on the way through it.
 
 > **Verified 2026-09-23 against `tas-llm-router@06038b9`, re-checked
 > 2026-09-24 against `tas-llm-router@dc1957b`, and re-checked 2026-10-02
-> against `tas-llm-router@43fc830`** (code diff, both deployments' live image
-> tags and pod placement, the no-token 401 probe, `/v1/providers`,
-> `/v1/registry/status`, and the `aiqg` database's migration level; the other
-> probes were not re-run on the two re-checks), with read-only
+> against `tas-llm-router@43fc830` and then `tas-llm-router@db5ae56`** (code
+> diff, both deployments' live image tags and pod placement, the no-token 401
+> probe, `/v1/providers`, `/v1/registry/status`, the strict gateway's
+> `/aiqg/metrics`, and the `aiqg` database's migration level; the other
+> probes were not re-run on the re-checks), with read-only
 > probes against both live deployments (`/v1/providers`, `/v1/models`,
 > `/metrics`, the registry admin routes), the deployments' live image and
 > environment, and one authenticated, non-billing call through
@@ -69,7 +70,7 @@ independent image tags that routinely skew:
 | Deployment | Image tag today | Reached at | Auth |
 |---|---|---|---|
 | `llm-router` | `aiqg-v5.75` | `llm-router.tas.scharber.com` (all routes), in-cluster `llm-router.tas-llm-router:8086`, publicly `llm.air-ops.net` (completion paths only, behind Cloudflare Access) | permissive — serves completions with no credential |
-| `llm-router-aiqg` | `aiqg-v5.88` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
+| `llm-router-aiqg` | `aiqg-v5.90` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
 
 Both are `2/2` ready and both answered live probes on the verification date.
 Since 2026-09-21 the cluster has two nodes, `um773dev` and `pinova01`, and
@@ -87,25 +88,39 @@ not reachable from the open internet. It is reachable from anywhere inside the
 cluster or on the cluster's network.
 
 **The two deployments run very different code.** The strict gateway has run
-`aiqg-v5.88` since 2026-09-26 (#235), which that release commit records as
-stamped with gateway version `dc2fe59` — so it carries everything on `main`
-through #233 and the documentation refresh after it. Of the commits on `main`
-after `dc2fe59`, up to `43fc830`, one is that release commit (#235, an
-image-tag change in `k8s/deployment-aiqg-strict.yaml` and a comment in
-`k8s/kustomization.yaml`), and the other, #236, is the only Go code on `main`
-that the strict gateway does not run. It adds two flags to each priced
-response event, `schema_requested` and `tools_declared`, recording whether the
-caller set `response_format` or declared any tools
-(`internal/server/server.go:1186`). They measure how much real traffic a
+`aiqg-v5.90` since about 19:05 UTC on 2026-10-02. Before that it ran
+`aiqg-v5.89` for roughly three and a half hours that day, and before that
+`aiqg-v5.88` from 2026-09-26 (#235), which that release commit records as
+stamped with gateway version `dc2fe59`. Neither newer tag has a release commit
+on `main`: at `db5ae56`, `k8s/deployment-aiqg-strict.yaml` still pins
+`aiqg-v5.88`, so the manifest and the live deployment disagree, and a
+`kubectl apply -k k8s/` from `main` would roll the strict gateway back by two
+releases. The live image exports `aiqg_stream_buffer_truncated_total` on
+`/aiqg/metrics` (checked 2026-10-02), a series that exists only from #238
+(`db5ae56`), so it carries that change.
+
+The two Go changes on `main` since `dc2fe59` are #236 and #238. #236 adds two
+flags to each priced response event, `schema_requested` and `tools_declared`,
+recording whether the caller set `response_format` or declared any tools
+(`internal/server/server.go:1198`). They measure how much real traffic a
 planned structural-validity score could ever apply to; nothing is scored yet,
 and a request that was never stamped omits both keys rather than publishing a
-`false` nobody observed (`pkg/aiqg/events/event.go:279`).
+`false` nobody observed (`pkg/aiqg/events/event.go:279`). #238 lets the judge
+(below) grade streamed responses. Before it, the judge saw only non-streamed
+responses, because the streaming path kept no response text, and streamed
+calls were not even counted as excluded. Now each streamed response's text is
+buffered up to a cap (256 KiB by default, `AIQG_STREAM_BUFFER_MAX_BYTES`;
+`internal/server/stream_buffer.go:18`) and judged on the same sampling as a
+non-streamed one (`internal/server/server.go:1963`). A stream that failed
+mid-flight is excluded and counted under reason `stream_error`, not graded,
+and a response longer than the cap is still graded, since the judge reads
+only the first 6,000 characters of any response.
 
 What #233 brought to the strict gateway concerns the judge, a second model
 that grades a sample of responses and posts each grade to
 `aiqg-dashboard-be`. Those grades now carry which vendor and model were
 graded, which model graded them, and a `self_judged` flag set when the two
-models are the same (`internal/server/judge.go:156`). Self-judged grades are
+models are the same (`internal/server/judge.go:204`). Self-judged grades are
 still recorded, but the dashboard leaves them out of judged efficacy, its
 per-model, per-workflow mean of judge grades on a 0–100 scale
 (`aiqg-dashboard-be/internal/store/quality.go:194`), and it treats a grade
@@ -124,7 +139,7 @@ and none of the old ones, and answered `/v1/registry/status` with
 registry code says while the registry is off. `llm-router` still exported the
 pre-rebuild series (`llm_router_security_score`, `llm_router_threat_level`) and
 answered that route with the HTTP router's bare `404 page not found`. Below,
-"live on the strict gateway" means merged code running in `aiqg-v5.88`; none
+"live on the strict gateway" means merged code running in `aiqg-v5.90`; none
 of the Go code merged from `b6070a0` onward runs on the permissive deployment.
 What reached both deployments through manifests alone: the public-host path
 allowlists (SEC-1, SEC-23), password authentication to both Redis instances
@@ -136,7 +151,11 @@ allowlists (SEC-1, SEC-23), password authentication to both Redis instances
 > established is an upper bound: it predates `b6070a0`. The `dc2fe59` mapping
 > for `aiqg-v5.88` comes from the release commit (#235), which records
 > `GATEWAY_VERSION` stamped `dc2fe59`; that stamp on emitted events was not
-> re-checked on 2026-10-02.
+> re-checked on 2026-10-02. The commits behind `aiqg-v5.89` and `aiqg-v5.90`
+> are not recorded anywhere: the images carry no labels, and their registry
+> build times (15:36 and 19:04 UTC on 2026-10-02) fall within two minutes of
+> the merges of `43fc830` and `db5ae56`. That `aiqg-v5.90` contains #236 as
+> well as #238 is inferred from #238 being built on top of it on `main`.
 
 > **Both sides of judged efficacy are now deployed** (checked 2026-10-02).
 > On 2026-09-25 neither was: `aiqg-dashboard-be` ran `0.4.0-rc85`, which
@@ -192,7 +211,7 @@ Genuinely unfinished or in flight, stated plainly:
   with a real Prometheus registry and deleted eight series that had no data
   source; later merges added prompt-cache savings, semantic-cache, judge-spend,
   and registry series on top of it. Since the `aiqg-v5.87` rollout on
-  2026-09-21 (carried forward in `aiqg-v5.88`), `llm-router-aiqg` exports
+  2026-09-21 (carried forward through `aiqg-v5.90`), `llm-router-aiqg` exports
   those series; `llm-router` still
   returned the old ones on 2026-09-23. Numbers on the router dashboards built
   from `/metrics` are measurements for the strict gateway from 2026-09-21
@@ -390,7 +409,7 @@ flowchart LR
 ```
 
 Both deployments listen on container port **8086**, which is also the service
-port. The code's own default is **8080** (`internal/config/config.go:390`); the
+port. The code's own default is **8080** (`internal/config/config.go:396`); the
 deployment overrides it with `LLM_ROUTER_PORT=8086` from the `llm-router-config`
 ConfigMap. If you run the binary locally without that variable, it listens on
 8080 — that is the only place the two numbers legitimately disagree.
@@ -406,15 +425,15 @@ leaves scanning disabled; the process keeps serving.
 for the strict gateway.** In the `aiqg-v5.75` build that `llm-router` runs,
 with `AIQG_EMITTER_TYPE=both`, a broker failure while the emitter is
 constructed aborts server construction and the process exits 1, so a pod with
-no reachable broker crash-loops. Code merged in #191, which `aiqg-v5.87` and
-`aiqg-v5.88` carry, changes that: `internal/server/server.go:201` falls back to the log
+no reachable broker crash-loops. Code merged in #191, which every strict-gateway
+image since `aiqg-v5.87` carries, changes that: `internal/server/server.go:201` falls back to the log
 emitter, raises the `aiqg_emitter_degraded` gauge to 1, and keeps serving — a
 Kafka outage costs `llm-router-aiqg` telemetry, not availability.
 
 > [!UNVERIFIED] Neither behaviour was exercised on 2026-09-23. The crash loop
 > is what the code did at `eee4b24`, which `aiqg-v5.75` demonstrably predates
 > (see [Status & scope](#status--scope)), and that image's commit is not
-> recorded; the fallback is what the code at `e6c24c0` and at `43fc830` does. Nobody took Kafka
+> recorded; the fallback is what the code at `e6c24c0` and at `db5ae56` does. Nobody took Kafka
 > down to watch either happen.
 
 Redis is quieter: a running pod tolerates losing it, but the
@@ -450,8 +469,9 @@ These are the ones that change behaviour rather than tune it:
 | `AIQG_RESPONSE_CACHE_ENABLED` | Exact-match response cache | off | `true`, `AIQG_RESPONSE_CACHE_TTL=10m` |
 | `AIQG_SEMCACHE_ENABLED` / `AIQG_SEMCACHE_SHADOW` | Semantic cache, and whether it serves or only observes | off / `true` | `true` / `true` — observing, on `llm-router-aiqg` |
 | `AIQG_SEMCACHE_EMBED_PROVIDER` / `AIQG_SEMCACHE_MIN_SIMILARITY` | Embedder and match threshold; the two move together, because each model scores the same pair differently | — | `tei` (TEI serving `redis/langcache-embed-v3-small`) / `0.87` |
+| `AIQG_STREAM_BUFFER_MAX_BYTES` | Cap on the text kept from each streamed response so the judge can grade it; a negative value turns buffering off, and with it judging of streamed responses (each counted as excluded, reason `stream_buffer_disabled`) | `0`, meaning 256 KiB | unset, so 256 KiB, on `llm-router-aiqg`; the permissive deployment's image predates the setting |
 | `LLM_ROUTER_DEFAULT_STRATEGY` | Routing when the request does not name a model | `cost_optimized` | `cost_optimized` |
-| `registry.enabled` (YAML only) | Model registry: discovery, aliases, fallback | `false` | off — the baked-in `configs/config.yaml` has no `registry:` block; the code runs only in `aiqg-v5.88` |
+| `registry.enabled` (YAML only) | Model registry: discovery, aliases, fallback | `false` | off — the baked-in `configs/config.yaml` has no `registry:` block; the code runs only in the strict gateway's image |
 
 Secrets are referenced here by location only. Provider keys and the internal
 dashboard token live in the `llm-router-secret` Opaque secret in namespace
@@ -518,7 +538,10 @@ harnesses test the real Go implementation rather than a copy of it.
 Deploying from this repository means `kubectl apply -k k8s/`, never `-f` on a
 single file: the live Deployment selectors carry the kustomization's common
 labels, so a bare `-f` is rejected on the immutable selector (#220). Each
-deployment file pins the image tag it actually runs.
+deployment file is meant to pin the image tag it actually runs, but on
+2026-10-02 `k8s/deployment-aiqg-strict.yaml` still said `aiqg-v5.88` while
+`aiqg-v5.90` was live (see [Status & scope](#status--scope)); compare the file
+with `kubectl get deploy` before applying.
 
 ## Where to go next
 
