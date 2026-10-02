@@ -14,13 +14,19 @@ answers:
   - "Which hostnames reach this service, and why does /health return 404 or 403 on some of them?"
   - "Which behaviours described here change when the next image is deployed, and how do I tell which code a pod is running?"
 depth: standard
-verified_against: "tas-llm-router@dc1957b, 2026-09-24"
+verified_against: "tas-llm-router@43fc830, 2026-10-02"
 ---
 
 # LLM Router — Operations
 
-> **Verified 2026-09-24 against `tas-llm-router@dc1957b`**, a code-only refresh
-> for judge-score provenance (#233), on top of the 2026-09-23 pass against
+> **Verified 2026-10-02 against `tas-llm-router@43fc830`**, a refresh for two
+> commits: `llm-router-aiqg` pinned to `aiqg-v5.88` (#235, which carries #233's
+> judge-score provenance), and the efficacy-applicability flags on AIQG events
+> (#236, not in any running image). On 2026-10-02 the image tags, pod names,
+> retained revisions, and the which-exporter query were re-run against the live
+> cluster; everything else carries the date it was observed. This sits on the
+> 2026-09-24 code-only pass against `dc1957b` for judge-score provenance (#233),
+> itself on top of the 2026-09-23 pass against
 > `06038b9`. That pass refreshed the 2026-09-21 pass against `552d869`, itself
 > refreshing an earlier pass against `eee4b24` on 2026-08-25. The 2026-09-23
 > refresh re-checked what the
@@ -39,7 +45,9 @@ verified_against: "tas-llm-router@dc1957b, 2026-09-24"
 > from `e6c24c0`, which contains everything merged through `552d869` (#223). The
 > semantic-cache embedder switch (#222) arrived separately, as configuration:
 > revision 120 carried it on the *previous* image `aiqg-v5.86`, thirteen minutes
-> before `v5.87` shipped. The internal `llm-router` still
+> before `v5.87` shipped. On 2026-09-26 it moved again, to `aiqg-v5.88`
+> (revision 122), whose release commit records it as stamped from `dc2fe59` and
+> so carrying judge-score provenance (#233). The internal `llm-router` still
 > runs `aiqg-v5.75`, the image it ran in August, and has none of it — not the
 > metrics rewrite, a Kafka outage no longer being fatal, the wired
 > error/auth/rate-limit counters, the model registry and its admin API, nor the
@@ -130,10 +138,10 @@ is explained under "How it works end to end".
 gateway customers. They are separate deployments, separate services, separate
 ingress hosts, and they **run different image versions**:
 
-| Deployment | Serves | Ingress host | Image tag (observed 2026-09-23) | Replicas |
+| Deployment | Serves | Ingress host | Image tag (observed 2026-10-02) | Replicas |
 |---|---|---|---|---|
 | `llm-router` | Internal TAS traffic | `llm-router.tas.scharber.com` | `aiqg-v5.75`, unchanged since August | 2, fixed, one per node |
-| `llm-router-aiqg` | External AIQG customers | `gateway.aiqg.tas.scharber.com` | `aiqg-v5.87`, since 2026-09-21 21:48 UTC (was `aiqg-v5.86`) | 2, fixed, one per node |
+| `llm-router-aiqg` | External AIQG customers | `gateway.aiqg.tas.scharber.com` | `aiqg-v5.88`, since 2026-09-26 15:34 UTC (was `aiqg-v5.87` from 2026-09-21, and `aiqg-v5.86` before that) | 2, fixed, one per node |
 
 The live check, which prints the full image reference:
 
@@ -141,7 +149,7 @@ The live check, which prints the full image reference:
 kubectl get deploy -n tas-llm-router -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
 NAME              IMAGE
 llm-router        registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.75
-llm-router-aiqg   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.87
+llm-router-aiqg   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.88
 ```
 
 **Five ingress hosts front these two deployments, and only two of them answer
@@ -178,7 +186,7 @@ non-streaming completions from public clients can hit that first.
 
 Both tags carry the `aiqg-` prefix regardless of which deployment they run on —
 that prefix is the image release line, not an indicator of which deployment it
-belongs to. The tags are ordered, so `aiqg-v5.87` on `llm-router-aiqg` is
+belongs to. The tags are ordered, so `aiqg-v5.88` on `llm-router-aiqg` is
 **ahead** of `aiqg-v5.75` on `llm-router`: the AIQG deployment receives releases
 first and the internal deployment lags it. A fix present in one deployment is not necessarily present in the
 other. There is no HorizontalPodAutoscaler; replica counts are fixed in the
@@ -263,12 +271,15 @@ that model is therefore self-judged. A code comment records a 2026-09-24
 measurement, taken before this flag existed: 179 of 464 judged scores were
 self-graded (`internal/server/judge.go:149`).
 
-> [!UNVERIFIED] Neither running image contains `dc1957b`. Both were built before
-> it (see "What the next deploy changes"), so neither currently sends the new
-> fields. Whether the deployed `aiqg-dashboard-be` already applies this
-> exclusion was not checked against the cluster. If it does, `efficacy_judged`
-> will stay empty however many judge calls `aiqg_judge_calls_total` shows,
-> until the router is redeployed. That is expected, not an outage.
+> [!UNVERIFIED] Since 2026-09-26 `llm-router-aiqg` runs `aiqg-v5.88`, which
+> contains `dc1957b`; `llm-router` (`aiqg-v5.75`) does not, but it runs no judge,
+> so that gap does not matter here. The release commit (#235) reports the change
+> verified live on 2026-09-26: judge rows carried all four provenance fields,
+> `gpt-4o-mini` read judged `93.0`, and `claude-haiku-4-5-20251001` rows were
+> excluded as self-judged with `judged_samples` `0`. This refresh confirmed the
+> image tag on the cluster on 2026-10-02 but did not re-read the judge rows or
+> the dashboard. An empty `efficacy_judged` for the judge model itself is
+> therefore expected, not an outage; an empty figure for every model is not.
 
 **How the semantic cache measures "close enough".** It turns each prompt into a
 384-number vector (an *embedding*) and compares vectors by similarity; a stored
@@ -301,7 +312,7 @@ which embedder is live. If it is missing, and in its place you see
 
 The `0.87` threshold is a prediction from thirteen hand-written question pairs,
 not a measurement on traffic. The manifest says to re-derive it from
-`llm_router_semcache_top_similarity`, which `aiqg-v5.87` exports; on 2026-09-23
+`llm_router_semcache_top_similarity`, which `llm-router-aiqg` exports since `aiqg-v5.87`; on 2026-09-23
 that series had no samples yet, because no request had reached the cache
 since the switch.
 
@@ -584,14 +595,14 @@ Never paste a token into a ticket, a chat message, or this document.
 ```bash
 kubectl get pods -n tas-llm-router -o wide
 NAME                               READY   STATUS    RESTARTS   AGE    IP           NODE       NOMINATED NODE   READINESS GATES
-llm-router-6ddd95fb5-fjn5m         1/1     Running   0          2d7h   10.42.0.42   um773dev   <none>           <none>
-llm-router-6ddd95fb5-h9nzp         1/1     Running   0          2d7h   10.42.1.55   pinova01   <none>           <none>
-llm-router-aiqg-55549bc5dc-8vwz6   1/1     Running   0          2d4h   10.42.1.74   pinova01   <none>           <none>
-llm-router-aiqg-55549bc5dc-f75rb   1/1     Running   0          2d4h   10.42.0.54   um773dev   <none>           <none>
+llm-router-6ddd95fb5-fjn5m         1/1     Running   0          10d   10.42.0.42    um773dev   <none>           <none>
+llm-router-6ddd95fb5-h9nzp         1/1     Running   0          10d   10.42.1.55    pinova01   <none>           <none>
+llm-router-aiqg-65fcc4cbb8-cz945   1/1     Running   0          6d    10.42.1.94    pinova01   <none>           <none>
+llm-router-aiqg-65fcc4cbb8-tl2k6   1/1     Running   0          6d    10.42.0.109   um773dev   <none>           <none>
 ```
 
-Captured 2026-09-23; the `llm-router-aiqg` names changed with the `aiqg-v5.87`
-rollout on 2026-09-21. Two replicas each, **one on each node**, is the expected
+Captured 2026-10-02; the `llm-router-aiqg` names changed with the `aiqg-v5.88`
+rollout on 2026-09-26. Two replicas each, **one on each node**, is the expected
 steady state; both replicas of one deployment on the same node is a placement
 problem to fix in daylight (see "Restart a deployment"), not an outage. **Ready does not mean working
 here** — both deployments use a `tcpSocket` probe on port 8086, not an HTTP
@@ -699,7 +710,7 @@ fail, so searching for their names finds silence and proves nothing.
 | What you observe | Where the fault is |
 |---|---|
 | Errors naming `api.anthropic.com` or `api.openai.com` | The provider or egress. The router is behaving correctly by reporting it. |
-| `CrashLoopBackOff`, with a startup line naming `NewKafkaEmitter` and `run out of available brokers` | **Kafka.** Not a bad image — see the dependency section before rolling back. Applies to `llm-router` (`aiqg-v5.75`) only; `llm-router-aiqg` on `aiqg-v5.87` no longer crash-loops on this. |
+| `CrashLoopBackOff`, with a startup line naming `NewKafkaEmitter` and `run out of available brokers` | **Kafka.** Not a bad image — see the dependency section before rolling back. Applies to `llm-router` (`aiqg-v5.75`) only; `llm-router-aiqg` (`aiqg-v5.88`; since `aiqg-v5.87`) no longer crash-loops on this. |
 | `llm-router-aiqg` pods Ready, `aiqg_emitter_degraded` reads `1` | **Kafka**, unreachable when that pod started. Serving continues; spend events go to Loki instead of Kafka. |
 | `CrashLoopBackOff` with any other startup error | The router or its image. |
 | Callers get `503` / `token_resolver_unavailable` while pods look Ready | `aiqg-dashboard-be`. Not the caller's token. |
@@ -755,8 +766,8 @@ comes from:
 | `llm_router_requests_total` | HTTP middleware around the completion handlers, `internal/metrics/middleware.go:74` | Request rate and status-code mix. Labels are `provider`, `method`, `status_code`. |
 | `llm_router_request_duration_seconds` | Same middleware, `internal/metrics/middleware.go:75` | **New series.** End-to-end latency as the caller sees it, including scanning, routing, and fallback hops. |
 | `llm_router_active_connections` | In-flight gauge, `internal/metrics/middleware.go:61` | Concurrency right now. Previously the constant 5. |
-| `llm_router_tokens_total` | `resp.Usage` on each completed call, `internal/server/server.go:1772` | Token volume by provider and direction. |
-| `llm_router_cost_total` | The pricing call that also produces the tenant's spend record, `internal/server/server.go:1774` | Dollar spend. The metric and the billing record are computed by the same code path on the same numbers, so a discrepancy between this panel and a tenant's invoice is not possible — if they differ, one of them was read over a different time window. |
+| `llm_router_tokens_total` | `resp.Usage` on each completed call, `internal/server/server.go:1777` | Token volume by provider and direction. |
+| `llm_router_cost_total` | The pricing call that also produces the tenant's spend record, `internal/server/server.go:1779` | Dollar spend. The metric and the billing record are computed by the same code path on the same numbers, so a discrepancy between this panel and a tenant's invoice is not possible — if they differ, one of them was read over a different time window. |
 | `llm_router_blocked_requests_total` | Policy enforcement, `internal/server/enforcement.go:127` | Requests refused by policy, labelled `inbound` or `outbound`. |
 | `llm_router_provider_health` | Read from the router at scrape time, `internal/server/server.go:403` | Provider reachability. Cannot go stale, because nothing mirrors it. |
 
@@ -779,12 +790,12 @@ feed `llm_router_tokens_total` or `llm_router_cost_total`, so both
 under-reported by the streaming share — the one exception to the table's claim
 that the cost panel cannot disagree with a tenant's invoice: on an `eee4b24`
 image that uses streaming, it runs low. They now do, from the final usage frame of
-the stream (`internal/server/server.go:1873`), including a stream that failed
+the stream (`internal/server/server.go:1878`), including a stream that failed
 part-way, since those tokens were generated and billed. A stream that dies
 mid-response now ends with an explicit error event rather than looking like a
 clean, short answer, and a request for streaming that falls back to a single JSON
 body carries the response header `X-TAS-Stream-Fallback: true`
-(`internal/server/server.go:1888`).
+(`internal/server/server.go:1893`).
 
 > [!WARNING] **At `eee4b24`, three of the new series were registered but never written to.**
 > `llm_router_errors_total`, `llm_router_auth_attempts_total`, and
@@ -800,8 +811,8 @@ body carries the response header `X-TAS-Stream-Fallback: true`
 > **Superseded at `552d869`, running on `llm-router-aiqg` since 2026-09-21
 > (`aiqg-v5.87`), not yet on `llm-router`.** Commit `1d89669`
 > wired all three: `llm_router_errors_total{error_type="completion_failed"}` on
-> the two "completion failed" paths (`internal/server/server.go:1759` and
-> `:1929`), `llm_router_auth_attempts_total` at each gateway authentication
+> the two "completion failed" paths (`internal/server/server.go:1764` and
+> `:1934`), `llm_router_auth_attempts_total` at each gateway authentication
 > outcome — `success`, `malformed`, `unknown`, `suspended`, `missing`
 > (`internal/middleware/aiqg.go:206` onward) — and
 > `llm_router_rate_limit_hits_total` where the limiter refuses a request
@@ -931,10 +942,11 @@ address in the `instance` label:
 ```bash
 curl -sS -k -G 'https://prometheus.tas.scharber.com/api/v1/query' \
   --data-urlencode 'query=count by (instance, service) (llm_router_semcache_lookups_total)'
-{"status":"success","data":{"resultType":"vector","result":[{"metric":{"instance":"10.42.1.74:8086","service":"llm-router-aiqg"},"value":[1790216311.705,"4"]},{"metric":{"instance":"10.42.0.54:8086","service":"llm-router-aiqg"},"value":[1790216311.705,"4"]}]}}
+{"status":"success","data":{"resultType":"vector","result":[{"metric":{"instance":"10.42.0.109:8086","service":"llm-router-aiqg"},"value":[1790955367.510,"4"]},{"metric":{"instance":"10.42.1.94:8086","service":"llm-router-aiqg"},"value":[1790955367.510,"4"]}]}}
 ```
 
-Captured 2026-09-23: both `llm-router-aiqg` pods have the new code, and no
+Captured 2026-10-02 (the same shape as on 2026-09-23, with the `aiqg-v5.88`
+pods' addresses): both `llm-router-aiqg` pods have the new code, and no
 `llm-router` pod appears. Each `instance` that appears is a pod that has it; an
 empty `result`, the state on 2026-08-25 and 2026-09-21, means no pod does. The
 query uses `llm_router_semcache_lookups_total` rather than
@@ -945,7 +957,7 @@ for exactly that reason. To scrape one named pod directly instead, bypass the
 ingress with a port-forward:
 
 ```bash
-kubectl port-forward -n tas-llm-router pod/llm-router-aiqg-55549bc5dc-8vwz6 18086:8086 &
+kubectl port-forward -n tas-llm-router pod/llm-router-aiqg-65fcc4cbb8-cz945 18086:8086 &
 fwd=$!
 sleep 3
 curl -sS http://localhost:18086/metrics | grep -c llm_router_request_duration_seconds
@@ -959,7 +971,8 @@ it; a forgotten port-forward holds local port 18086 and quietly survives the res
 of your session.
 
 A count of `0` is the old exporter, non-zero is the new one. The `47` is what
-this `aiqg-v5.87` pod returned on 2026-09-23; an `llm-router-aiqg` pod on
+this `aiqg-v5.88` pod returned on 2026-10-02, the same count an `aiqg-v5.87`
+pod returned on 2026-09-23; an `llm-router-aiqg` pod on
 `aiqg-v5.86` returned `0` on 2026-09-21. A pod that has served no completion
 yet also returns `0`, so confirm a `0` with `grep -c llm_router_semcache_lookups_total`
 (AIQG pods only). Substitute a current pod name from triage step 3 — the names
@@ -1341,9 +1354,9 @@ become Ready. Do this in daylight, one pod at a time, never during an incident
 and never while a Redis outage would leave the replacement stuck in init.
 
 ```bash
-kubectl delete pod -n tas-llm-router llm-router-aiqg-55549bc5dc-8vwz6
+kubectl delete pod -n tas-llm-router llm-router-aiqg-65fcc4cbb8-cz945
 <!-- unverified-example --> not run: changes cluster state. Expected shape:
-pod "llm-router-aiqg-55549bc5dc-8vwz6" deleted
+pod "llm-router-aiqg-65fcc4cbb8-cz945" deleted
 ```
 
 **If you apply the manifests yourself, use `kubectl apply -k k8s/`, never
@@ -1351,12 +1364,20 @@ pod "llm-router-aiqg-55549bc5dc-8vwz6" deleted
 kustomization adds, and a selector is immutable, so a bare `-f` of
 `k8s/deployment.yaml` is rejected (`k8s/deployment.yaml:36`). The kustomization
 also rewrites the image repository to `registry-api.tas.scharber.com/tas-llm-router`
-and keeps each file's own tag — `aiqg-v5.75` and `aiqg-v5.87` — so an apply
+and keeps each file's own tag — `aiqg-v5.75` and `aiqg-v5.88` — so an apply
 reproduces what runs rather than moving either deployment to a new build
-(`k8s/kustomization.yaml:44`). The comment there still names `aiqg-v5.86` for
-`llm-router-aiqg`; the tag that is applied is the one in
-`k8s/deployment-aiqg-strict.yaml:71`, which matched the live `aiqg-v5.87` on
-2026-09-23.
+(`k8s/kustomization.yaml:44`). Since #235 the comment there names the same tags
+as the manifests; the tag that is applied is the one in
+`k8s/deployment-aiqg-strict.yaml:71`, which matched the live `aiqg-v5.88` on
+2026-10-02. The release commit reports `kubectl diff -k` on that tree as clean;
+this refresh did not re-run it.
+
+**If you `set image` instead, name the container.** `kubectl set image
+deploy/llm-router-aiqg llm-router=<image>` changes only the router; the wildcard
+form `'*=<image>'` also replaces the `busybox:1.36` image of the
+`wait-for-redis` init container with the router image. The `aiqg-v5.88` release
+commit (#235) records avoiding exactly this and confirming the init container
+intact afterwards.
 
 **Caveat for `llm-router-aiqg`:** its rolling update strategy is `maxSurge: 1,
 maxUnavailable: 0` — Kubernetes must schedule one *additional* pod and see it
@@ -1515,17 +1536,18 @@ is failing, and confirm which one from the image table above.
 kubectl rollout history deploy/llm-router-aiqg -n tas-llm-router
 deployment.apps/llm-router-aiqg
 REVISION  CHANGE-CAUSE
-105       <none>
-106       <none>
+112       <none>
+113       <none>
 ...
-114       <none>
-115       <none>
+121       <none>
+122       <none>
 ```
 
-**There is history to roll back to** — as of 2026-09-23, eleven revisions are
-retained, 111 through 121. The oldest five date from 2026-08-25; 116 and 117
-from 2026-09-17 and -18; and the four newest, 118 through 121, were all created
-on 2026-09-21. Nothing has been deployed since. What is missing is `CHANGE-CAUSE`: every row reads `<none>`, so the
+**There is history to roll back to** — as of 2026-10-02, eleven revisions are
+retained, 112 through 122; 111 aged out when 122 was created. The oldest four
+date from 2026-08-25; 116 and 117 from 2026-09-17 and -18; 118 through 121 were
+all created on 2026-09-21; and 122, the current one, is `aiqg-v5.88` from
+2026-09-26. What is missing is `CHANGE-CAUSE`: every row reads `<none>`, so the
 list tells you revisions exist but not what any of them contained. Do not read
 the empty column as an empty history.
 
@@ -1534,13 +1556,13 @@ prints that revision's full pod template, including the image tag, which is what
 actually identifies it:
 
 ```bash
-kubectl rollout history deploy/llm-router-aiqg -n tas-llm-router --revision=111
-deployment.apps/llm-router-aiqg with revision #111
+kubectl rollout history deploy/llm-router-aiqg -n tas-llm-router --revision=112
+deployment.apps/llm-router-aiqg with revision #112
 Pod Template:
   Labels:	aiqg-mode=strict
 	app=llm-router-aiqg
 	...
-	pod-template-hash=6cb4b8bbd8
+	pod-template-hash=5478654975
   Annotations:	kubectl.kubernetes.io/restartedAt: 2026-08-24T14:10:00-10:00
   Init Containers:
    wait-for-postgres:
@@ -1563,9 +1585,12 @@ template lists `REDIS_PASSWORD` among its environment variables before you pick
 it.
 
 **Rolling `llm-router-aiqg` back past revision 120 also changes the embedder.**
-On 2026-09-23 revision 121 was `aiqg-v5.87` with TEI, revision 120 was
+On 2026-10-02 revision 122 was `aiqg-v5.88` with TEI (the current one), 121 was
+`aiqg-v5.87` with TEI, revision 120 was
 `aiqg-v5.86` with TEI (live for about thirteen minutes on 2026-09-21), and
-revision 119 and earlier used Ollama. The release note for `aiqg-v5.87` names
+revision 119 and earlier used Ollama. Rolling back one step, from 122 to 121,
+keeps TEI and gives up only judge-score provenance (#233), so `efficacy_judged`
+stops receiving new scores. The release note for `aiqg-v5.87` names
 "re-apply with `aiqg-v5.86`" as its rollback, which keeps TEI. A rollback to
 119 or earlier switches back to `all-minilm`, and the manifest calls flushing
 the `aiqg:scache:*` keys in `redis-semcache` **mandatory** on any embedder
@@ -1581,9 +1606,13 @@ NAME                         REV   IMAGE
 ...
 llm-router-aiqg-549cc85f4    119   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.86
 llm-router-aiqg-55549bc5dc   121   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.87
+llm-router-aiqg-65fcc4cbb8   122   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.88
+...
 llm-router-aiqg-768b4b5458   120   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.86
 ...
 ```
+
+Captured 2026-10-02; `kubectl get rs` sorts by name, not revision.
 
 Then `kubectl get rs <name> -n tas-llm-router -o yaml | grep -A1 EMBED_PROVIDER`
 prints `tei` or `ollama` for that revision.
@@ -1592,7 +1621,7 @@ Walk backwards from the current revision until you find the last tag known to be
 good, then roll back to it:
 
 ```bash
-kubectl rollout undo deploy/llm-router-aiqg -n tas-llm-router --to-revision=111
+kubectl rollout undo deploy/llm-router-aiqg -n tas-llm-router --to-revision=121
 <!-- unverified-example --> not run: changes cluster state. Expected shape:
 deployment.apps/llm-router-aiqg rolled back
 ```
@@ -1716,18 +1745,19 @@ allowlists them, so they are reachable only on the two internal hosts.
 
 ### What the next deploy changes
 
-Everything in this list is merged at `552d869`. Since 2026-09-21 it runs on
-`llm-router-aiqg` (`aiqg-v5.87`, built from `e6c24c0`, which contains all of
-it) and is **still absent from `llm-router`** (`aiqg-v5.75`). "The next
+Everything in this list except its last two rows is merged at `552d869`. Since
+2026-09-21 it runs on `llm-router-aiqg` (`aiqg-v5.87`, built from `e6c24c0`,
+which contains all of it; `aiqg-v5.88` since 2026-09-26) and is **still absent
+from `llm-router`** (`aiqg-v5.75`). "The next
 deploy" therefore now means the next deploy of `llm-router`. No image carries a
 commit label, so the image tag and the series a pod exports are the only ways to
 tell which code it runs. Two series bracket the range:
 
 | The pod's `/metrics` exports | Its code is at least | So it has |
 |---|---|---|
-| Neither series below | older than `eee4b24` | None of this list. `llm-router`, 2026-09-23 |
+| Neither series below | older than `eee4b24` | None of this list. `llm-router`, 2026-09-23 and 2026-10-02 |
 | `llm_router_request_duration_seconds` | `eee4b24`, the exporter rewrite | The real exporter; not necessarily anything else here |
-| `llm_router_semcache_lookups_total` | `8e641ca`, the last code change before `552d869` | **Everything in this list.** Both `llm-router-aiqg` pods, 2026-09-23 |
+| `llm_router_semcache_lookups_total` | `8e641ca`, the last code change before `552d869` | **Everything in this list except the last two rows**, which this test cannot see. Both `llm-router-aiqg` pods, 2026-09-23 and 2026-10-02 |
 
 `llm_router_semcache_lookups_total` is pre-seeded at zero, so it is present from
 the moment a new pod starts, before any traffic. Run the Prometheus query from
@@ -1751,14 +1781,21 @@ not. See also "How it works end to end".
 | Strict mode fails closed with no token source (#173) | If the AIQG deployment is ever started with neither a token list nor a dashboard address, every request gets `401` rather than being let through | "Failure modes" |
 | Semantic-cache, evaluation-spend, and prompt-cache metrics (#184, #199, #219) | New `llm_router_semcache_*`, `aiqg_judge_*`, `aiqg_shadow_*`, `aiqg_eval_*`, `aiqg_prompt_cache_*` series | "Series that arrive with the next deploy" |
 | Model registry (#202–#208) | Admin endpoints answer `503` instead of `404`; no routing change while disabled | "Model registry admin endpoints" |
-| Judge-score provenance (#233, `dc1957b`) — **on neither deployment yet** | Judge scores start carrying `vendor`, `model`, `judge_model`, `self_judged`, and `efficacy_judged` can begin to fill for models other than the judge model | "Judge scores and the dashboard's judged-efficacy figure" under "How it works end to end" |
+| Judge-score provenance (#233, `dc1957b`) — **on `llm-router-aiqg` since `aiqg-v5.88`, 2026-09-26** | Judge scores start carrying `vendor`, `model`, `judge_model`, `self_judged`, and `efficacy_judged` can begin to fill for models other than the judge model | "Judge scores and the dashboard's judged-efficacy figure" under "How it works end to end" |
+| Efficacy-applicability flags (#236, `43fc830`) — **on neither deployment yet** | AIQG events from `/v1/chat/completions` — and from `/v1/messages`, `/v1/responses`, and `/v1/completions`, which hand off to the same handler — gain `schema_requested` (the caller set `response_format`) and `tools_declared` (the caller declared tools). Measurement only: no body is read, nothing is scored, no request behaves differently | AIQG event fields only; no section of this document depends on it |
 
-The last row is the one exception to "merged at `552d869`". It landed after
-`e6c24c0`, so `llm-router-aiqg` needs a new image too. It adds no metric series,
-so the two-series test above cannot detect it. The router does not log it at
-startup, and no image carries a commit label. There is no check you can run
-against the pod itself, only two indirect ones. The first is the image tag: a
-tag built from `dc1957b` or later has it, and `aiqg-v5.87` does not. The
+The last two rows are the exceptions to "merged at `552d869`"; both landed after
+`e6c24c0`. Neither adds a metric series, so the two-series test above cannot
+detect them. The flags are stamped in the chat-completion handler
+(`internal/server/server.go:1186`) and serialised only when set
+(`pkg/aiqg/events/event.go:279`), so an event without them came from a pod
+without the change. No running image has it: `aiqg-v5.88` was built from
+`dc2fe59`, before `43fc830`.
+
+Judge-score provenance is not logged at startup, and no image carries a commit
+label. There is no check you can run against the pod itself, only two indirect
+ones. The first is the image tag: a tag built from `dc1957b` or later has it —
+`aiqg-v5.88` does, `aiqg-v5.87` does not. The
 second is the rows the pod writes. Look in `aiqg.response_feedback` in the
 dashboard's config Postgres for the newest `signal_type = 'judge'` rows. If
 their `metadata` has `judge_model` and `self_judged` keys, the pod that wrote
@@ -1766,9 +1803,11 @@ them has the change (`aiqg-dashboard-be/internal/handlers/internal_judge.go:135`
 Those rows are not labelled by pod, so this shows only that some pod has it.
 
 **Deploy one deployment at a time and re-run triage steps 1 and 2 after each.**
-The two running tags are now twelve version numbers apart. `llm-router-aiqg`
-made its jump on 2026-09-21 — 33 commits, regression-tested by the owner with
-10 cases and no status changes, per the release commit (#223). `llm-router`
+The two running tags are now thirteen version numbers apart. `llm-router-aiqg`
+made its big jump on 2026-09-21 — 33 commits, regression-tested by the owner with
+10 cases and no status changes, per the release commit (#223) — and its step to
+`aiqg-v5.88` on 2026-09-26 was checked with 24 live requests, all `200`, per its
+release commit (#235). `llm-router`
 still predates every change above, so its next deploy is the larger jump. The
 owner decides when it happens.
 
@@ -1845,7 +1884,7 @@ from the caller's side by looking for the `Retry-After` header on their response
 
 **Request timeouts.** A timeout is not its own signature — it is classified as a
 retryable error by substring match on `timeout`, `connection`, `unavailable`, or
-`rate limit` (`internal/server/server.go:2673`), and then surfaces through the
+`rate limit` (`internal/server/server.go:2678`), and then surfaces through the
 retry path already in the table above. Search for the retry lines and read the
 embedded provider error:
 
