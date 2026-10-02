@@ -281,6 +281,18 @@ type AIQGServerConfig struct {
 	JudgeSamplePct int    `yaml:"judge_sample_pct"`
 	ShadowEvalPct  int    `yaml:"shadow_eval_pct"`
 
+	// StreamBufferMaxBytes caps the assembled text the gateway keeps for a
+	// streamed response so the quality layer can read it (Plan #17a T2
+	// Phase 1). 0 uses defaultStreamBufferMaxBytes; negative disables
+	// buffering entirely, which returns streaming to being invisible to the
+	// judge.
+	//
+	// The cap is the ONLY bound: the buffer is per in-flight stream, and
+	// llm-router-aiqg declares no memory limit (BestEffort, per the cluster
+	// policy), so worst case is concurrent streams × this value with nothing
+	// to catch it.
+	StreamBufferMaxBytes int `yaml:"stream_buffer_max_bytes"`
+
 	// EmitterType selects how AIQG events are published:
 	//   "log"   — logrus → Loki (default; works without infra)
 	//   "kafka" — sarama SyncProducer → Kafka topic (durable, partitioned)
@@ -1840,11 +1852,30 @@ func setRouterMetadataHeaders(w http.ResponseWriter, metadata *types.RouterMetad
 // a failure rather than reading a truncated stream as a clean completion. On the
 // error path done() is NOT called — the error event is terminal. Shared by both
 // streaming handlers so the two dialects and both stay in lockstep.
-func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-chan *types.ChatChunk, provider, model string) {
+//
+// It also assembles the response text into a capped streamBuffer and returns it
+// (Plan #17a T2 Phase 1), because a streamed response otherwise leaves no text
+// anywhere for the quality layer to read. Returns nil when buffering is
+// switched off. Appending to the buffer is a few bytes of copy per chunk on a
+// goroutine that is already writing to the wire, so it adds nothing the caller
+// can feel.
+func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-chan *types.ChatChunk, provider, model string) *streamBuffer {
 	failed := false
 	var lastUsage *types.Usage
+	// A negative cap means "do not buffer", which returns streaming to being
+	// invisible to the judge — a deliberate break-glass, counted as an
+	// exclusion rather than left silent.
+	var buf *streamBuffer
+	if s.config == nil || s.config.AIQG.StreamBufferMaxBytes >= 0 {
+		max := defaultStreamBufferMaxBytes
+		if s.config != nil {
+			max = s.config.AIQG.StreamBufferMaxBytes
+		}
+		buf = newStreamBuffer(max)
+	}
 	for chunk := range chunks {
 		if chunk.Error != nil {
+			buf.markIncomplete()
 			middleware.StampFinishReason(ctx, "error")
 			s.logger.WithField("provider", provider).
 				WithField("detail", chunk.Error.Message).
@@ -1856,6 +1887,7 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 		if chunk.Usage != nil {
 			middleware.StampTokenUsage(ctx, chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.CacheReadTokens)
 			lastUsage = chunk.Usage
+			buf.setUsage(chunk.Usage)
 		}
 		for _, c := range chunk.Choices {
 			if c.FinishReason != "" {
@@ -1863,6 +1895,9 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 				break
 			}
 		}
+		// Buffer BEFORE writing the chunk out, so a panic in the encoder
+		// cannot leave the buffer disagreeing with what the caller received.
+		buf.append(chunk)
 		enc.writeChunk(chunk)
 	}
 	if !failed {
@@ -1880,6 +1915,7 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 			routermetrics.ObserveCost(provider, model, cost)
 		}
 	}
+	return buf
 }
 
 // handleStreamingCompletion handles streaming chat completions
@@ -1919,7 +1955,12 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 	// named-event SSE for /v1/messages). Token-usage + finish_reason stamping
 	// stays here so both formats feed the AIQG event pipeline identically.
 	enc := s.newStreamEncoder(w, r, req)
-	s.streamChunks(r.Context(), enc, chunks, metadata.Provider, metadata.Model)
+	buf := s.streamChunks(r.Context(), enc, chunks, metadata.Provider, metadata.Model)
+
+	// AIQG LLM-as-judge (§6.6) on the STREAMING path — previously impossible,
+	// because no response text survived the stream. Same sampling, exclusions
+	// and attribution as the non-streaming call site.
+	s.judge.maybeJudgeStream(r.Context(), w, req, buf)
 }
 
 // handleNonStreamingCompletionWithRetry handles non-streaming completions with retry/fallback
@@ -2492,7 +2533,12 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 	// named-event SSE for /v1/messages). Token-usage + finish_reason stamping
 	// stays here so both formats feed the AIQG event pipeline identically.
 	enc := s.newStreamEncoder(w, r, req)
-	s.streamChunks(r.Context(), enc, chunks, metadata.Provider, metadata.Model)
+	buf := s.streamChunks(r.Context(), enc, chunks, metadata.Provider, metadata.Model)
+
+	// AIQG LLM-as-judge (§6.6) on the STREAMING path — previously impossible,
+	// because no response text survived the stream. Same sampling, exclusions
+	// and attribution as the non-streaming call site.
+	s.judge.maybeJudgeStream(r.Context(), w, req, buf)
 }
 
 // attemptCompletionWithRetryAndFallback performs completion with retry and fallback logic

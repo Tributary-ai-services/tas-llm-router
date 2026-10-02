@@ -106,6 +106,12 @@ type AIQGConfig struct {
 	// Env: AIQG_JUDGE_MODEL, AIQG_JUDGE_SAMPLE_PCT.
 	JudgeModel     string `yaml:"judge_model"`
 	JudgeSamplePct int    `yaml:"judge_sample_pct"`
+	// StreamBufferMaxBytes caps the assembled text kept for a streamed
+	// response so the quality layer can read it at all (Plan #17a T2 Phase 1).
+	// 0 = the server default (256 KiB); negative disables buffering, which
+	// returns streaming to being invisible to the judge.
+	// Env: AIQG_STREAM_BUFFER_MAX_BYTES.
+	StreamBufferMaxBytes int `yaml:"stream_buffer_max_bytes"`
 	// ShadowEvalPct (0–100) is the fraction of CONTROL-arm experiment samples
 	// to pairwise shadow-eval — replay through each variant offline + judge
 	// head-to-head. Costs ~2× per shadow sample, so default 0 (off; opt-in).
@@ -694,6 +700,11 @@ func (c *Config) loadFromEnv() {
 			c.AIQG.JudgeSamplePct = n
 		}
 	}
+	if b := os.Getenv("AIQG_STREAM_BUFFER_MAX_BYTES"); b != "" {
+		if n, err := strconv.Atoi(b); err == nil {
+			c.AIQG.StreamBufferMaxBytes = n
+		}
+	}
 	if p := os.Getenv("AIQG_SHADOW_EVAL_PCT"); p != "" {
 		if n, err := strconv.Atoi(p); err == nil {
 			c.AIQG.ShadowEvalPct = n
@@ -1030,6 +1041,7 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 		JudgeModel:                 c.AIQG.JudgeModel,
 		JudgeSamplePct:             c.AIQG.JudgeSamplePct,
 		ShadowEvalPct:              c.AIQG.ShadowEvalPct,
+		StreamBufferMaxBytes:       c.AIQG.StreamBufferMaxBytes,
 		Kafka: server.AIQGKafkaConfig{
 			Brokers: c.AIQG.Kafka.Brokers,
 			Topic:   c.AIQG.Kafka.Topic,

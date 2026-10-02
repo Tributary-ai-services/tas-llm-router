@@ -101,12 +101,61 @@ func shadowSampled(eventID string, pct int) bool {
 	return int(crc32.ChecksumIEEE([]byte("shadow:"+eventID))%100) < pct
 }
 
-// maybeJudge fires an async judge for a sampled, AIQG-attributed, non-streaming
+// maybeJudge fires an async judge for a sampled, AIQG-attributed NON-STREAMING
 // response. Strictly off the hot path: the client already has its response; a
-// judge failure only means no score lands. Skips when judging is off, the
-// request isn't AIQG-attributed (no tenant), or the response has no text.
+// judge failure only means no score lands.
 func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, req *types.ChatRequest, resp *types.ChatResponse) {
-	if jr == nil || req == nil || resp == nil {
+	if jr == nil || resp == nil {
+		return
+	}
+	jr.judgeCompleted(ctx, w, req, extractResponseContent(resp), resp.Usage)
+}
+
+// maybeJudgeStream is the same thing for a STREAMED response, reading the text
+// from the buffer streamChunks assembled (Plan #17a T2 Phase 1).
+//
+// Until this existed the judge had never seen a streamed response at all, and
+// not by decision: maybeJudge takes a *types.ChatResponse, the streaming path
+// never builds one, and so the entire streaming population was absent from the
+// judged aggregate while incrementing no exclusion counter. That is the one
+// thing JudgeExcludedTotal exists to make visible, so the gap was invisible in
+// the very metric designed to show it.
+//
+// Both streaming shapes a partial buffer can take are refused and counted
+// rather than scored:
+//
+//   - buffering off (nil buf) — the pre-Phase-1 behaviour, now at least counted
+//   - stream died mid-flight — the text is a fragment of an answer the caller
+//     never fully received, and finish_reason is already "error" with Efficacy
+//     already 0, so judging it would file a vendor failure as model quality
+//
+// A TRUNCATED buffer is deliberately NOT refused: the judge truncates the
+// response to 6,000 characters itself, so a 256 KiB prefix is exactly as much
+// as it would have read from a complete body. Truncation matters to the
+// body-derived sub-metrics, which must abstain, not to this.
+func (jr *judgeRunner) maybeJudgeStream(ctx context.Context, w http.ResponseWriter, req *types.ChatRequest, buf *streamBuffer) {
+	if jr == nil {
+		return
+	}
+	if buf == nil {
+		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedBufferDisabled).Inc()
+		return
+	}
+	if buf.incomplete {
+		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedStreamError).Inc()
+		return
+	}
+	jr.judgeCompleted(ctx, w, req, buf.text(), buf.usage)
+}
+
+// judgeCompleted is the shared body of both entry points: everything from the
+// exclusion accounting through sampling, attribution and dispatch.
+//
+// It takes the response TEXT rather than a response object, which is what lets
+// the streaming path in at all — the only two things the layer needs from a
+// completed response are its text and its usage, and a stream can produce both.
+func (jr *judgeRunner) judgeCompleted(ctx context.Context, w http.ResponseWriter, req *types.ChatRequest, responseText string, usage *types.Usage) {
+	if jr == nil || req == nil {
 		return
 	}
 	// Each early return below removes a particular KIND of response from the
@@ -122,7 +171,6 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedNotAttributed).Inc()
 		return // not AIQG-attributed — no tenant to scope the score
 	}
-	responseText := extractResponseContent(resp)
 	if strings.TrimSpace(responseText) == "" {
 		metrics.JudgeExcludedTotal.WithLabelValues(metrics.JudgeExcludedEmpty).Inc()
 		return // tool-call-only / empty — nothing semantic to judge
@@ -219,7 +267,7 @@ func (jr *judgeRunner) maybeJudge(ctx context.Context, w http.ResponseWriter, re
 		// under the same limit (#182), the usage so the recorded comparison is
 		// a paired cost sample rather than a preference with no price (#183).
 		go jr.shadowEval(attr, promptText, responseText, msgs, baseModel,
-			cloneIntPtr(req.MaxTokens), resp.Usage)
+			cloneIntPtr(req.MaxTokens), usage)
 	}
 }
 

@@ -266,6 +266,37 @@ const (
 	// tenant never asked for, against a policy that explicitly forbids the
 	// shared key — would be a consent violation dressed up as a fallback.
 	JudgeExcludedBYOKOnly = "byok_only_no_key"
+	// JudgeExcludedStreamError: the stream died mid-flight, so the assembled
+	// text is a fragment of an answer the caller never fully received. Judging
+	// it would score a vendor failure as poor model quality — finish_reason is
+	// already stamped "error" and Efficacy already scores it 0, so the judged
+	// aggregate gains nothing and loses its meaning. Counted rather than
+	// silently dropped, because partial streams are not a random sample.
+	JudgeExcludedStreamError = "stream_error"
+	// JudgeExcludedBufferDisabled: streaming response buffering is switched off
+	// (StreamBufferMaxBytes < 0), so no text exists to judge. This is the
+	// pre-Phase-1 behaviour, and the whole streaming population is excluded —
+	// which is exactly the silence this counter exists to break.
+	JudgeExcludedBufferDisabled = "stream_buffer_disabled"
+)
+
+// StreamBufferTruncatedTotal counts streamed responses whose assembled text hit
+// the byte cap.
+//
+// The judge is unaffected — it truncates prompt and response to 6,000
+// characters anyway — but every body-derived Efficacy sub-metric must ABSTAIN
+// on a truncated buffer, because a JSON object cut off at our own cap is
+// indistinguishable from one the model malformed. Scoring that 0 would
+// manufacture a failure out of a gateway limit.
+//
+// So this is the signal that the cap is set wrong. At a correctly-sized cap it
+// should stay at or near zero; a rising count means body-derived coverage is
+// being lost for a reason entirely within our control.
+var StreamBufferTruncatedTotal = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "aiqg_stream_buffer_truncated_total",
+		Help: "Streamed responses whose buffered text hit the byte cap (body-derived sub-metrics abstain for these).",
+	},
 )
 
 // EvalCredentialSourceTotal records which key an evaluation call billed, by
@@ -398,6 +429,7 @@ func init() {
 		UnbilledSpendUSDTotal,
 		UnpricedCallsTotal,
 		JudgeExcludedTotal,
+		StreamBufferTruncatedTotal,
 		EvalEventsTotal,
 		EvalEventsFailedTotal,
 		EvalCredentialSourceTotal,
