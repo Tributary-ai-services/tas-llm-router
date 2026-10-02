@@ -933,6 +933,9 @@ func routingView(r *Routing) events.RoutingView {
 	return events.RoutingView{
 		PromptCacheMode:            s.PromptCacheMode,
 		PromptCacheBreakpoints:     s.PromptCacheBreakpoints,
+		SchemaRequested:            s.SchemaRequested,
+		ToolsDeclared:              s.ToolsDeclared,
+		ApplicabilitySet:           s.ApplicabilitySet,
 		EnforcementMode:            s.EnforcementMode,
 		EnforcementOutcome:         s.EnforcementOutcome,
 		EnforcementPatterns:        s.EnforcementPatterns,
