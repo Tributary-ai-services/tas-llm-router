@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/tributary-ai/llm-router-waf/pkg/clear"
+
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/tributary-ai/llm-router-waf/internal/types"
@@ -46,10 +48,16 @@ func TestCountJudge_RecordsTokensAndDollarSpend(t *testing.T) {
 		t.Errorf("completed calls: got delta %v, want 1", got-callsBefore)
 	}
 
-	// 1000 input @ $0.00080/1k + 500 output @ $0.00400/1k = $0.0028.
 	// Asserting the dollar figure, not just that *a* number moved: the whole
-	// point of this metric is that tokens alone can't be summed into money.
-	const wantCost = 0.0028
+	// point of this metric is that tokens alone can't be summed into money. The
+	// rate is read from the pricing table rather than pasted — a pasted copy
+	// broke this test when Haiku 4.5's rate was corrected on 2026-10-04, which
+	// is the table changing, not the metric regressing.
+	inRate, outRate, ok := clear.LookupPricing(pricedVendor, pricedModel)
+	if !ok {
+		t.Fatalf("pricing table has no entry for %s:%s", pricedVendor, pricedModel)
+	}
+	wantCost := 1000.0/1000.0*inRate + 500.0/1000.0*outRate
 	if got := testutil.ToFloat64(metrics.UnbilledSpendUSDTotal.WithLabelValues(metrics.SpendPathJudge)); math.Abs((got-spendBefore)-wantCost) > epsilon {
 		t.Errorf("judge spend: got delta %v, want %v", got-spendBefore, wantCost)
 	}
