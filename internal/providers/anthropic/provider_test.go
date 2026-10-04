@@ -172,7 +172,11 @@ func TestAnthropicProvider_ConvertRequest(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Invalid system message format",
+			// Text blocks are the vendor's own system shape and are now carried
+			// through as blocks: merging them silently destroyed Claude Code's
+			// prompt (see TestAnthropicProvider_SystemBlocksStayBlocks), so
+			// rejecting them was never right either.
+			name: "System message as text blocks",
 			request: &types.ChatRequest{
 				Model: "claude-3-haiku-20240307",
 				Messages: []types.Message{
@@ -184,7 +188,25 @@ func TestAnthropicProvider_ConvertRequest(t *testing.T) {
 					},
 				},
 			},
-			wantErr: true, // System messages must be text only
+			wantErr: false,
+		},
+		{
+			// Still an error: the vendor's system field holds text blocks only,
+			// so a non-text block has nowhere to go and must not be dropped
+			// quietly.
+			name: "Invalid system message format",
+			request: &types.ChatRequest{
+				Model: "claude-3-haiku-20240307",
+				Messages: []types.Message{
+					{
+						Role: "system",
+						Content: []types.ContentPart{
+							{Type: "image_url", ImageURL: &types.ImageURL{URL: "https://example.test/x.png"}},
+						},
+					},
+				},
+			},
+			wantErr: true,
 		},
 	}
 
