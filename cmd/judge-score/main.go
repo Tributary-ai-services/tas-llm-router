@@ -20,9 +20,15 @@
 // judge model is explicit", so this command supplies a transport and gets the
 // real rubric, the real parsing, and the real abstain semantics for free.
 //
+// Two modes, because the rubric has two forms and they behave differently:
+// -mode pointwise runs judge.Score (what MinJudgedEfficacy gates on), and
+// -mode pairwise runs judge.ScorePairwise (shipped, but used only by
+// shadow-eval today).
+//
 // Usage:
 //
 //	judge-score -gateway http://localhost:18086 -model gpt-4o-mini < pairs.ndjson
+//	judge-score -mode pairwise -gateway … -model … < comparisons.ndjson
 //
 // Input, one JSON object per line:
 //
@@ -61,6 +67,18 @@ type request struct {
 	Workflow string `json:"workflow"`
 	Prompt   string `json:"prompt"`
 	Response string `json:"response"`
+
+	// Pairwise mode only. Control and Variant are the two responses to the
+	// same prompt; VariantFirst puts the variant in slot "A".
+	//
+	// Both orders have to be runnable from the outside, because position bias
+	// is the failure mode this rubric's own comment names: ScorePairwise
+	// expects the caller to flip the slot per call, which controls the bias in
+	// aggregate but never measures it. Running the same pair twice, once each
+	// way, turns it into a number.
+	Control      string `json:"control"`
+	Variant      string `json:"variant"`
+	VariantFirst bool   `json:"variant_first"`
 }
 
 type result struct {
@@ -72,6 +90,14 @@ type result struct {
 	Workflow      string             `json:"workflow,omitempty"`
 	JudgeModel    string             `json:"judge_model,omitempty"`
 	Err           string             `json:"error,omitempty"`
+
+	// Pairwise mode only. Winner is variant | control | tie, from the
+	// variant's point of view, with the slot already mapped back by the judge
+	// package — so a caller never has to redo that mapping and cannot get it
+	// backwards.
+	Winner            string  `json:"winner,omitempty"`
+	VariantPreference float64 `json:"variant_preference,omitempty"`
+	VariantFirst      bool    `json:"variant_first,omitempty"`
 }
 
 // gatewayCompletion is the transport half of judge.Completion: an AIQG
@@ -148,6 +174,7 @@ func main() {
 		gateway     = flag.String("gateway", "", "AIQG gateway base URL (required)")
 		model       = flag.String("model", "", "judge model (required)")
 		token       = flag.String("token", os.Getenv("AIQG_TAS_AUTH_TOKEN"), "TAS-Auth token; defaults to $AIQG_TAS_AUTH_TOKEN")
+		mode        = flag.String("mode", "pointwise", "pointwise (judge.Score) | pairwise (judge.ScorePairwise)")
 		sourceApp   = flag.String("source-app", "aiqg-judge-eval", "TAS-Source-App for the judge calls")
 		concurrency = flag.Int("concurrency", 4, "in-flight judge calls")
 		timeout     = flag.Duration("timeout", 90*time.Second, "per-call timeout")
@@ -161,6 +188,10 @@ func main() {
 	}
 	if *concurrency < 1 {
 		*concurrency = 1
+	}
+	if *mode != "pointwise" && *mode != "pairwise" {
+		fmt.Fprintf(os.Stderr, "judge-score: -mode must be pointwise or pairwise, got %q\n", *mode)
+		os.Exit(2)
 	}
 
 	j := &judge.Judge{
@@ -211,6 +242,27 @@ func main() {
 			defer cancel()
 
 			out := result{ID: r.ID, Workflow: r.Workflow, JudgeModel: *model}
+
+			if *mode == "pairwise" {
+				pr, err := j.ScorePairwise(ctx, r.Workflow, r.Prompt,
+					r.Control, r.Variant, r.VariantFirst)
+				if err != nil {
+					out.Err = err.Error()
+					results[i] = out
+					return
+				}
+				out.Winner = pr.Winner
+				out.VariantPreference = pr.VariantPreference
+				out.VariantFirst = r.VariantFirst
+				out.Abstain = pr.Abstain
+				out.RubricVersion = pr.RubricVersion
+				if pr.Workflow != "" {
+					out.Workflow = pr.Workflow
+				}
+				results[i] = out
+				return
+			}
+
 			score, err := j.Score(ctx, r.Workflow, r.Prompt, r.Response)
 			if err != nil {
 				out.Err = err.Error()
