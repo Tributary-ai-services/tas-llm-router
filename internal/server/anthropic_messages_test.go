@@ -441,3 +441,76 @@ func TestParseAnthropic_ToolAndMessageCacheControl(t *testing.T) {
 		t.Errorf("breakpoint-free turn should stay a string, got %T", req.Messages[1].Content)
 	}
 }
+
+// The vendor was caching and the client could not see it: events recorded
+// cache_creation 37,341 then cache_read 25,894 per turn on 2026-10-05 while
+// Claude Code reported cache_read_input_tokens: 0, because message_start
+// rendered only input and output tokens. A client that cannot see its cache
+// reads cannot reason about its own cost.
+func TestAnthropicStream_CacheTokensReachTheClient(t *testing.T) {
+	rec := httptest.NewRecorder()
+	enc := newAnthropicStreamEncoder(rec, nil, &types.ChatRequest{Model: "claude-sonnet-5-5"}, nil)
+
+	// Usage on the FIRST chunk, as the provider now sends it from message_start.
+	enc.writeChunk(&types.ChatChunk{
+		ID: "msg_1", Model: "claude-sonnet-5-5",
+		Usage:   &types.Usage{PromptTokens: 474, CacheCreationTokens: 21, CacheReadTokens: 25894},
+		Choices: []types.ChoiceChunk{{Delta: &types.Message{Role: "assistant"}}},
+	})
+	enc.writeChunk(&types.ChatChunk{
+		Choices: []types.ChoiceChunk{{Delta: &types.Message{Content: "pong"}}},
+	})
+	enc.done()
+
+	out := rec.Body.String()
+	var start map[string]interface{}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var v map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &v); err != nil {
+			t.Fatalf("invalid JSON in stream: %v", err)
+		}
+		if v["type"] == "message_start" {
+			start = v["message"].(map[string]interface{})
+		}
+	}
+	if start == nil {
+		t.Fatal("no message_start emitted")
+	}
+	u, ok := start["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatal("message_start carried no usage")
+	}
+	for field, want := range map[string]float64{
+		"input_tokens":                474,
+		"cache_creation_input_tokens": 21,
+		"cache_read_input_tokens":     25894,
+	} {
+		got, present := u[field]
+		if !present {
+			t.Errorf("message_start usage is missing %s — the client cannot distinguish absent from zero", field)
+			continue
+		}
+		if got.(float64) != want {
+			t.Errorf("message_start usage %s = %v, want %v", field, got, want)
+		}
+	}
+}
+
+// Cache fields must be PRESENT even at zero, so a client never has to guess
+// whether the field is missing or the value is genuinely nothing.
+func TestAnthropicStream_CacheFieldsPresentWhenZero(t *testing.T) {
+	rec := httptest.NewRecorder()
+	enc := newAnthropicStreamEncoder(rec, nil, &types.ChatRequest{Model: "claude-sonnet-5-5"}, nil)
+	enc.writeChunk(&types.ChatChunk{ID: "msg_2", Model: "claude-sonnet-5-5",
+		Usage:   &types.Usage{PromptTokens: 10},
+		Choices: []types.ChoiceChunk{{Delta: &types.Message{Role: "assistant"}}}})
+	enc.done()
+	out := rec.Body.String()
+	if !strings.Contains(out, `"cache_creation_input_tokens":0`) ||
+		!strings.Contains(out, `"cache_read_input_tokens":0`) {
+		t.Errorf("zero cache fields must still be emitted in message_start:\n%s", out)
+	}
+}
