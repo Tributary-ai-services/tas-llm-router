@@ -805,6 +805,13 @@ type anthropicStreamEncoder struct {
 	stopReason   string
 	inputTokens  int
 	outputTokens int
+	// Cache counters are rendered as well as recorded. The vendor was caching
+	// (events showed 37,341 created then 25,894 read per turn) while the client
+	// saw cache_read_input_tokens: 0, because message_start never carried them.
+	// A client that cannot see its cache reads cannot reason about its own cost,
+	// and Claude Code reports exactly that number back to the user.
+	cacheCreationTokens int
+	cacheReadTokens     int
 
 	toolOrder []string
 	tools     map[string]*anthropicStreamTool
@@ -867,7 +874,15 @@ func (e *anthropicStreamEncoder) start(c *types.ChatChunk) {
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         map[string]interface{}{"input_tokens": e.inputTokens, "output_tokens": 0},
+			// Anthropic reports the whole input side here, cache fields included,
+			// and always present (as 0) rather than omitted — a client that has
+			// to distinguish "no cache" from "field absent" guesses.
+			"usage": map[string]interface{}{
+				"input_tokens":                e.inputTokens,
+				"output_tokens":               0,
+				"cache_creation_input_tokens": e.cacheCreationTokens,
+				"cache_read_input_tokens":     e.cacheReadTokens,
+			},
 		},
 	})
 }
@@ -920,6 +935,12 @@ func (e *anthropicStreamEncoder) writeChunk(c *types.ChatChunk) {
 		}
 		if c.Usage.CompletionTokens > 0 {
 			e.outputTokens = c.Usage.CompletionTokens
+		}
+		if c.Usage.CacheCreationTokens > 0 {
+			e.cacheCreationTokens = c.Usage.CacheCreationTokens
+		}
+		if c.Usage.CacheReadTokens > 0 {
+			e.cacheReadTokens = c.Usage.CacheReadTokens
 		}
 	}
 	if !e.started {
@@ -980,10 +1001,24 @@ func (e *anthropicStreamEncoder) done() {
 			e.stopReason = "end_turn"
 		}
 	}
+	// The final usage block repeats the cache counts when they are known only by
+	// now: the provider's closing chunk carries the accumulated figures, which
+	// arrives after message_start has already gone out. Emitting them in both
+	// places costs nothing and means a client reading either one is right.
+	finalUsage := map[string]interface{}{"output_tokens": e.outputTokens}
+	if e.cacheCreationTokens > 0 {
+		finalUsage["cache_creation_input_tokens"] = e.cacheCreationTokens
+	}
+	if e.cacheReadTokens > 0 {
+		finalUsage["cache_read_input_tokens"] = e.cacheReadTokens
+	}
+	if e.inputTokens > 0 {
+		finalUsage["input_tokens"] = e.inputTokens
+	}
 	e.emit("message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": e.stopReason, "stop_sequence": nil},
-		"usage": map[string]interface{}{"output_tokens": e.outputTokens},
+		"usage": finalUsage,
 	})
 	e.emit("message_stop", map[string]interface{}{"type": "message_stop"})
 }
