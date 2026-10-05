@@ -13,7 +13,7 @@ answers:
   - "Which settings change behaviour, and where do the secrets live?"
   - "How much of what is merged on main is actually running in production?"
   - "What is the model registry, and is it switched on?"
-verified_against: "tas-llm-router@db5ae56, 2026-10-02"
+verified_against: "tas-llm-router@3b8526e, 2026-10-05"
 depth: standard
 ---
 
@@ -28,7 +28,8 @@ attribution, event emission — happens on the way through it.
 
 > **Verified 2026-09-23 against `tas-llm-router@06038b9`, re-checked
 > 2026-09-24 against `tas-llm-router@dc1957b`, and re-checked 2026-10-02
-> against `tas-llm-router@43fc830` and then `tas-llm-router@db5ae56`** (code
+> against `tas-llm-router@43fc830` and then `tas-llm-router@db5ae56`, and
+> re-checked in code only on 2026-10-05 against `tas-llm-router@3b8526e`** (code
 > diff, both deployments' live image tags and pod placement, the no-token 401
 > probe, `/v1/providers`, `/v1/registry/status`, the strict gateway's
 > `/aiqg/metrics`, and the `aiqg` database's migration level; the other
@@ -42,7 +43,9 @@ attribution, event emission — happens on the way through it.
 > before trusting a version number. Throughout, `#n` is a pull request in this
 > repository and `SEC-n` / `OPS-n` are security and operations items in the
 > TAS backlog; they are cited so a claim can be traced, not because the reader
-> needs them.
+> needs them. The 2026-10-05 pass read the #239 diff and ran the tests of the
+> four packages it touched; it queried no cluster, so every live observation
+> below keeps the date it was made.
 
 ## What this is
 
@@ -64,15 +67,17 @@ a firewall does.
 
 ## Status & scope
 
-**As of 2026-10-02**, two deployments run in namespace `tas-llm-router`, on
-independent image tags that routinely skew:
+**As of 2026-10-05** for image tags (a read-only cluster check that day) and
+2026-10-02 for everything else, two deployments run in namespace `tas-llm-router`, on
+independent image tags that routinely skew. "Permissive" means a request with
+no gateway token is served anyway; "strict" means it is refused with 401:
 
 | Deployment | Image tag today | Reached at | Auth |
 |---|---|---|---|
 | `llm-router` | `aiqg-v5.75` | `llm-router.tas.scharber.com` (all routes), in-cluster `llm-router.tas-llm-router:8086`, publicly `llm.air-ops.net` (completion paths only, behind Cloudflare Access) | permissive — serves completions with no credential |
-| `llm-router-aiqg` | `aiqg-v5.90` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
+| `llm-router-aiqg` | `aiqg-v5.92` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
 
-Both are `2/2` ready and both answered live probes on the verification date.
+Both were `2/2` ready and both answered live probes on 2026-10-02.
 Since 2026-09-21 the cluster has two nodes, `um773dev` and `pinova01`, and
 each deployment keeps one replica on each through a
 `topologySpreadConstraints` rule (#220), so either deployment survives losing
@@ -87,26 +92,31 @@ anonymous request gets Cloudflare's 403 page — so the unauthenticated path is
 not reachable from the open internet. It is reachable from anywhere inside the
 cluster or on the cluster's network.
 
-**The two deployments run very different code.** The strict gateway has run
-`aiqg-v5.90` since about 19:05 UTC on 2026-10-02. Before that it ran
-`aiqg-v5.89` for roughly three and a half hours that day, and before that
-`aiqg-v5.88` from 2026-09-26 (#235), which that release commit records as
-stamped with gateway version `dc2fe59`. Neither newer tag has a release commit
-on `main`: at `db5ae56`, `k8s/deployment-aiqg-strict.yaml` still pins
-`aiqg-v5.88`, so the manifest and the live deployment disagree, and a
-`kubectl apply -k k8s/` from `main` would roll the strict gateway back by two
-releases. The live image exports `aiqg_stream_buffer_truncated_total` on
+**The two deployments run very different code.** A read-only cluster check on
+2026-10-05 found the strict gateway on `aiqg-v5.92` (deployment revision 126,
+rolled out 16:00 UTC on 2026-10-05), after `aiqg-v5.91` (revision 125,
+2026-10-04); the permissive deployment was still on `aiqg-v5.75`. Before those,
+the strict gateway ran `aiqg-v5.90` from about 19:05 UTC on 2026-10-02,
+`aiqg-v5.89` for roughly three and a half hours that day, and `aiqg-v5.88` from
+2026-09-26 (#235), which that release commit records as stamped with gateway
+version `dc2fe59`. None of the newer tags has a release commit on `main`: at
+`3b8526e`, `k8s/deployment-aiqg-strict.yaml:71` still pins `aiqg-v5.88`, so
+the manifest and the live deployment disagree, and a `kubectl apply -k k8s/`
+from `main` would roll the strict gateway back by four releases. The
+`aiqg-v5.90` image exported `aiqg_stream_buffer_truncated_total` on
 `/aiqg/metrics` (checked 2026-10-02), a series that exists only from #238
 (`db5ae56`), so it carries that change.
 
-The two Go changes on `main` since `dc2fe59` are #236 and #238. #236 adds two
+The Go changes on `main` since `dc2fe59` are #236, #238 and #239; the first
+two were in the strict gateway's `aiqg-v5.90` image, and #239 (2026-10-05) is
+described after them. #236 adds two
 flags to each priced response event, `schema_requested` and `tools_declared`,
 recording whether the caller set `response_format` or declared any tools
 (`internal/server/server.go:1198`). They measure how much real traffic a
 planned structural-validity score could ever apply to; nothing is scored yet,
 and a request that was never stamped omits both keys rather than publishing a
 `false` nobody observed (`pkg/aiqg/events/event.go:279`). #238 lets the judge
-(below) grade streamed responses. Before it, the judge saw only non-streamed
+(a second model that grades a sample of responses; more below) grade streamed responses. Before it, the judge saw only non-streamed
 responses, because the streaming path kept no response text, and streamed
 calls were not even counted as excluded. Now each streamed response's text is
 buffered up to a cap (256 KiB by default, `AIQG_STREAM_BUFFER_MAX_BYTES`;
@@ -115,6 +125,49 @@ non-streamed one (`internal/server/server.go:1963`). A stream that failed
 mid-flight is excluded and counted under reason `stream_error`, not graded,
 and a response longer than the cap is still graded, since the judge reads
 only the first 6,000 characters of any response.
+
+#239 fixes two things a caller of the native `/v1/messages` route depends on.
+First, the `system` field is no longer flattened into one string: a block array
+stays a block array through to Anthropic, each block keeping its own
+`cache_control` (`internal/server/anthropic_messages.go:353`,
+`internal/providers/anthropic/provider.go:516`), and only a single block with no
+breakpoint collapses to the plain string form. Flattening was silently
+destroying Claude Code's system prompt: its first block is an
+`x-anthropic-billing-header:` marker that Anthropic consumes on its own, and
+merged with the rest it took the whole prompt with it — measured on the live
+gateway on 2026-10-03, 6,318 tokens of instructions billed as 14, with an HTTP
+200 and a plausible answer. Second, `cache_control` now survives on tools and on
+content blocks inside a turn (`internal/server/anthropic_messages.go:82`,
+`internal/server/anthropic_messages.go:109`); before, the JSON decoder discarded
+it and an agent paid full price for its tool list on every turn. The requested
+time-to-live is still not honoured: the pinned `anthropic-sdk-go` v1.7.0 has no
+TTL field, so a breakpoint asking for `1h` is sent as the 5-minute default
+(`internal/providers/anthropic/provider.go:751`). The same PR adds the Claude 5
+family — `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`,
+`claude-sonnet-5-5`, `claude-sonnet-5` — and the undated `claude-haiku-4-5` to
+the model catalog (`configs/config.yaml:86`). Before it, a request naming
+`claude-opus-5-5`, which is what Claude Code sends, matched no advertised model,
+so the router did not treat it as a pin and chose by cost, possibly sending it to
+the other vendor (`internal/routing/router.go:560`); and that traffic carried no
+cost score from the per-response Cost, Latency, Efficacy, Assurance,
+Reliability (CLEAR) scorer in `pkg/clear`. It also corrects Haiku 4.5's rate from $0.80/$4 to $1/$5 per
+million tokens (`configs/config.yaml:164`), so earlier cost figures for that
+model are about 20% low, and bumps the CLEAR pricing version stamped on every
+event to `pricing-v2026-10-04` (`pkg/clear/cost.go:11`).
+
+The price-table half of #239 is live on the strict gateway, ahead of its
+merge. The 2026-10-05 read-only cluster check found `aiqg-v5.92` listing the
+six new Claude ids on `GET /v1/models`, and AIQG events in Loki carrying
+`model_pricing_version` `pricing-v2026-10-04`. That image rolled out at 16:00
+UTC, before #239 was merged at 18:49 UTC, so it was built from branch code; the
+commit it was built from is not recorded. The permissive deployment, on
+`aiqg-v5.75`, has none of #239.
+
+> [!UNVERIFIED] Whether `aiqg-v5.92` carries the system-block and
+> `cache_control` half of #239 was not checked; confirming it needs a paid
+> `/v1/messages` request with a multi-block `system` field. Until someone makes
+> one, do not assume Claude Code traffic through the strict gateway keeps its
+> system prompt or its cache breakpoints.
 
 What #233 brought to the strict gateway concerns the judge, a second model
 that grades a sample of responses and posts each grade to
@@ -129,7 +182,8 @@ with no model or no flag as unattributable and skips it
 2026-09-26 rollout carry none of these fields, so judged efficacy counts only
 grades from that date onward. What is in the image but
 not active there is switched off by configuration, not absent: the model
-registry, and the serving of semantic-cache hits (shadow mode), both below. The permissive deployment is still
+registry, and the serving of semantic-cache hits (shadow mode: near-miss hits are recorded
+but not served), both below. The permissive deployment is still
 on `aiqg-v5.75`, which predates `b6070a0`, the `/metrics` rebuild that landed
 shortly before `eee4b24` (2026-08-26). The difference is observable from
 outside. On 2026-09-23 `llm-router-aiqg` exported the rebuilt series
@@ -139,7 +193,8 @@ and none of the old ones, and answered `/v1/registry/status` with
 registry code says while the registry is off. `llm-router` still exported the
 pre-rebuild series (`llm_router_security_score`, `llm_router_threat_level`) and
 answered that route with the HTTP router's bare `404 page not found`. Below,
-"live on the strict gateway" means merged code running in `aiqg-v5.90`; none
+"live on the strict gateway" means merged code observed running in
+`aiqg-v5.90` on 2026-10-02; none
 of the Go code merged from `b6070a0` onward runs on the permissive deployment.
 What reached both deployments through manifests alone: the public-host path
 allowlists (SEC-1, SEC-23), password authentication to both Redis instances
@@ -264,8 +319,9 @@ account created for them in that realm before they can issue a token.
 
 > [!UNVERIFIED] Who creates `aether` realm accounts for AIQG users, and how a
 > new account is tied to a tenant, is not recorded in this repository or in the
-> dashboard code checked on 2026-09-23. Ask the platform owner rather than
-> guessing.
+> dashboard code checked on 2026-09-23. Ask the service owner named under
+> [Escalation & ownership](docs/ops/llm-router.md#escalation--ownership) in the
+> operations guide rather than guessing.
 
 Tokens carry the prefix `tas_qg_live_`, and the gateway accepts one in any of three headers —
 `TAS-Auth`, `Authorization: Bearer`, or `x-api-key` — because a stock vendor
@@ -360,6 +416,8 @@ curl -sS https://gateway.air-ops.net/v1/chat/completions \
 
 That `router_metadata` block is the part no vendor endpoint returns: which
 provider actually served, why the router chose it, and what the call cost.
+The `estimated_cost` shown was priced at Haiku 4.5's old catalog rate; from
+#239 the same call estimates about 20% higher.
 The Anthropic dialect works the same way, with the token in `x-api-key`, and
 answers in Anthropic's own response shape:
 
@@ -386,7 +444,9 @@ curl -sSk https://gateway.aiqg.tas.scharber.com/v1/providers
 
 `/v1/models` lists the six model identifiers the router will accept
 (`claude-haiku-4-5-20251001`, `claude-opus-4-6`, `claude-sonnet-4-6`,
-`gpt-3.5-turbo`, `gpt-4o`, `gpt-4o-mini` on both deployments that day),
+`gpt-3.5-turbo`, `gpt-4o`, `gpt-4o-mini` on both deployments that day; a
+read-only cluster check on 2026-10-05 found the strict gateway's `aiqg-v5.92`
+also listing the six Anthropic ids #239 adds),
 `/v1/capabilities` gives context windows and per-thousand-token prices per
 model, and `/health` reports per-provider status and the last check time.
 
@@ -419,7 +479,8 @@ In the code at `HEAD`, only two things stop startup outright: a config file
 that fails to load, and no usable provider key — with neither `OPENAI_API_KEY` nor
 `ANTHROPIC_API_KEY` set, it exits with `no providers were registered - check
 your configuration and API keys`. A failure to initialise the prompt scanner
-(Gatekeeper, a sibling repository compiled in) is logged as a warning and
+(Gatekeeper, the TAS library that scans prompt and response content for policy
+findings, compiled in from a sibling repository) is logged as a warning and
 leaves scanning disabled; the process keeps serving.
 **Kafka is a hard startup dependency for the permissive deployment, and not
 for the strict gateway.** In the `aiqg-v5.75` build that `llm-router` runs,
@@ -472,6 +533,14 @@ These are the ones that change behaviour rather than tune it:
 | `AIQG_STREAM_BUFFER_MAX_BYTES` | Cap on the text kept from each streamed response so the judge can grade it; a negative value turns buffering off, and with it judging of streamed responses (each counted as excluded, reason `stream_buffer_disabled`) | `0`, meaning 256 KiB | unset, so 256 KiB, on `llm-router-aiqg`; the permissive deployment's image predates the setting |
 | `LLM_ROUTER_DEFAULT_STRATEGY` | Routing when the request does not name a model | `cost_optimized` | `cost_optimized` |
 | `registry.enabled` (YAML only) | Model registry: discovery, aliases, fallback | `false` | off — the baked-in `configs/config.yaml` has no `registry:` block; the code runs only in the strict gateway's image |
+
+The model catalog — which ids the router advertises, and the per-1K rates
+behind `estimated_cost` — is the `providers:` block of `configs/config.yaml`,
+which the image bakes in; there is no environment override for it. The CLEAR
+cost score prices from a separate table in `pkg/clear/cost.go`, and since #239
+`TestCatalogModelsArePriced` fails the build if the two disagree
+(`internal/config/catalog_pricing_test.go`), so a model or rate change touches
+both files.
 
 Secrets are referenced here by location only. Provider keys and the internal
 dashboard token live in the `llm-router-secret` Opaque secret in namespace
@@ -538,9 +607,9 @@ harnesses test the real Go implementation rather than a copy of it.
 Deploying from this repository means `kubectl apply -k k8s/`, never `-f` on a
 single file: the live Deployment selectors carry the kustomization's common
 labels, so a bare `-f` is rejected on the immutable selector (#220). Each
-deployment file is meant to pin the image tag it actually runs, but on
-2026-10-02 `k8s/deployment-aiqg-strict.yaml` still said `aiqg-v5.88` while
-`aiqg-v5.90` was live (see [Status & scope](#status--scope)); compare the file
+deployment file is meant to pin the image tag it actually runs, but at
+`3b8526e` `k8s/deployment-aiqg-strict.yaml:71` still says `aiqg-v5.88`, while a
+read-only cluster check on 2026-10-05 found `aiqg-v5.92` live (see [Status & scope](#status--scope)); compare the file
 with `kubectl get deploy` before applying.
 
 ## Where to go next

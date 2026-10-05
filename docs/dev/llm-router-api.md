@@ -14,21 +14,34 @@ answers:
   - "Why is it designed this way rather than the obvious alternative?"
   - "Can the gateway run a different model from the one I named, and how would I know?"
 depth: deep
-verified_against: "tas-llm-router@db5ae56, 2026-10-02"
+verified_against: "tas-llm-router@3b8526e, 2026-10-05"
 ---
 
 # LLM Router — Developer Guide
 
-> **Verified against `tas-llm-router@db5ae56` on 2026-10-02** (previous
-> verifications: `43fc830`, 2026-10-02; `dc1957b`, 2026-09-24; `552d869`,
-> 2026-09-21; `eee4b24`, 2026-08-25). The only code change since `43fc830` is
-> that streamed responses are now buffered and can be scored by the LLM judge (a
+> **Verified against `tas-llm-router@3b8526e` on 2026-10-05**, a code-only pass
+> with no cluster or Loki access (previous verifications: `db5ae56`,
+> 2026-10-02; `43fc830`, 2026-10-02; `dc1957b`, 2026-09-24; `552d869`,
+> 2026-09-21; `eee4b24`, 2026-08-25). The only code change since `db5ae56` is
+> `3b8526e` (#239), which changes two things a caller can see. On `/v1/messages`
+> a multi-block `system` prompt now reaches Anthropic as separate blocks instead
+> of one concatenated string, and `cache_control` on system blocks, content
+> blocks, and tools is now carried across the boundary instead of discarded
+> (see "Prompt caching controls"). And the model catalogue and the pricing
+> table gain the Claude 5 family plus an undated `claude-haiku-4-5`, with
+> Haiku 4.5's rate corrected upward, which changes both which vendor a
+> `claude-opus-5-5` request reaches and what it costs (see "`model` pins the
+> vendor" and the `clear.DollarCost` vocabulary entry). None of this is
+> deployed anywhere as far as this repository records: no manifest names an
+> image built from `3b8526e`, and nothing below about it was probed live.
+> Citations into `internal/providers/anthropic/provider.go`,
+> `internal/server/anthropic_messages.go`, `internal/config/config.go`,
+> `configs/config.yaml`, and `pkg/clear/cost.go` were re-pointed for the lines
+> it shifted. Before that, `db5ae56` was the only change after `43fc830`: it made
+> streamed responses buffered so they can be scored by the LLM judge (a
 > second model the gateway calls to grade a sample of responses for quality)
 > (#238), described under "Evaluation calls about your traffic can bill your
-> key"; it changes no byte a caller receives. Citations into
-> `internal/server/server.go`, `internal/server/judge.go`,
-> `internal/config/config.go`, and `pkg/aiqg/metrics/metrics.go` were re-pointed
-> for the lines it shifted. Before that, `43fc830` made the AI Quality Gateway
+> key"; it changes no byte a caller receives. Earlier still, `43fc830` made the AI Quality Gateway
 > (AIQG) event — the per-request record this gateway emits — record
 > whether a request asked for a response schema or declared tools (#236), and
 > `dc1957b` added the judge's score provenance (#233), both described in the
@@ -143,10 +156,20 @@ is what it governs.
   It looks the `(vendor, model)` pair up in a static pricing table and computes
   `(prompt_tokens/1000 × input_rate) + (completion_tokens/1000 × output_rate)`,
   returning `ok=false` for a model it has no pricing for
-  (`pkg/clear/cost.go:75`–`82`). It is the single cost figure in the service:
+  (`pkg/clear/cost.go:90`–`97`). It is the single cost figure in the service:
   both `llm_router_cost_total` and the spend record call it, which is why they
   cannot disagree — and why an unpriced model is absent from both rather than
-  recorded as free
+  recorded as free. Until `3b8526e` (#239) the table had no Claude 5 entries,
+  so `claude-opus-5-5` traffic was exactly that: absent. It now prices
+  `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5-5`,
+  `claude-sonnet-5`, and `claude-haiku-4-5` (`pkg/clear/cost.go:37`–`48`), and
+  corrects Haiku 4.5 from $0.0008/$0.004 to $0.001/$0.005 per 1K tokens, so
+  every Haiku figure computed before that commit is about 20% low. The table's
+  version string moved to `pricing-v2026-10-04` (`pkg/clear/cost.go:11`) and is
+  stamped as `model_pricing_version` into the token-accounting block of every
+  priced AIQG event (`pkg/aiqg/events/builder.go:600`–`604`), which is how to
+  tell old-rate figures from new ones. Two tests now hold the catalogue and this
+  table together (`internal/config/catalog_pricing_test.go`)
 - **Path A** — the customer-facing ingress, which is why an authentication failure
   there carries the error code `path_a_auth_required`
 - **registry** — a Prometheus `client_golang` collector set. This service runs two
@@ -243,7 +266,10 @@ at `dc1957b`):
   model name that exactly one provider lists — every name in the current
   catalogue — routes to that provider, full stop; the "cheapest provider" choice
   applies only to a name no provider lists, or several do (see "`model` pins the
-  vendor" under data model & contracts).
+  vendor" under data model & contracts). Until `3b8526e` (#239) that "no
+  provider lists" case included every Claude 5 model name, which is what
+  Claude Code sends; re-checked at `3b8526e`, the committed catalogue now
+  lists them.
 - **Automatic failover today requires you to ask for it in the request.** The
   tenant-configured fallback chain is not reachable from any route (see the
   note under "How it works end to end"). What does run is the older per-request
@@ -351,7 +377,7 @@ whole router (`internal/server/server.go:910`–`925`), so they run ahead of
 authentication and apply to every path: the security middleware, whose request
 validator rejects a disallowed method, a body over 10 MiB, or a `Content-Type`
 outside `application/json` and `text/plain` with `400`
-(`internal/security/validation.go:92`–`111`, `internal/config/config.go:1121`–`1127`);
+(`internal/security/validation.go:92`–`111`, `internal/config/config.go:1172`–`1178`);
 the request logger; and `contentTypeMiddleware`, which rejects any `POST` or
 `PUT` whose `Content-Type` is not **exactly** `application/json` with `415`
 (`internal/server/server.go:1059`–`1070`). The string comparison is literal, so
@@ -360,7 +386,7 @@ first check allows `text/plain` and the third refuses it, so in practice only th
 bare `application/json` value reaches authentication. A fourth hook, the
 OpenAPI schema validator registered at `internal/server/server.go:916`, is inert
 in this binary: `ToServerConfig` never sets its configuration
-(`internal/config/config.go:1014`–`1022`), so no request body is schema-checked
+(`internal/config/config.go:1065`–`1073`), so no request body is schema-checked
 before authentication. A live probe on 2026-09-21 agreed — a schema-invalid body
 with no token got the `401`, not a `400`.
 
@@ -385,8 +411,12 @@ status codes — see error semantics.
 
 The surface handler parses the body in its own dialect. `handleChatCompletion`
 (`internal/server/server.go:1075`) reads OpenAI shape; `handleMessages`
-(`internal/server/anthropic_messages.go:487`) reads Anthropic shape, including
-top-level `system` and required `max_tokens`. Both produce the same internal
+(`internal/server/anthropic_messages.go:587`) reads Anthropic shape, including
+top-level `system` and required `max_tokens`. Since `3b8526e` (#239) a `system`
+sent as several text blocks stays several blocks
+(`internal/server/anthropic_messages.go:353`–`393`) rather than being
+concatenated into one string; see "Prompt caching controls" for why that
+matters and what it still breaks. Both produce the same internal
 request, and both are wrapped by `wrapAIQG`, which is what attaches the
 governance pipeline.
 
@@ -479,6 +509,14 @@ curl -sS -k https://gateway.aiqg.tas.scharber.com/v1/models
 ```
 
 (Captured in full on 2026-09-21; the catalogue is unchanged from 2026-08-24.)
+
+At `3b8526e` the committed configuration lists six more Anthropic models —
+`claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5-5`,
+`claude-sonnet-5`, and the undated `claude-haiku-4-5` — in `configs/config.yaml`
+(`:86`–`141`), which is the file the image runs (`docker/Dockerfile:96`), and in
+the compiled-in defaults (`internal/config/config.go:500`–`549`). An image built
+from that commit should list them here too; none had been probed when this was
+written.
 
 With a token, the shortest real completion:
 
@@ -589,7 +627,7 @@ when you are debugging a `401`.** The gateway only ever *consumes* tokens. It
 reads them from the Kubernetes Secret `llm-router-aiqg-tokens` in namespace
 `tas-llm-router` via the `AIQG_TOKENS_FILE` environment variable
 (`k8s/deployment-aiqg-strict.yaml:102`, loaded at
-`internal/config/config.go:871`), and the copy checked into this repository ships
+`internal/config/config.go:922`), and the copy checked into this repository ships
 empty on purpose (`k8s/secret-aiqg-tokens.yaml:1`–`6`). Each entry binds a token
 to a `tenant_id`, an `aiqg_account_id`, a `source_app` string, and a `suspended`
 flag (`k8s/secret-aiqg-tokens.yaml:10`–`16`) — the mechanism behind "tenant
@@ -739,8 +777,11 @@ below was re-probed anonymously against the live gateway on 2026-08-25;
 | `/v1/breaker` | Provider-fleet circuit-breaker state: `enabled`, `targets` (ejected providers), and the breaker `config`. Since `3c7eb27` (#185), `enabled` means "ejection is on by default for a request with no tenant override" rather than "the breaker object exists", and two fields are added: `constructed` and `state` (`unavailable`, `off`, or `on`) (`internal/server/breaker_status.go:25`–`81`). Returns `500` with `breaker status unavailable: …` if the breaker store cannot be read (`internal/server/breaker_status.go:63`). On 2026-09-21 the live gateway still returned the older shape without `state`. On 2026-09-24 `gateway.aiqg.tas.scharber.com` (`aiqg-v5.87`) returned the new shape: `"constructed":true,"enabled":false,"state":"off","targets":[]`. `llm-router.tas.scharber.com` (`aiqg-v5.75`) returned `404 page not found` for this path the same day |
 
 The catalogue on 2026-08-24 was `claude-haiku-4-5-20251001`, `claude-opus-4-6`,
-`claude-sonnet-4-6`, `gpt-3.5-turbo`, `gpt-4o`, `gpt-4o-mini`. Query the endpoint
-rather than trusting that list — it is the authority, this document is not.
+`claude-sonnet-4-6`, `gpt-3.5-turbo`, `gpt-4o`, `gpt-4o-mini`. The code at
+`3b8526e` adds six Anthropic names (listed under Getting started), so a gateway
+running it should return nine Anthropic models where the 2026-08-25 probe saw
+three. Query the endpoint rather than trusting either list — it is the
+authority, this document is not.
 
 There are **no** `/v1/openai/*` or `/v1/anthropic/*` passthrough routes. Requests
 are never reverse-proxied verbatim.
@@ -813,22 +854,99 @@ vendor `400` (`internal/server/prompt_cache.go:53`–`62`).
 What survives to the vendor, since `7c9066e` (#197; on `llm-router-aiqg` from `aiqg-v5.87`, not on `llm-router`):
 a `cache_control` on a message or on a tool definition in the OpenAI-dialect body
 reaches Anthropic as an `ephemeral` breakpoint
-(`internal/providers/anthropic/provider.go:521`–`528`, `:590`–`596`). Before that
+(`internal/providers/anthropic/provider.go:544`–`551`, `:625`–`631`). Before that
 commit only the system block's breakpoint was even attempted, and it serialized
-to nothing. Three limits remain. A requested one-hour time-to-live cannot be
-expressed with the pinned SDK and lands at the five-minute default
-(`internal/providers/anthropic/provider.go:713`–`733`). On `/v1/messages`,
-`cache_control` is dropped at the boundary: the inbound Anthropic wire types have
-no field for it (`internal/server/anthropic_messages.go:52`–`100`), so use `auto`
-there. And a request routed to OpenAI ignores breakpoints entirely, since OpenAI
-caches automatically.
+to nothing. A requested one-hour time-to-live (TTL) still cannot be expressed:
+the pinned Anthropic SDK (`go.mod:10`, `v1.7.0`) has no TTL field, so a `"ttl":
+"1h"` breakpoint is sent as a five-minute one
+(`internal/providers/anthropic/provider.go:748`–`768`). `3b8526e` now carries
+the `ttl` value inward as far as the internal request
+(`internal/types/requests.go:80`–`83`), and drops it at the provider. A request
+routed to OpenAI ignores breakpoints entirely, since OpenAI caches
+automatically.
 
-> [!UNVERIFIED] Per-content-part `cache_control` (inside a `content` array) is
-> threaded only when the content decodes as `[]types.ContentPart`, but JSON
-> decoding produces `[]interface{}` (the same mechanism that breaks vision,
-> below), so a part-level breakpoint in an HTTP body is probably lost. Inferred
-> from the types at `dc1957b`; not exercised with a request. Put breakpoints on
-> the message instead.
+**`/v1/messages` since `3b8526e` (#239; not deployed anywhere as far as this
+repository records).** Until that commit the native surface dropped every
+`cache_control` at the boundary, because its inbound wire types had no field
+for it, and it concatenated a multi-block `system` into one string. Both have
+changed, and only part of the change works end to end:
+
+- **System blocks** — fixed. A `system` array stays an array: one text block
+  without a breakpoint still collapses to a plain string, anything else becomes
+  a list of text parts that keep their own `cache_control`
+  (`internal/server/anthropic_messages.go:353`–`393`). Non-text and empty
+  blocks are skipped silently there (`:374`–`376`). The Anthropic provider
+  then emits one vendor block per part, with a breakpoint on each part that
+  asked for one, and accepts the parts in the shape they arrive in after the
+  handler's JSON round trip (`internal/providers/anthropic/provider.go:512`–`529`,
+  `:564`–`573`, `:777`–`794`). A message-level breakpoint, which is what `auto`
+  places at the end of the system prompt, lands on the last block. A non-text
+  system block reaching the provider is still an error, `system messages must
+  be text only for Anthropic` (`:518`, `:524`). The same provider change
+  covers the OpenAI dialect: a `/v1/chat/completions` system message whose
+  `content` is an array of text parts used to fail with that error when routed
+  to Anthropic, and is now sent as blocks.
+- **Tools and `tool_result` blocks** — fixed. A tool's `cache_control` is
+  copied onto the internal tool (`internal/server/anthropic_messages.go:82`,
+  `:206`), and a `tool_result` block's becomes the breakpoint of the tool
+  message it turns into (`:292`). Both reach the vendor through the
+  message-level and tool paths above.
+- **Text and image blocks in a turn** — **broken in a new way.** A
+  `cache_control` on any block of a user or assistant turn, the last block
+  included, makes the turn a block array instead of a joined string
+  (`internal/server/anthropic_messages.go:255`–`273`, `:305`–`306`). The code
+  comment and the commit message say a breakpoint on the final block rides at
+  message level instead, but the branch that would do that (`:307`–`312`) runs
+  only when no block carried one, so it never sets anything. The handler then
+  re-marshals the request and decodes it again, which turns the array into
+  `[]interface{}`, and the Anthropic provider's content switch has no arm for
+  that type: its default arm writes the array out with `fmt.Sprintf("%v", …)`
+  (`internal/providers/anthropic/provider.go:706`–`744`). A throwaway test at
+  `3b8526e` that fed that shape to the provider got back one text block reading
+  `[map[cache_control:map[type:ephemeral] text:first type:text] map[text:last
+  type:text]]`. That is what the model is sent in place of the turn's text, and
+  the breakpoint is gone. At `db5ae56` the same turn arrived as plain text with
+  its breakpoint dropped, which was the lesser failure.
+
+> [!UNVERIFIED] The consequence of that last bullet for a live request is
+> inferred. The parse step and the provider conversion were each exercised by a
+> throwaway test at `3b8526e`; no request went through the HTTP handler to a
+> vendor. `TestParseAnthropic_ToolAndMessageCacheControl`
+> (`internal/server/anthropic_messages_test.go:413`) asserts only that the
+> parse keeps the blocks. No test drives such a turn through the provider.
+> Until it is fixed, put breakpoints on `tool_result` blocks, tools, or the
+> system prompt, or send `TAS-Prompt-Cache: off`. Do not put them on a text
+> block of a turn. Note that `off` does not help with the bullet itself, for the
+> reason in the next paragraph.
+
+**The prompt-cache modes cannot see block-level breakpoints that arrive over
+HTTP.** `off`, `auto`, the count recorded on the AIQG event, and the four-breakpoint
+clamp all look for breakpoints on tools, on messages, and inside content of type
+`[]types.ContentPart` (`pkg/aiqg/promptcache/mode.go:151`–`246`). Content
+decoded from an HTTP body is `[]interface{}` (the decode is at
+`internal/server/server.go:1077`; `handleMessages` re-encodes its translated
+request and hands it to that decoder), so a breakpoint inside a `system`
+array or a turn's blocks is invisible to all of them. In the same throwaway
+test, a `/v1/messages` body with one breakpoint on a tool, one on a system block,
+and one on a user block was counted as `1` in passthrough, and after `off`
+still carried the system and user breakpoints. So `off` and `auto` do not
+remove those breakpoints, the event under-counts them, and the clamp cannot
+stop a fifth one reaching Anthropic, which the code's own comment says the
+vendor rejects with `400` (`internal/server/prompt_cache.go:53`–`62`). Before
+`3b8526e` this applied only to OpenAI-dialect bodies that put `cache_control`
+inside a `content` array; it now applies to every `/v1/messages` request that
+sends a block-form `system` with breakpoints.
+
+> [!UNVERIFIED] Whether Anthropic does reject such a request with `400` was not
+> exercised; the four-breakpoint limit is taken from the code comment.
+
+A block-form `system` or turn routed to **OpenAI** fares worse. The OpenAI
+provider's content switch has arms for a string and `[]types.ContentPart` only
+(`internal/providers/openai/provider.go:493`–`518`), so after the round trip
+that content is sent empty. At `db5ae56` a multi-block `system` was a string
+and survived. A `/v1/messages` request that names a Claude model is pinned to
+Anthropic (see "`model` pins the vendor"), so this needs an unlisted model name
+or a `fallback_config` hop to OpenAI. Read from code, not exercised.
 
 ### Feature support, and what the translation layer drops
 
@@ -846,17 +964,19 @@ warns you: unsupported fields are dropped silently, not rejected.
 
 | Feature | Served by OpenAI | Served by Anthropic |
 |---|---|---|
-| `tools` (request) | Forwarded (`internal/providers/openai/provider.go:581`) | Forwarded (`internal/providers/anthropic/provider.go:579`) |
-| `tool_calls` (non-streaming response) | Forwarded (`internal/providers/openai/provider.go:633`) | Forwarded (`internal/providers/anthropic/provider.go:813`) |
+| `tools` (request) | Forwarded (`internal/providers/openai/provider.go:581`) | Forwarded (`internal/providers/anthropic/provider.go:614`) |
+| `tool_calls` (non-streaming response) | Forwarded (`internal/providers/openai/provider.go:633`) | Forwarded (`internal/providers/anthropic/provider.go:874`) |
 | `tool_calls` (streaming response) | Forwarded (`internal/providers/openai/provider.go:690`) | **Lost** — the stream converter handles text deltas only (`internal/providers/anthropic/provider.go:271`) |
 | `tool_choice` | Forwarded (`internal/providers/openai/provider.go:596`) | **Dropped** — no reference in the provider |
 | legacy `functions` / `function_call` | Forwarded (`internal/providers/openai/provider.go:567`) | **Dropped** |
 | `response_format: json_object` | Forwarded (`internal/providers/openai/provider.go:600`) | **Dropped** — the provider never reads `req.ResponseFormat`; it also declares `SupportsStructuredOutput()` false (`internal/providers/anthropic/provider.go:458`) |
 | `response_format: json_schema` | **Type sent, schema not** (`internal/providers/openai/provider.go:606`) | **Dropped** |
-| `temperature`, `top_p`, `stop` | Forwarded (`internal/providers/openai/provider.go:542`, `:553`) | Forwarded (`internal/providers/anthropic/provider.go:560`, `:564`, `:568`) |
+| `temperature`, `top_p`, `stop` | Forwarded (`internal/providers/openai/provider.go:542`, `:553`) | Forwarded (`internal/providers/anthropic/provider.go:595`, `:599`, `:603`) |
 | `seed`, `presence_penalty`, `frequency_penalty` | Forwarded (`internal/providers/openai/provider.go:556`–`564`) | **Dropped** (no vendor equivalent) |
-| `max_tokens` | Forwarded (`internal/providers/openai/provider.go:550`) | Forwarded; **defaults to 1024 when unset** (`internal/providers/anthropic/provider.go:557`) |
+| `max_tokens` | Forwarded (`internal/providers/openai/provider.go:550`) | Forwarded; **defaults to 1024 when unset** (`internal/providers/anthropic/provider.go:592`) |
 | `cache_control` (message, tool) | Ignored — OpenAI caches automatically | Forwarded since `7c9066e` (on `llm-router-aiqg` from `aiqg-v5.87`) — see prompt caching above |
+| `cache_control` on a `/v1/messages` system block, tool, or `tool_result` | Ignored; a block-form `system` arrives **empty** (see prompt caching) | Forwarded since `3b8526e`, not deployed; one-hour TTL sent as five minutes |
+| `cache_control` on a text or image block of a `/v1/messages` turn | Turn content arrives **empty** | **Turn text replaced by a Go map dump** since `3b8526e` — see prompt caching above |
 | `top_k` | Not representable | Not representable — absent from `ChatRequest` entirely |
 | `n`, `logprobs`, `logit_bias`, `user`, `stream_options` | Not representable — absent from `ChatRequest` | Not representable |
 | Image / vision content | See below | See below |
@@ -876,16 +996,16 @@ message content with a Go type switch over `msg.Content`. The OpenAI provider's
 switch has arms for `string` and `[]types.ContentPart` and no default
 (`internal/providers/openai/provider.go:493`–`518`); the Anthropic provider's
 default arm stringifies with `fmt.Sprintf("%v", content)`
-(`internal/providers/anthropic/provider.go:702`–`709`), and its
+(`internal/providers/anthropic/provider.go:737`–`744`), and its
 `[]types.ContentPart` arm skips image parts with the comment "Skip image parts
-for now" (`internal/providers/anthropic/provider.go:693`). The problem is that
+for now" (`internal/providers/anthropic/provider.go:728`). The problem is that
 `[]types.ContentPart` is not the type that arrives: `Content` is declared
 `interface{}` (`internal/types/requests.go:43`), and content that has been
 through JSON decoding arrives as `[]interface{}` of maps — which this repository
 states in its own comment at `internal/server/server.go:2407`. `/v1/messages`
 reaches the same decoder, because `handleMessages` re-marshals the translated
 request and hands it to the shared OpenAI handler
-(`internal/server/anthropic_messages.go:498`–`509`, decoded at
+(`internal/server/anthropic_messages.go:598`–`609`, decoded at
 `internal/server/server.go:1077`). Send text-only requests until this is fixed.
 
 **Do not take `/v1/capabilities` as the authority on vision.** Both providers
@@ -902,8 +1022,9 @@ effective capability: both providers now return `SupportsVision: false`
 rollout, still returned `true`). It is not on `llm-router` (`aiqg-v5.75`). It
 does not reach the **per-model** `supports_vision` entries inside
 `supported_models`, which are read from model configuration
-(`configs/config.yaml:81`, `:90`, `:99`): on the same 2026-10-02 probe all three
-Anthropic models still said `true`. The Anthropic entry also still lists
+(`configs/config.yaml:150`, `:159`, `:169` for the three models of that probe): on the same 2026-10-02 probe all three
+Anthropic models still said `true`. The six models added at `3b8526e` say `true`
+as well (`configs/config.yaml:93`–`140`). The Anthropic entry also still lists
 `supported_image_formats`. On `llm-router-aiqg` the provider-level flag can be
 trusted for vision and the per-model one cannot; on `llm-router` neither can.
 
@@ -970,7 +1091,7 @@ name is prefixed `llm_router_`.
 | `provider_health` | gauge | `provider` | `internal/server/server.go:415`, collected at scrape time |
 | `errors_total` | counter | `provider`, `error_type` | `internal/server/server.go:1776`, `internal/server/server.go:1975` — `error_type` is always `completion_failed` |
 | `auth_attempts_total` | counter | `result` | `internal/middleware/aiqg.go:206`, `:247`, `:1020`, `:1064`, `:1160` |
-| `rate_limit_hits_total` | counter | `tier` | `internal/security/ratelimit.go:277` — only when the rate limiter is enabled. It is off in `configs/config.yaml:147`, and the `RATE_LIMIT_ENABLED` key in `k8s/configmap.yaml:39` is read by no Go code; the strict gateway sent no `X-RateLimit-*` headers on 2026-09-21 |
+| `rate_limit_hits_total` | counter | `tier` | `internal/security/ratelimit.go:277` — only when the rate limiter is enabled. It is off in `configs/config.yaml:217`, and the `RATE_LIMIT_ENABLED` key in `k8s/configmap.yaml:39` is read by no Go code; the strict gateway sent no `X-RateLimit-*` headers on 2026-09-21 |
 | `semcache_lookups_total` | counter | `outcome` | `internal/server/semcache_metrics.go:18`–`41` |
 | `semcache_top_similarity` | histogram | `verdict` (`passed`/`rejected`) | same |
 | `semcache_rejections_total` | counter | `reason` | same |
@@ -1216,6 +1337,19 @@ and **ignores `req.Model` entirely** for that choice
 (`internal/routing/router.go:664`–`675`). A misspelled or unknown model name does
 not error — it silently becomes "whatever is cheapest".
 
+That was the fate of every Claude 5 model name until `3b8526e` (#239). The
+catalogue stopped at the 4.x family, so a request naming `claude-opus-5-5` —
+the name Claude Code sends — matched no provider, fell through to
+cost-optimized selection, and could be sent to OpenAI under a model name
+OpenAI does not serve. The same names missed the pricing table, so that
+traffic carried no cost. The commit adds the six names listed under Getting
+started to `configs/config.yaml` and the compiled defaults, so each now
+matches exactly one provider and pins Anthropic. Two tests keep the catalogue
+and pricing in step: `TestCatalogModelsArePriced` and
+`TestDefaultCatalogMatchesYAML` (`internal/config/catalog_pricing_test.go:19`,
+`:44`). A gateway still running an older image behaves the old way, and
+nothing in this repository records an image built from `3b8526e`.
+
 **With the model registry enabled, the name you sent may not be the name that
 runs** (in the `llm-router-aiqg` image from `aiqg-v5.87`; off by default and
 not enabled in any manifest). `resolveViaRegistry` runs
@@ -1369,7 +1503,7 @@ The buffer holds at most 256 KiB of text per in-flight stream
 (`internal/server/stream_buffer.go:18`). Set `AIQG_STREAM_BUFFER_MAX_BYTES`
 (YAML `aiqg.stream_buffer_max_bytes`) to change it: `0` keeps the default,
 and a negative value switches buffering off
-(`internal/config/config.go:109`–`114`, `:703`–`707`;
+(`internal/config/config.go:109`–`114`, `:754`–`758`;
 `internal/server/server.go:1868`–`1874`). The cap is the only bound on that
 memory, because `llm-router-aiqg` declares no container memory limit, so the
 worst case is concurrent streams × the cap. The buffer stops appending at the
@@ -1415,7 +1549,7 @@ applied: `schema_requested` is true when the decoded request carries
 `response_format`, and `tools_declared` is true when it declares at least one
 tool (`internal/server/server.go:1198`–`1199`). `/v1/messages` and
 `/v1/responses` delegate to that pipeline after translation
-(`internal/server/anthropic_messages.go:509`,
+(`internal/server/anthropic_messages.go:609`,
 `internal/server/responses_api.go:339`), so the flags describe the translated
 request, not the raw body you sent. They land on the response event as
 `schema_requested` and `tools_declared` (`pkg/aiqg/events/event.go:279`–`280`).
@@ -1492,7 +1626,7 @@ switches to Anthropic's `{"type":"error","error":{"type":"<type>","message":"…
 with the type mapped from the status — `400` → `invalid_request_error`, `401` →
 `authentication_error`, `402`/`403` → `permission_error`, `404` →
 `not_found_error`, `413` → `request_too_large`, `429` → `rate_limit_error`, any
-other `5xx` → `api_error` (`internal/server/anthropic_messages.go:562`–`593`).
+other `5xx` → `api_error` (`internal/server/anthropic_messages.go:662`–`693`).
 The authentication layer writes its own bodies, shown in its table below. The
 standard envelope was observed live on 2026-09-21 through the `415` below,
 which uses the same writer.
@@ -1563,8 +1697,8 @@ charge, not a free correction.
 | `500` | `internal/server/server.go:1995` | `response content scan failed` — the vendor answered, the outbound scanner errored, and the gatekeeper fails closed | **Yes** | Yes, knowing it bills again |
 **Not emitted at `dc1957b`: `413` and `429` on the completion routes.** Earlier
 versions of this table listed `413 Request entity too large` and `429 Rate
-limited`, citing `internal/server/anthropic_messages.go:581` and `:583`. Those
-lines are the status-to-type table the Anthropic error renderer uses, not places
+limited`, citing two lines of `internal/server/anthropic_messages.go` that sit
+at `:681` and `:683` as of `3b8526e`. Those lines are the status-to-type table the Anthropic error renderer uses, not places
 that send a status, and no completion path writes either code: a vendor `413` or
 `429` arrives as `500 Completion failed` with the vendor's status inside the
 message (see below). An oversized body above 10 MiB gets the security
@@ -1576,8 +1710,8 @@ Surface-specific errors, from each handler before it joins the shared pipeline:
 
 | Surface | Status | Message | Envelope | Source |
 |---|---|---|---|---|
-| `/v1/messages` | `400` | `could not read request body`, or the translation error (for example a missing `model` or `max_tokens`) | Anthropic `invalid_request_error` | `internal/server/anthropic_messages.go:488`–`497` |
-| `/v1/messages` | `500` | `internal translation error` | Anthropic `api_error` | `internal/server/anthropic_messages.go:498`–`501` |
+| `/v1/messages` | `400` | `could not read request body`, or the translation error (for example a missing `model` or `max_tokens`) | Anthropic `invalid_request_error` | `internal/server/anthropic_messages.go:588`–`597` |
+| `/v1/messages` | `500` | `internal translation error` | Anthropic `api_error` | `internal/server/anthropic_messages.go:598`–`601` |
 | `/v1/responses` | `400` | `could not read request body`, or the translation error | standard | `internal/server/responses_api.go:323`–`329` |
 | `/v1/responses` | `500` | `internal translation error` | standard | `internal/server/responses_api.go:333` |
 | `/v1/embeddings` | `400` | `Invalid JSON: …`, `field 'model' is required`, `field 'input' is required` | standard | `internal/server/embeddings.go:34`–`43` |
@@ -1730,9 +1864,9 @@ and the encoder interface had exactly two methods, `writeChunk` and `done`.
 There was nowhere for a mid-stream failure to go. A vendor that dies halfway
 through closes the channel, and the stream terminates with the ordinary
 terminator — `data: [DONE]` on the OpenAI surfaces
-(`internal/server/anthropic_messages.go:655`) or the normal
+(`internal/server/anthropic_messages.go:755`) or the normal
 `content_block_stop`/`message_stop` sequence on `/v1/messages`
-(`internal/server/anthropic_messages.go:844`).
+(`internal/server/anthropic_messages.go:944`).
 
 **A truncated stream is therefore byte-indistinguishable from a complete one at
 the protocol level.** Your client must decide from the payload: check
@@ -1750,12 +1884,12 @@ silently (`internal/types/responses.go:64`–`83`; OpenAI at
 `finish_reason` as `error` on the AIQG event, and does **not** send the normal
 terminator (`internal/server/server.go:1862`–`1905`). The encoder interface
 gained a third method, `writeError`, for this
-(`internal/server/anthropic_messages.go:600`–`606`). What arrives on the wire:
+(`internal/server/anthropic_messages.go:700`–`706`). What arrives on the wire:
 
 | Surface | Terminal error |
 |---|---|
-| `/v1/chat/completions`, `/v1/completions` | `data: {"error":{"message":"…","type":"upstream_stream_error","code":"","param":null}}` then `data: [DONE]` (`internal/server/anthropic_messages.go:665`–`679`) |
-| `/v1/messages` | `event: error` with `{"type":"error","error":{"type":"upstream_stream_error","message":"…"}}`, and no `message_stop` (`internal/server/anthropic_messages.go:890`–`899`) |
+| `/v1/chat/completions`, `/v1/completions` | `data: {"error":{"message":"…","type":"upstream_stream_error","code":"","param":null}}` then `data: [DONE]` (`internal/server/anthropic_messages.go:765`–`779`) |
+| `/v1/messages` | `event: error` with `{"type":"error","error":{"type":"upstream_stream_error","message":"…"}}`, and no `message_stop` (`internal/server/anthropic_messages.go:990`–`999`) |
 | `/v1/responses` | `event: error` with `{"type":"error","code":"","message":"…","param":null}`, and no `response.completed` (`internal/server/responses_api.go:548`–`553`) |
 
 On the OpenAI surfaces `[DONE]` still follows the error object, so keep
@@ -1866,10 +2000,17 @@ pipeline, as `internal/server/anthropic_messages.go` and
 gives the new surface both governance and telemetry, so a route registered
 outside it is silently uncounted. A new streaming dialect implements
 `streamEncoder` — now three methods, including `writeError`, which must be
-terminal (`internal/server/anthropic_messages.go:600`–`606`) — and is driven by
+terminal (`internal/server/anthropic_messages.go:700`–`706`) — and is driven by
 the shared `streamChunks` loop, not a copy of it. A copy would also lose the
 response buffer that loop returns, and with it judge coverage for the new
-surface.
+surface. One trap for a translator: whatever Go types it builds, the handler
+re-encodes the request and the shared handler decodes it again, so a content
+array always reaches the pipeline and the providers as `[]interface{}`, never
+as `[]types.ContentPart`. Code that type-switches on `[]types.ContentPart`
+alone will not see it. `systemPartsFrom`
+(`internal/providers/anthropic/provider.go:770`–`794`) is the only provider
+code that converts the decoded shape back; the user and assistant turns, and the
+prompt-cache modes, do not yet (see "Prompt caching controls").
 
 **Adding a metric** has one rule that matters more than the mechanics: declare it
 in `internal/metrics/metrics.go` and add it to the `MustRegister` call at
@@ -2059,6 +2200,26 @@ gateway-wide switch into each experiment's guardrails, and it deliberately does
 not take the minimum of the two, because the global default is `0` and a
 minimum would make every declared rate inert (commit `333365e`, #213).
 
+**A multi-block `system` prompt is kept as blocks, not joined.** Joining the
+blocks into one string was the original design, and it is what every other
+provider prefers, so a single plain block still collapses to a string. #239
+records why that lost for the multi-block case. On 2026-10-03 a captured
+Claude Code request sent through the live gateway had three system blocks
+that counted 6,318 tokens and were billed as 14, and it returned `200` with a
+plausible answer. Claude Code's first block is the line
+`x-anthropic-billing-header: cc_version=…`, which the vendor consumes when it
+has a block to itself. Concatenated with no separator, the marker sat at the
+head of the merged block and the vendor consumed the whole block, taking the
+real instructions with it. The commit reports the attribution as exact: a
+capitalised marker, a leading space, `x-anthropic-foo:`, and the same marker
+in second position all survived. The comment at
+`internal/server/anthropic_messages.go:330`–`352` keeps that measurement beside
+the code. Keeping the blocks also gives each block's `cache_control` somewhere
+to live, and a merged string had none. The flattening helper,
+`anthropicTextFromField`, is still used for `tool_result` content
+(`internal/server/anthropic_messages.go:289`). The measurement comes from the
+commit message and code comment. This refresh did not repeat it.
+
 **Prompt caching defaults to passthrough, not auto.** Automatic placement would
 help callers who mark breakpoints badly, but a 30-day measurement on 2026-08-20
 found only 2 of 16 probe measurements with any prefix reuse and a mean
@@ -2110,6 +2271,33 @@ the internal host.
 **`503 model registry is not enabled`** from a `/v1/registry/*` route — the
 registry is off, which is the default. Nothing else on the gateway depends on
 it.
+
+**A `/v1/messages` agent behaves as if it had no system prompt** (gateways
+running images before `3b8526e`) — the `system` blocks were joined into one,
+and when the first block is Claude Code's `x-anthropic-billing-header:` line
+the vendor drops the whole merged block. The response is a normal `200`. The
+sign is billed input tokens far below the size of the prompt you sent: #239
+saw 6,318 tokens counted and 14 billed. Fixed at `3b8526e`; see
+design rationale.
+
+**A `/v1/messages` turn whose content comes back as `[map[… text:… type:text]]`
+in the model's view, or a model answering as if quoting Go syntax** (from
+`3b8526e`) — a text block in that turn carried `cache_control`, and the turn
+was sent to Anthropic as a `fmt.Sprintf` dump of the decoded blocks. Move the
+breakpoint to the system prompt, a tool, or a `tool_result`, or remove it.
+Read from code and a throwaway test, not observed live; see "Prompt caching
+controls".
+
+**More than four prompt-cache breakpoints reach Anthropic, or `TAS-Prompt-Cache:
+off` leaves some in place** (from `3b8526e` on `/v1/messages`) — breakpoints
+inside a `system` array or a turn's blocks are invisible to the clamp and to
+`off` and `auto`. Count your own breakpoints and keep them to four.
+
+**A `claude-opus-5-5` request reaches the wrong vendor, or its cost is missing
+from `llm_router_cost_total`** (images before `3b8526e`) — the Claude 5 names
+were not in the catalogue or the pricing table. Check the
+`X-TAS-Router-Provider` response header and `/v1/models`: if the name is absent there, the gateway predates the fix.
+Haiku 4.5 cost figures from those images are also about 20% low.
 
 **The response names a different model from the one you sent** — with the
 registry on, an alias was resolved or an `unavailable` model was replaced. Read
@@ -2201,7 +2389,8 @@ served `/metrics` anonymously on 2026-09-21.
 is enabled. The routes are deployed on `llm-router-aiqg` (since `aiqg-v5.87`),
 where they currently return `503 model registry is not enabled` and so spend
 nothing; they do not exist on `llm-router`. `POST /v1/registry/sync` sends a
-billable one-token request per configured Anthropic model, and `POST
+billable one-token request per configured Anthropic model (nine in the
+committed configuration at `3b8526e`, up from three), and `POST
 /v1/registry/validate` one per call. The sync route is limited to one pass per
 ten seconds gateway-wide; validate has no limit at all
 (`internal/server/registry_admin.go:28`–`31`, `:163`–`189`). Both are reachable

@@ -14,8 +14,8 @@ answers:
   - "How do I retry a failed request without paying for the generation twice?"
   - "Can this gateway substitute a different model for the one I named?"
 depth: deep
-verified_against: "tas-llm-router@db5ae56 (code), 2026-10-02"
-captures: "INHERITED, not re-taken. This refresh is code-only: no request was sent to any gateway for it. Every live capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). On 2026-10-02 the strict gateway moved twice: image aiqg-v5.89 rolled out at about 15:37 UTC and its response events in Loki stamp gateway_version 43fc830, then image aiqg-v5.90 rolled out at about 19:05 UTC and is what runs now; its metrics endpoint exports aiqg_stream_buffer_truncated_total, which exists only from db5ae56 (read 2026-10-02), though no event from it yet stamps a gateway_version. db5ae56 differs from 43fc830 only by buffering streamed responses so the quality judge can score them; internal/routing, internal/providers and internal/middleware are byte-identical, so every routing behaviour described here is the deployed code, while the captures remain from the older build."
+verified_against: "tas-llm-router@3b8526e (code), 2026-10-05"
+captures: "MOSTLY INHERITED. No completion request was sent for the 2026-10-05 refresh. Every completion capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). Read-only observations taken 2026-10-05: GET /v1/models on the strict gateway (twelve names, including the Claude 5 family), the Deployment and ReplicaSets (strict gateway on aiqg-v5.92 since 2026-10-05T16:00Z, permissive still aiqg-v5.75), the ConfigMap flags (unchanged), and Loki response events (which now stamp gateway_version with the image tag, aiqg-v5.92, not a commit). 3b8526e changes no file under internal/routing, internal/middleware or internal/server/server.go; it changes routing outcomes only through the model catalog it extends, and the live /v1/models shows that catalog is served."
 ---
 
 # Routing in the TAS LLM Router
@@ -44,23 +44,28 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > and whether you can reach it is a question the forensics section settles.
 >
 > **Two commits, and how far apart they now are.** Every line citation in this
-> document is against `tas-llm-router@db5ae56` (verified 2026-10-02). The only
-> code change since the previous refresh at `43fc830` is `db5ae56` itself, which
-> makes the gateway keep the text of a streamed answer so the quality judge can
-> score streamed responses for the first time (see "Streaming never retries"
-> below, and the judged-efficacy definition). It added lines to
-> `internal/server/server.go`, `internal/server/judge.go` and
-> `internal/config/config.go`, so every citation into those files past an
-> insertion point moved and was re-pointed; the code at each cited line is
-> unchanged. Every live capture was taken on 2026-08-27 from the deployed strict
-> gateway `gateway.aiqg.tas.scharber.com` (deployment `llm-router-aiqg` in
-> namespace `tas-llm-router`, image tag `aiqg-v5.86`), whose events stamp
-> `gateway_version: 39e8d77`. **No capture in this document was re-taken for this
-> refresh** — it is a code-only pass, and the captures are inherited.
+> document is against `tas-llm-router@3b8526e` (verified 2026-10-05). The only
+> code change since the previous refresh at `db5ae56` is `3b8526e` itself (#239),
+> and it touches routing in one way only: it adds the Claude 5 family and an
+> undated `claude-haiku-4-5` to the model catalog, and corrects Haiku 4.5's price.
+> Because the `model` field resolves a vendor only for names the catalog lists,
+> that changes where a request naming `claude-opus-5-5` goes — see "What the
+> `model` field actually does", which carries the new table. The same commit
+> stops `/v1/messages` flattening a multi-block system prompt and keeps prompt-cache
+> breakpoints through translation; neither moves a routing decision (see "How it
+> works end to end"). It added lines to `internal/config/config.go`,
+> `configs/config.yaml` and `internal/server/anthropic_messages.go`, so every
+> citation into those files past an insertion point moved and was re-pointed; the
+> code at each cited line is unchanged. Every live *completion* capture was taken
+> on 2026-08-27 from the deployed strict gateway `gateway.aiqg.tas.scharber.com`
+> (deployment `llm-router-aiqg` in namespace `tas-llm-router`, image tag
+> `aiqg-v5.86`), whose events stamp `gateway_version: 39e8d77`. **No completion
+> was re-sent for this refresh**; the read-only observations taken on 2026-10-05
+> are named where they are used.
 >
 > The gap between those two has widened, so it was measured rather than assumed.
-> `39e8d77` is an ancestor of `db5ae56`, the commit cited here, with 93 commits
-> between them (`git rev-list --count 39e8d77..db5ae56`). Across
+> `39e8d77` is an ancestor of `3b8526e`, the commit cited here, with 94 commits
+> between them (`git rev-list --count 39e8d77..3b8526e`). Across
 > that range `internal/routing/router.go` gained 143 lines and **lost none**:
 > every line the captures exercised is still there, unmodified. The additions are
 > three — a model-registry hook at the top of `Route()`, a check that a pinned
@@ -91,8 +96,8 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > and nothing in routing reads them.
 >
 > About three and a half hours later, at about 19:05 UTC the same day, the
-> Deployment rolled to `aiqg-v5.90`, which is what `llm-router-aiqg` runs as of
-> this refresh; the permissive `llm-router` is unchanged on `aiqg-v5.75`. The
+> Deployment rolled to `aiqg-v5.90`, which is what `llm-router-aiqg` ran at the
+> 2026-10-02 refresh; the permissive `llm-router` is unchanged on `aiqg-v5.75`. The
 > streaming judge described below is live on the strict gateway: its metrics
 > endpoint (`/aiqg/metrics`, port 8086) exports
 > `aiqg_stream_buffer_truncated_total 0`, a counter that exists only from
@@ -104,21 +109,38 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > `aiqg-v5.88` at `db5ae56`; no commit records the move to `v5.89` or `v5.90`, so
 > the manifest is not a reliable statement of what runs.
 >
+> Since then the strict gateway has moved twice more, read from its ReplicaSets on
+> 2026-10-05: `aiqg-v5.91` at 2026-10-04T19:44Z and `aiqg-v5.92` at
+> 2026-10-05T16:00Z, which is what serves traffic now (two ready pods). The
+> manifest at `3b8526e` still pins `aiqg-v5.88`. The `gateway_version` check
+> described above no longer resolves a commit by itself: response events written
+> on 2026-10-05 stamp `gateway_version: aiqg-v5.92`, the image tag, so the field
+> now says which image and not which code. What can be checked is behaviour.
+> `GET /v1/models` on the strict gateway, read 2026-10-05 at 23:42 UTC, lists the
+> twelve names `3b8526e` ships, the Claude 5 family included, so the catalog half
+> of that commit is serving. `[!UNVERIFIED]` That `aiqg-v5.92` contains the
+> other half — the `/v1/messages` system-prompt and cache-breakpoint fix — is not
+> established: the image rolled out about three hours *before* `3b8526e` merged
+> (18:49 UTC), so it was built from the pull request branch at some point, and
+> neither the event field nor the manifest says which.
+>
 > That resolution settles the question this document would otherwise leave open.
 > `git diff 43fc830..db5ae56` touches no routing code: `internal/routing`,
 > `internal/providers` and `internal/middleware` are byte-identical, and the
 > changes to `internal/server/server.go`, `internal/server/judge.go` and
 > `internal/config/config.go` add the stream buffer, the streaming judge call,
-> and the one setting that sizes the buffer. So every routing behaviour described
+> and the one setting that sizes the buffer. `git diff db5ae56..3b8526e` again
+> leaves `internal/routing`, `internal/middleware` and `internal/server/server.go`
+> untouched; its routing effect is entirely the catalog. So every routing behaviour described
 > below, including the three that arrived in September (the pin-versus-model
 > check, the registry hook, and the `X-TAS-Stream-Fallback` header), **is present
 > in the build serving traffic today**.
 > Where this document says "since 2026-09", that means deployed, not merely
 > merged.
 >
-> What that does *not* do is make anything observed. No traffic was sent for this
-> refresh, and the captures below are still from `aiqg-v5.86` / `39e8d77` on
-> 2026-08-27. The resolution makes the *Source* rows trustworthy as descriptions
+> What that does *not* do is make anything observed. No completion was sent for
+> this refresh, and the completion captures below are still from `aiqg-v5.86` /
+> `39e8d77` on 2026-08-27. The resolution makes the *Source* rows trustworthy as descriptions
 > of the running code; it does not turn any of them into a measurement.
 >
 > Where a behaviour is read from source rather than observed, the text says so.
@@ -190,7 +212,7 @@ alone would not say which one acted.
 | **Your tenant forbids the vendor** the strategy picked, so a permitted one was used instead | `routing_reason` contains `strategy chose <vendor>, which tenant constraints deny; used <other>` | Yes, if constraints are configured |
 | **The pinned vendor could not be used** — denied, unconfigured, failing its health probe, or not selling your model — so the pin was dropped | `routing_reason` begins `pinned provider <vendor> ` and names which of the four it was | Yes |
 | **Your own `fallback_config` sent it elsewhere** after the first vendor failed. This is a body field you set, and it ignores `preferred_chain` entirely | `X-TAS-Router-Fallback-Used: true`, and `routing_reason` contains `Fallback to <vendor>` | Yes, only when you set it |
-| **Two vendors advertise the same model name** and the cheaper one won | `X-TAS-Router-Provider` is whichever priced lower. Cannot happen with the six models shipped today; an operator adding an alias to both vendors creates it | No, not as configured |
+| **Two vendors advertise the same model name** and the cheaper one won | `X-TAS-Router-Provider` is whichever priced lower. Cannot happen with the twelve models shipped today; an operator adding an alias to both vendors creates it | No, not as configured |
 | **A rule's failover chain advanced a tier**, replacing both vendor and model | `X-TAS-Router-Fallback-Used: true` with a model you never sent | **No** — the chain's code has no reachable caller |
 | **The circuit breaker moved you off a failing vendor** | `routing_reason` contains `breaker ejected <vendor>; routed to <other>` | **No** — off gateway-wide |
 | **Affinity held you on a warm-cache vendor** | An affinity line in `routing_reason` | **No** — off gateway-wide, and its recording step is unreachable |
@@ -266,8 +288,8 @@ scan blocks returns `403 response blocked by content policy` **after** a
 successful, paid vendor call, and a scan that errors returns
 `500 response content scan failed` in the same position. Neither can happen here.
 Blocking is gated on `block_on_critical`, which the configuration this gateway
-loads sets to `false` for both directions (`configs/config.yaml:111`,
-`configs/config.yaml:119`), and `ShouldBlock` returns false outright when that
+loads sets to `false` for both directions (`configs/config.yaml:181`,
+`configs/config.yaml:189`), and `ShouldBlock` returns false outright when that
 flag is off (`internal/gatekeeper/gatekeeper.go:515-516`); the scan-error path is
 gated on `GATEKEEPER_FAIL_OPEN`, which the live ConfigMap sets to `"true"`
 (re-read 2026-09-23). If either setting is ever changed, a paid `403` becomes
@@ -350,19 +372,19 @@ through `gateway.aiqg.tas.scharber.com` on 2026-08-27 and the outcome was read
 from the response, the log, or the event — or, for the gateway-configuration
 rows, that the running Deployment and ConfigMap were read directly rather than
 inferred from a manifest in the repository. *Source* means it was read from the
-code at `db5ae56` and no live traffic exercised it. That distinction earns its
+code at `3b8526e` and no live traffic exercised it. That distinction earns its
 place here: this same document found four configuration knobs (the four rows
 marked "None" in the gateway-configuration table below — a different count from
 the five impossible causes above) that parse cleanly,
 validate at startup, and change nothing, so "the code says so" is weaker evidence
 than it looks.
 
-**No *Observed* row below was re-observed for the 2026-09-23, 2026-09-24 or
-2026-10-02 refreshes**, all code-only. Each was re-checked a weaker way instead: the code path it rests on
+**No *Observed* request row below was re-observed for the 2026-09-23, 2026-09-24,
+2026-10-02 or 2026-10-05 refreshes**, none of which sent a completion. Each was re-checked a weaker way instead: the code path it rests on
 was compared against the build that produced it, and none of those paths has lost
 a line. The gateway-configuration rows are the exception — those were re-read
 from the live `llm-router-aiqg` Deployment and the `llm-router-config` ConfigMap
-on 2026-09-23 and again on 2026-10-02 (unchanged), which is the same evidence
+on 2026-09-23 and again on 2026-10-02 and 2026-10-05 (unchanged), which is the same evidence
 that established them, so they are current rather than inherited.
 
 **"Scope" is the column to read before you generalise.** *Gateway* means the row
@@ -488,14 +510,15 @@ nothing the gateway classifies the request from its shape
 
 Every row marked *Observed* in this table was captured on 2026-08-27 against
 image `aiqg-v5.86`; none was re-observed for this refresh. The gateway now runs
-`aiqg-v5.90`, whose routing code is byte-identical to the source cited here (see
-the top for how that was established, and the one inference in it) — so a row
+`aiqg-v5.92`, whose routing code is byte-identical to the source cited here and
+whose live model list matches the catalog at `3b8526e` (see the top for how that
+was established, and what remains inferred) — so a row
 marked *Source* describes what is running,
 and a row marked *Observed* describes what an older build did on one day.
 
 | Control | Effect today | Scope | Evidence (Observed = 2026-08-27, `v5.86`) |
 |---|---|---|---|
-| `model` in the request body | Selects the vendor whenever exactly one vendor advertises the name | Gateway | Observed |
+| `model` in the request body | Selects the vendor whenever exactly one vendor advertises the name. Since `3b8526e` that includes the Claude 5 names, which before it were unknown and failed with a free 503 | Gateway | Observed (2026-08-27); catalog re-read from live `/v1/models` 2026-10-05 |
 | `optimize_for` in the body | Never reaches a decision. Every name in the deployed table is served by exactly one vendor, so the strategy is always `specific`, which is chosen before `optimize_for` is consulted; an unknown name fails at selection instead. A rule selection pre-empts it as well | Gateway | Source (reasoning); Observed (ignored, on a rule-carrying tenant) |
 | `retry_config` / `fallback_config` in the body | The only failover that runs. See "The fallback that does work" | Gateway | Observed |
 | `TAS-Conversation-Id` header | No effect — affinity is off gateway-wide, and the recording step is unreachable in code | Gateway | Observed |
@@ -513,14 +536,14 @@ and a row marked *Observed* describes what an older build did on one day.
 
 These rows are the current ones: every entry marked *Observed* here was re-read
 from the live Deployment and ConfigMap on 2026-09-23 and re-read unchanged on
-2026-10-02, not inherited from the August captures.
+2026-10-02 and 2026-10-05, not inherited from the August captures.
 
-| Setting | Effect today | Evidence (Observed = live config, 2026-09-23, re-read 2026-10-02) |
+| Setting | Effect today | Evidence (Observed = live config, 2026-09-23, re-read 2026-10-02 and 2026-10-05) |
 |---|---|---|
 | `router.default_strategy` (`LLM_ROUTER_DEFAULT_STRATEGY`) | None. Validated at startup, never read | Source |
 | `router.max_cost_threshold` and body `max_cost` | None. Parsed onto the request, read by nothing | Source |
 | `router.default_retry` / `router.default_fallback` | None. Never applied; only body-level config engages retry | Source |
-| `FEATURE_ADVANCED_ROUTING`, `FEATURE_CIRCUIT_BREAKER` | None. Present in the ConfigMap (both `"true"`, re-read 2026-09-23 and 2026-10-02), absent from the source | Observed (present) / Source (unread) |
+| `FEATURE_ADVANCED_ROUTING`, `FEATURE_CIRCUIT_BREAKER` | None. Present in the ConfigMap (both `"true"`, re-read 2026-09-23, 2026-10-02 and 2026-10-05), absent from the source | Observed (present) / Source (unread) |
 | `registry.enabled` — the model registry | Off, and not reachable without a new image. It is a YAML-only key with no environment binding and no default; the only config file the container reads is `configs/config.yaml` baked into the image, and that file has no `registry:` block. Nothing mounts over it | Source (code + image config + live Deployment spec) |
 | `AIQG_BREAKER_ENABLED` | Unset, so no vendor is ever ejected unless a tenant control enables it. Outcomes are still recorded, which is bookkeeping, not protection | Observed |
 | `AIQG_AFFINITY_ENABLED` | Unset, so affinity is off unless a tenant control enables it | Observed |
@@ -544,15 +567,15 @@ gains a breaker or affinity line only when one of them actually moved a decision
 
 **Facts about the code that no configuration can change**
 
-Rows marked *Source* here are current as of `db5ae56`, which for the code paths
+Rows marked *Source* here are current as of `3b8526e`, which for the code paths
 these rows describe is the same code the gateway is running. Rows marked
 *Observed* are from the 2026-08-27 captures against image `aiqg-v5.86`.
 
-| Fact | Consequence | Evidence (Source = `db5ae56`; Observed = 2026-08-27, `v5.86`) |
+| Fact | Consequence | Evidence (Source = `3b8526e`; Observed = 2026-08-27, `v5.86`, unless dated) |
 |---|---|---|
 | `completeWithFallback` has no reachable caller | The rule chain, pre-flight context check, tenant output cap, and served-affinity recording all never run | Source (call graph) confirmed by Observed: an over-window prompt that the pre-flight check would have caught was forwarded to the vendor and returned 200 |
 | `round_robin` is unreachable | Nothing can select it; it is not an option | Source. `determineStrategy` returns only the other three and no other caller sets it; no configuration path reaches the constant |
-| Vendor adapters refuse to price unknown models | An unrecognised model name fails at selection with 503 rather than routing anywhere | Observed, twice |
+| Vendor adapters refuse to price unknown models | An unrecognised model name fails at selection with 503 rather than routing anywhere | Observed, twice; and once more on 2026-10-04 in Loki, a `claude-opus-5-5` request on `aiqg-v5.91` (before the Claude 5 catalog) recorded as `http_status: 503`, `end_to_end_ms: 3`, no `vendor` |
 | A chain tier replaces the model as well as the vendor | Were the chain live, your response could name a model you did not send | Source |
 | Body-level fallback does not re-check that vendor and model agree | A `fallback_config` retry re-sends your model name to a vendor that does not serve it, so cross-vendor fallback cannot succeed on this gateway | Observed |
 | A pin *is* now checked against your model | A rule pinning a vendor that does not advertise your model is dropped with a recorded reason rather than producing a paid 500. A vendor whose model list is empty is exempt — an empty list means "cannot tell", not "serves nothing" | Source |
@@ -568,9 +591,33 @@ the two rows that will cost you time are the unreachable chain and the abstainin
 A completion arrives at `handleChatCompletion`
 (`internal/server/server.go:1075`). All three completion surfaces — the OpenAI
 chat surface, `/v1/messages`, and `/v1/responses` — translate their bodies and
-then call this one function (`internal/server/anthropic_messages.go:509` and
+then call this one function (`internal/server/anthropic_messages.go:609` and
 `internal/server/responses_api.go:339`), so everything below applies identically
 to all three.
+
+What the translation carries changed in `3b8526e`, and it is worth one paragraph
+because it looks as though it ought to affect routing and does not. A
+`/v1/messages` `system` field sent as several blocks used to be concatenated into
+one string; it is now kept as a block array, with any `cache_control` breakpoint
+each block carried (`internal/server/anthropic_messages.go:353`), and a single
+plain block still collapses to a string. Breakpoints on content blocks and on
+tool definitions now survive translation as well
+(`internal/server/anthropic_messages.go:82`,
+`internal/server/anthropic_messages.go:109`). The commit records why: Claude
+Code's first system block is an `x-anthropic-billing-header:` marker, and once
+merged into one block with everything behind it, the vendor discarded the whole
+block — a 6,318-token system prompt billed as 14 tokens, measured 2026-10-03,
+returning 200 with a plausible answer. None of this moves a routing decision. The
+feature filter treats only `image_url` parts as requiring a capability
+(`internal/routing/router.go:1069`), so a system prompt arriving as text blocks
+selects exactly the vendor a string would have. Two limits remain. A request
+whose `model` belongs to OpenAI receives the blocks as ordinary text parts and
+loses the breakpoints, since that adapter has nowhere to put them. And a
+breakpoint's `ttl` is carried but not honoured: the pinned Anthropic SDK
+(`v1.7.0`) has no TTL field, so a `1h` request is sent as the vendor's 5-minute
+default (`internal/providers/anthropic/provider.go:802-806`). That matters to
+the cache economics in "Why it stays put" below — a warm prefix this gateway
+creates stays warm for five minutes, whatever you asked for.
 
 Before routing runs, the handler resolves your tenant's policy onto the request
 context (`internal/server/server.go:1097-1160`): a provider pin, per-request
@@ -668,33 +715,67 @@ target for it to prefer is on the unreachable branch described below.
 registered vendors advertise the name you sent and returns true only when the
 count is exactly one (`internal/routing/router.go:570`). On the deployed gateway
 the model table is assembled from two places, neither of which an operator can
-edit without a new image. The Anthropic three come from `configs/config.yaml`
+edit without a new image. The nine Anthropic names come from `configs/config.yaml`
 baked into the container, which the image's own start command loads
 (`docker/Dockerfile:96`); the OpenAI three come from the compiled-in defaults
-(`internal/config/config.go:467-526`), because that file's `openai:` block is
+(`internal/config/config.go:467-577`), because that file's `openai:` block is
 commented out and so never overrides them. The deployment's ConfigMap carries no
-model list at all. The two sources agree on every price and window, and together
-they give six names across two vendors with no overlap:
+model list at all. The compiled-in defaults also carry the same nine Anthropic
+names, and since `3b8526e` a test fails the build if a default name is missing
+from the file (`internal/config/catalog_pricing_test.go:44`). Together they give
+twelve names across two vendors with no overlap:
 
 | Name | Vendor | Input per 1k | Output per 1k | Context window |
 |---|---|---|---|---|
 | `gpt-4o` | openai | $0.005 | $0.015 | 128,000 |
 | `gpt-4o-mini` | openai | $0.00015 | $0.0006 | 128,000 |
 | `gpt-3.5-turbo` | openai | $0.0015 | $0.002 | 16,385 |
+| `claude-fable-5-1` | anthropic | $0.010 | $0.050 | 1,000,000 |
+| `claude-opus-5-5` | anthropic | $0.004 | $0.020 | 1,000,000 |
+| `claude-opus-5` | anthropic | $0.005 | $0.025 | 1,000,000 |
+| `claude-sonnet-5-5` | anthropic | $0.002 | $0.010 | 1,000,000 |
+| `claude-sonnet-5` | anthropic | $0.002 | $0.010 | 1,000,000 |
+| `claude-haiku-4-5` | anthropic | $0.001 | $0.005 | 200,000 |
 | `claude-opus-4-6` | anthropic | $0.015 | $0.075 | 1,000,000 |
 | `claude-sonnet-4-6` | anthropic | $0.003 | $0.015 | 1,000,000 |
-| `claude-haiku-4-5-20251001` | anthropic | $0.0008 | $0.004 | 200,000 |
+| `claude-haiku-4-5-20251001` | anthropic | $0.001 | $0.005 | 200,000 |
+
+The first six Anthropic rows arrived in `3b8526e` (#239), and with them a real
+change in where a request goes. Before it, `claude-opus-5-5` — the name Claude
+Code sends — matched no vendor, so it took the unknown-name path described below
+and failed with a free 503: one such request on `aiqg-v5.91`, 2026-10-04, is in
+Loki as `http_status: 503`, `end_to_end_ms: 3`, and no `vendor`. Now exactly one
+vendor advertises it, so the strategy is `specific` and the request goes to
+Anthropic. The commit message describes the old outcome as falling through to
+cost selection where it "could be handed to the wrong vendor"; on this gateway
+that could not complete, because cost selection drops every vendor that cannot
+price the name and neither adapter could. The event above is the evidence that it
+did not.
+
+The same commit corrected Haiku 4.5's price. Both Haiku rows were $0.0008 / $0.004
+per 1k until then, about 20% under the vendor's rate, so every pre-flight estimate
+for that model was low by the same fraction, and so was the cost on its events.
+The walkthrough below predates the correction and shows the old figure. Two price
+tables matter here, and they are not the same table: the router's estimate reads
+the catalog above, while the cost on an event reads a separate table in
+`pkg/clear/cost.go`. Since `3b8526e` a test keeps the two equal for every name in
+`configs/config.yaml` (`internal/config/catalog_pricing_test.go:19`). It does not
+cover the three OpenAI names, which live only in the compiled-in defaults, and
+those two tables still disagree: `gpt-4o` is $0.005 / $0.015 in the catalog and
+$0.0025 / $0.010 in the event-cost table (`pkg/clear/cost.go:33`). For OpenAI
+models, the estimate header and the event's cost were computed from different
+prices.
 
 You do not have to take that table on trust, and you should not — every value in
 it ships inside the image, so it changes with a deployment rather than with a
 config edit you can see.
 `GET /v1/models` reports what the running gateway actually advertises, and its
 `owned_by` field is the vendor mapping this whole section is about. It needs no
-authentication, so it works before you have a token:
+authentication, so it works before you have a token. Read on 2026-10-05:
 
 ```bash
 curl -sS https://gateway.aiqg.tas.scharber.com/v1/models
-{"object":"list","data":[{"id":"claude-haiku-4-5-20251001","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"gpt-3.5-turbo","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o-mini","object":"model","created":0,"owned_by":"openai"}]}
+{"object":"list","data":[{"id":"claude-fable-5-1","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-haiku-4-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-haiku-4-5-20251001","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-5-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-5-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"gpt-3.5-turbo","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o-mini","object":"model","created":0,"owned_by":"openai"}]}
 ```
 
 If a name is absent from that list, sending it produces the 503 described below.
@@ -706,7 +787,7 @@ only; it does not read the model registry. If the registry is ever enabled, an
 alias it resolves will route successfully while remaining absent from this
 listing, and absence will stop meaning "will 503".
 
-So for these six names, `model` does pin the vendor. If that vendor is unhealthy,
+So for these twelve names, `model` does pin the vendor. If that vendor is unhealthy,
 `routeToSpecificProvider` returns an error rather than substituting
 (`internal/routing/router.go:638-640`) — you get a 503, never a silent swap to a
 different vendor's model.
@@ -1224,8 +1305,8 @@ the fact.
 > [!UNVERIFIED] Whether this is a regression or a staged rollout is still not
 > recorded. The chain landed in `626060d` ("walk the fallback chain;
 > `provider_override` becomes a real pin"), and no commit message, code comment,
-> or issue found at `db5ae56` explains why the retry-variant handlers were left
-> calling the older path. Re-checked on this refresh: 93 commits after `39e8d77` the call
+> or issue found at `3b8526e` explains why the retry-variant handlers were left
+> calling the older path. Re-checked on this refresh: 94 commits after `39e8d77` the call
 > graph is unchanged and nothing has been written down about it. Confirm with the
 > service owner before relying on a configured chain.
 
@@ -1236,10 +1317,13 @@ One request, followed hop by hop with the values it actually produced. Sent on
 no-store` bypasses the response cache so the routing path runs rather than a
 cached answer being replayed.
 
-**These values were not re-captured for the 2026-09-23, 2026-09-24 or 2026-10-02 refreshes.** They are the
+**These values were not re-captured for the 2026-09-23, 2026-09-24, 2026-10-02 or 2026-10-05 refreshes.** They are the
 original capture, against image `aiqg-v5.86`; the Deployment now names
-`aiqg-v5.90`, whose routing code is byte-identical to the source cited here. The
-running build would add `schema_requested: false` and `tools_declared: false` to
+`aiqg-v5.92`, whose routing code is byte-identical to the source cited here. One
+thing in the walkthrough *does* move, and it is the money: Haiku 4.5's price was
+corrected in `3b8526e`, so the estimate in hop 4 and the cost in the correlation
+example below are about 20% lower than the same request would show today. Hop 4
+gives both figures. The running build would also add `schema_requested: false` and `tools_declared: false` to
 this request's response event, since it sent neither a `response_format` nor any
 tools; the request did not stream, so the streaming judge change does not touch
 it either, and nothing else in the walkthrough moves. Every hop
@@ -1248,7 +1332,8 @@ changed, so the narrative holds — but the identifiers,
 the timestamps, and the `processing_time` belong to that one request in August
 and will not reproduce. The one number worth re-deriving yourself is the estimate
 in hop 4, because it is the only one you can compute from the price table
-without sending anything.
+without sending anything — and doing so against today's table gives a different
+answer from the header, which is the price correction showing through.
 
 **Getting a token of your own.** Every authenticated example here needs a
 `TAS-Auth` value beginning `tas_qg_live_`, and it is self-serve rather than
@@ -1313,8 +1398,10 @@ selection block was present, `routeBySelection` handled the request and the
 estimated as characters over four (`internal/routing/selection.go:187`): the
 34-character prompt gives 8 tokens. No verbosity measurement cleared the
 100-sample floor, so expected output fell back to `max_tokens`, which is 8. At
-haiku's prices that is 8/1000 × $0.0008 + 8/1000 × $0.004 = **$0.0000384**, which
-is exactly the `x-tas-router-estimated-cost` header above. OpenAI was priced too
+haiku's prices as they stood in August that is 8/1000 × $0.0008 + 8/1000 × $0.004
+= **$0.0000384**, which is exactly the `x-tas-router-estimated-cost` header above.
+At the corrected price shipped in `3b8526e` the same request estimates as
+8/1000 × $0.001 + 8/1000 × $0.005 = $0.000048. OpenAI was priced too
 and returned no price for this model name, so it was skipped as unpriced
 (`internal/routing/expected_cost.go:171`).
 
@@ -1324,7 +1411,7 @@ requested model. It did not, so nothing was compared and dwell was not consulted
 
 **Hop 6 — breaker and affinity, both inert.** Neither `AIQG_BREAKER_ENABLED` nor
 `AIQG_AFFINITY_ENABLED` is set on the running pod, and both default to false
-(`internal/config/config.go:734`, `internal/config/config.go:754` read the
+(`internal/config/config.go:785`, `internal/config/config.go:805` read the
 environment only when non-empty). A per-tenant control can still enable either;
 this tenant did not. No affinity line appeared in the reasoning, and a two-turn
 test sharing one `TAS-Conversation-Id` moved freely between vendors.
@@ -1524,6 +1611,13 @@ curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query_range' \
 The second `|=` filter is what separates the pair: the request event's identifier
 appears in both members, so without it the query can return either one.
 
+`actual_cost_usd` is 15 prompt and 5 completion tokens at the August Haiku price
+(15 × $0.0008 + 5 × $0.004 per 1k). It is computed from the event-cost table
+(`pkg/aiqg/events/builder.go:594`), which `3b8526e` corrected, so the same
+request today records $0.00004. Events stamp the table's version as
+`model_pricing_version`, now `pricing-v2026-10-04` (`pkg/clear/cost.go:11`); compare
+that field rather than the dollar figure when two events for one model disagree.
+
 **Whether you can run these at all is a network question, not a permissions one.**
 The Loki ingress carries no authentication of any kind — checked on the live
 cluster, its ingress has no auth annotations — so anyone who can reach the host
@@ -1670,7 +1764,7 @@ unwired — which is exactly what happened.
 
 **Configuration that looks live and is not.** Four knobs read as routing controls
 and change nothing. `router.default_strategy` is parsed and validated at startup
-(`internal/config/config.go:966`) and never consulted, because
+(`internal/config/config.go:1017`) and never consulted, because
 `determineStrategy` hard-codes cost optimisation as its default
 (`internal/routing/router.go:554`). `router.max_cost_threshold` and a request's
 `max_cost` field are parsed onto the request
@@ -1731,7 +1825,7 @@ curl -sS -k -w '\nHTTP %{http_code}\n' https://gateway.aiqg.tas.scharber.com/v1/
 HTTP 503
 ```
 
-Fix: send one of the six names in the table above, or have the model added to the
+Fix: send one of the twelve names in the table above, or have the model added to the
 gateway's table. Confirm by re-sending and reading `X-TAS-Router-Provider`.
 Nothing was billed — the event for this request shows `end_to_end_ms: 4` and no
 `vendor` field.
@@ -1751,6 +1845,25 @@ Fix on your side: retry, or send a model served by the other vendor. Probes run
 every 30 seconds (`internal/routing/router.go:162`), so recovery is visible within
 one interval at `https://gateway.aiqg.tas.scharber.com/health`, which lists each
 vendor's status and last probe latency.
+
+One property of the probe decides who this failure hits. It is a one-token
+completion sent with the gateway's own vendor credential
+(`internal/providers/anthropic/provider.go:393-411`), and health is one verdict
+per vendor for the whole gateway. So anything wrong with the *gateway's* account
+— not only an outage at the vendor — marks the vendor unhealthy for every
+tenant, including one whose own stored key would have worked, because the health
+filter runs before your credential is chosen. That is not hypothetical. On
+2026-10-05 Loki recorded Anthropic probe failures in namespace `tas-llm-router`
+(both deployments share it) at several hundred an hour from about 20:00 UTC, with `400 Bad Request … Your credit balance is too low to
+access the Anthropic API`, and response events for Claude models on `aiqg-v5.92`
+in the same window include 503s with no `vendor`. `[!UNVERIFIED]` That those
+503s carried `provider anthropic is not healthy` is inferred: the gateway does
+not log the routing error text, and `/health` read at 23:42 UTC reported
+Anthropic healthy, so the verdict was alternating rather than fixed. Since
+`3b8526e` the probe model is the undated `claude-haiku-4-5`, because the probe
+takes the first catalog name containing "haiku"
+(`internal/providers/anthropic/provider.go:421-431`) and that name now comes
+first.
 
 **Routing failed: no healthy providers available.** HTTP 503. No vendor passed
 the health filter (`internal/routing/router.go:667`). With ejection off, the only
