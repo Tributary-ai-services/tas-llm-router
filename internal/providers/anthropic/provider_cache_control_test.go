@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
 
@@ -220,5 +221,90 @@ func TestAnthropicProvider_SystemBlocksMessageLevelBreakpointOnLast(t *testing.T
 	}
 	if !strings.Contains(string(b1), "cache_control") {
 		t.Errorf("message-level breakpoint did not reach the last block:\n%s", b1)
+	}
+}
+
+// The hole the August 2026 smoke tests left: tool_use was verified
+// non-streaming, streaming was verified text-only, and the COMBINATION — which
+// is all a coding agent ever does — was never exercised. A streamed tool call
+// was therefore dropped in silence until Claude Code hit it on 2026-10-05.
+//
+// The events are built by unmarshalling the JSON Anthropic actually puts on the
+// wire, because the SDK's union re-parses each variant from the raw JSON it was
+// decoded from — a struct literal yields an empty variant and would make these
+// tests pass against any implementation, including the broken one.
+func streamEvent(t *testing.T, raw string) anthropic.MessageStreamEventUnion {
+	t.Helper()
+	var ev anthropic.MessageStreamEventUnion
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		t.Fatalf("unmarshal event: %v", err)
+	}
+	return ev
+}
+
+func TestConvertStreamEvent_ToolUseBlockStartCarriesIDAndName(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"content_block_start","index":0,
+		"content_block":{"type":"tool_use","id":"toolu_abc","name":"read_file","input":{}}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c == nil {
+		t.Fatal("content_block_start for a tool_use was dropped — the id and name arrive ONLY here")
+	}
+	tcs := c.Choices[0].Delta.ToolCalls
+	if len(tcs) != 1 {
+		t.Fatalf("want 1 tool call, got %d", len(tcs))
+	}
+	if tcs[0].ID != "toolu_abc" || tcs[0].Function.Name != "read_file" {
+		t.Errorf("id/name lost: %+v", tcs[0])
+	}
+}
+
+func TestConvertStreamEvent_InputJSONDeltaContinuesTheCall(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"content_block_delta","index":0,
+		"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"calc.py\"}"}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c == nil {
+		t.Fatal("input_json_delta was dropped — the tool call would arrive with no arguments")
+	}
+	tcs := c.Choices[0].Delta.ToolCalls
+	if len(tcs) != 1 || tcs[0].Function.Arguments != `{"path":"calc.py"}` {
+		t.Fatalf("argument fragment lost: %+v", tcs)
+	}
+	// The empty id is load-bearing: it is how the encoders know this continues
+	// the current call instead of opening a second one (bufferTool).
+	if tcs[0].ID != "" {
+		t.Errorf("fragment must carry an empty id to continue the open call, got %q", tcs[0].ID)
+	}
+}
+
+func TestConvertStreamEvent_MessageStartCarriesInputTokens(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"message_start","message":{"id":"msg_1",
+		"type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[],
+		"usage":{"input_tokens":397,"output_tokens":0,"cache_read_input_tokens":52829}}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c == nil || c.Usage == nil {
+		t.Fatal("message_start carried no usage — input tokens arrive only here, so the client reads 0 for the whole stream")
+	}
+	if c.Usage.PromptTokens != 397 || c.Usage.CacheReadTokens != 52829 {
+		t.Errorf("usage not carried: %+v", c.Usage)
+	}
+}
+
+// A text delta must still carry its text, and must not be mistaken for a tool call.
+func TestConvertStreamEvent_TextDeltaUnaffected(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"content_block_delta","index":0,
+		"delta":{"type":"text_delta","text":"pong"}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c == nil {
+		t.Fatal("text delta dropped")
+	}
+	if got, _ := c.Choices[0].Delta.Content.(string); got != "pong" {
+		t.Errorf("text = %q, want pong", got)
+	}
+	if len(c.Choices[0].Delta.ToolCalls) != 0 {
+		t.Error("a text delta must not produce a tool call")
 	}
 }

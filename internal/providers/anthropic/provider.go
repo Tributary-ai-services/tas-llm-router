@@ -267,44 +267,93 @@ func anthropicEventHasContent(event anthropic.MessageStreamEventUnion) bool {
 	return false
 }
 
-// convertStreamEvent converts an Anthropic streaming event to our ChatChunk format
+// convertStreamEvent converts an Anthropic streaming event to our ChatChunk format.
+//
+// # Tool calls must be carried, not dropped
+//
+// This function used to handle exactly two events — a text delta and
+// message_start — so every tool-use event returned nil and a streamed tool call
+// was silently discarded. Measured 2026-10-05 on the same request one flag
+// apart: non-streaming returned stop_reason=tool_use with the block and its
+// parsed input, while streaming returned NO content blocks and
+// stop_reason=end_turn, both having spent the same 50 output tokens generating
+// the call. The vendor produced it; we threw it away.
+//
+// The blast radius was every streaming agent against an Anthropic upstream, on
+// both wire formats, because this sits upstream of format translation. Claude
+// Code found it immediately — it always streams and it lives on tool calls — and
+// reported `success` with an empty result, which is how a dropped tool call
+// looks from the outside.
+//
+// anthropicEventHasContent, just above, has always handled InputJSONDelta for
+// TTFT and calls it "tool-use argument fragments … for agentic workflows", so
+// the gap was an oversight rather than a decision.
+//
+// # The shape the encoders expect
+//
+// The downstream encoders accumulate by ToolCall.ID: a call arrives with an id
+// and a name, and later argument fragments arrive with an EMPTY id to continue
+// the most recent call (anthropicStreamEncoder.bufferTool). That is exactly how
+// Anthropic streams a tool call — content_block_start carries id+name,
+// input_json_delta carries the argument text — so the mapping is one to one.
 func (p *AnthropicProvider) convertStreamEvent(event anthropic.MessageStreamEventUnion, req *types.ChatRequest, message *anthropic.Message) *types.ChatChunk {
-	switch variant := event.AsAny().(type) {
-	case anthropic.ContentBlockDeltaEvent:
-		switch delta := variant.Delta.AsAny().(type) {
-		case anthropic.TextDelta:
-			return &types.ChatChunk{
-				ID:      message.ID,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   req.Model,
-				Choices: []types.ChoiceChunk{
-					{
-						Index: 0,
-						Delta: &types.Message{
-							Role:    "assistant",
-							Content: delta.Text,
-						},
-					},
-				},
-			}
-		}
-	case anthropic.MessageStartEvent:
-		// Send initial chunk with role
+	chunk := func(delta *types.Message) *types.ChatChunk {
 		return &types.ChatChunk{
 			ID:      message.ID,
 			Object:  "chat.completion.chunk",
 			Created: time.Now().Unix(),
 			Model:   req.Model,
-			Choices: []types.ChoiceChunk{
-				{
-					Index: 0,
-					Delta: &types.Message{
-						Role: "assistant",
-					},
-				},
-			},
+			Choices: []types.ChoiceChunk{{Index: 0, Delta: delta}},
 		}
+	}
+
+	switch variant := event.AsAny().(type) {
+	case anthropic.ContentBlockStartEvent:
+		// A tool_use block opens here, and this is the ONLY event carrying its
+		// id and name. Text blocks need no opening chunk — their deltas carry
+		// everything the encoders need.
+		if tu, ok := variant.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
+			return chunk(&types.Message{
+				Role: "assistant",
+				ToolCalls: []types.ToolCall{{
+					ID:       tu.ID,
+					Type:     "function",
+					Function: types.Function{Name: tu.Name},
+				}},
+			})
+		}
+	case anthropic.ContentBlockDeltaEvent:
+		switch delta := variant.Delta.AsAny().(type) {
+		case anthropic.TextDelta:
+			return chunk(&types.Message{Role: "assistant", Content: delta.Text})
+		case anthropic.InputJSONDelta:
+			// Argument fragment for the block opened above. The id is left
+			// empty deliberately: that is how the encoders know this continues
+			// the current call rather than starting another one.
+			return chunk(&types.Message{
+				Role: "assistant",
+				ToolCalls: []types.ToolCall{{
+					Type:     "function",
+					Function: types.Function{Arguments: delta.PartialJSON},
+				}},
+			})
+		}
+	case anthropic.MessageStartEvent:
+		// Send the initial chunk with role — and with the input-token count,
+		// which arrives ONLY here. Without it a streamed response reported
+		// input_tokens: 0 to the client for the whole stream (the event record
+		// was always correct), so a client sizing its context from the response
+		// — as Claude Code does, to decide when to compact — read zero.
+		c := chunk(&types.Message{Role: "assistant"})
+		if in := variant.Message.Usage.InputTokens; in > 0 {
+			c.Usage = &types.Usage{
+				PromptTokens:        int(in),
+				CacheCreationTokens: int(variant.Message.Usage.CacheCreationInputTokens),
+				CacheReadTokens:     int(variant.Message.Usage.CacheReadInputTokens),
+				TotalTokens:         int(in),
+			}
+		}
+		return c
 	}
 	return nil
 }

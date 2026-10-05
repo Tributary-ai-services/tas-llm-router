@@ -910,9 +910,10 @@ func (e *anthropicStreamEncoder) bufferTool(tc types.ToolCall) {
 }
 
 func (e *anthropicStreamEncoder) writeChunk(c *types.ChatChunk) {
-	if !e.started {
-		e.start(c)
-	}
+	// Usage is absorbed BEFORE start(), because Anthropic reports input tokens
+	// in message_start and that event is emitted by start(). Reading usage
+	// afterwards meant the count on the first chunk always arrived too late and
+	// every streamed response advertised input_tokens: 0 for its whole life.
 	if c.Usage != nil {
 		if c.Usage.PromptTokens > 0 {
 			e.inputTokens = c.Usage.PromptTokens
@@ -920,6 +921,9 @@ func (e *anthropicStreamEncoder) writeChunk(c *types.ChatChunk) {
 		if c.Usage.CompletionTokens > 0 {
 			e.outputTokens = c.Usage.CompletionTokens
 		}
+	}
+	if !e.started {
+		e.start(c)
 	}
 	for _, ch := range c.Choices {
 		if ch.Delta != nil {
