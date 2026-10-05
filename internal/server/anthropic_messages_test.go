@@ -349,3 +349,95 @@ func TestStreamEncoders_WriteError(t *testing.T) {
 		}
 	}
 }
+
+// TestParseAnthropic_SystemBlocksPreserved is the regression test for the
+// measured 2026-10-03 failure: Claude Code's system prompt vanished because the
+// three blocks it sends were concatenated into one, putting the vendor's own
+// `x-anthropic-billing-header:` marker at the head of the merged block and
+// handing the real instructions to that marker's consumption. 6,318 tokens in,
+// 14 billed, HTTP 200, plausible answer, nothing logged.
+func TestParseAnthropic_SystemBlocksPreserved(t *testing.T) {
+	const marker = "x-anthropic-billing-header: cc_version=2.1.288.7d4; cc_entrypoint=sdk-cli;"
+	body := []byte(`{
+		"model": "claude-haiku-4-5-20251001",
+		"max_tokens": 64,
+		"system": [
+			{"type": "text", "text": "` + marker + `"},
+			{"type": "text", "text": "You are a Claude agent.", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+			{"type": "text", "text": "Long operating instructions.", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+		],
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.Messages[0].Role != "system" {
+		t.Fatalf("first message should be the system prompt, got %q", req.Messages[0].Role)
+	}
+	parts, ok := req.Messages[0].Content.([]types.ContentPart)
+	if !ok {
+		t.Fatalf("system content must stay a block array, got %T (flattening is the bug)", req.Messages[0].Content)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("want 3 system blocks, got %d", len(parts))
+	}
+	// The marker must remain ALONE in its own block — that is the whole fix.
+	if parts[0].Text != marker {
+		t.Errorf("block 0 must be exactly the marker, got %q", parts[0].Text)
+	}
+	if parts[0].CacheControl != nil {
+		t.Errorf("block 0 carried no cache_control; one was invented")
+	}
+	for _, i := range []int{1, 2} {
+		if parts[i].CacheControl == nil {
+			t.Errorf("block %d lost its cache_control (full price on every turn)", i)
+		} else if parts[i].CacheControl.TTL != "1h" {
+			t.Errorf("block %d TTL = %q, want 1h carried through", i, parts[i].CacheControl.TTL)
+		}
+	}
+}
+
+func TestParseAnthropic_SystemSingleBlockStaysString(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":8,"system":[{"type":"text","text":"be brief"}],
+		"messages":[{"role":"user","content":"hi"}]}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, ok := req.Messages[0].Content.(string); !ok || got != "be brief" {
+		t.Errorf("a single plain block should stay a string, got %#v", req.Messages[0].Content)
+	}
+}
+
+func TestParseAnthropic_ToolAndMessageCacheControl(t *testing.T) {
+	body := []byte(`{
+		"model": "m", "max_tokens": 8,
+		"tools": [{"name":"t","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"messages": [
+			{"role": "user", "content": [
+				{"type":"text","text":"first"},
+				{"type":"text","text":"last","cache_control":{"type":"ephemeral"}}
+			]},
+			{"role": "user", "content": [{"type":"text","text":"plain only"}]}
+		]
+	}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.Tools[0].CacheControl == nil {
+		t.Error("tool breakpoint dropped — the tool block is the biggest repeated prefix there is")
+	}
+	parts, ok := req.Messages[0].Content.([]types.ContentPart)
+	if !ok {
+		t.Fatalf("a turn with a breakpoint must keep its blocks, got %T", req.Messages[0].Content)
+	}
+	if parts[0].CacheControl != nil || parts[1].CacheControl == nil {
+		t.Error("breakpoint moved: position is the meaning")
+	}
+	// No breakpoint anywhere → the cheap string form is still used.
+	if _, ok := req.Messages[1].Content.(string); !ok {
+		t.Errorf("breakpoint-free turn should stay a string, got %T", req.Messages[1].Content)
+	}
+}

@@ -5,13 +5,22 @@ import (
 	"testing"
 )
 
-// haiku input rate is $0.00080/1k, output $0.00400/1k (see modelPricing).
 const (
 	haikuVendor = "anthropic"
 	haikuModel  = "claude-haiku-4-5-20251001"
-	haikuIn     = 0.00080
-	haikuOut    = 0.00400
 )
+
+// Rates come from the table rather than being restated here. Copying them made
+// this test fail the first time a rate was legitimately corrected (Haiku 4.5,
+// 2026-10-04) — which tested the copy, not the arithmetic. What is worth
+// asserting is the RELATIONSHIP: cache writes at 1.25x input, reads at 0.10x.
+var haikuIn, haikuOut = func() (float64, float64) {
+	in, out, ok := LookupPricing(haikuVendor, haikuModel)
+	if !ok {
+		panic("test fixture model is not in modelPricing: " + haikuModel)
+	}
+	return in, out
+}()
 
 func approx(a, b float64) bool { return math.Abs(a-b) < 1e-12 }
 

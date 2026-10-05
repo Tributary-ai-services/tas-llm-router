@@ -71,6 +71,75 @@ providers:
     base_url: "https://api.anthropic.com"
     timeout: 120s
     models:
+      # ---- current generation (added 2026-10-04) -------------------------------
+      # Rates are per 1K tokens; the authoritative per-1M figures are $10/$50
+      # (Fable 5.1), $4/$20 (Opus 5.5), $5/$25 (Opus 5), $2/$10 (Sonnet 5.5 and
+      # Sonnet 5), $1/$5 (Haiku 4.5). Keep in lockstep with pkg/clear/cost.go —
+      # TestCatalogModelsArePriced enforces it.
+      #
+      # These were missing until Plan #18 Phase 1. The consequence was not
+      # cosmetic: isSpecificProviderRequested (internal/routing/router.go) only
+      # resolves a model pin when some provider ADVERTISES the model, so a
+      # request naming claude-opus-5-5 fell through to cost_optimized selection
+      # and could be handed to the wrong vendor, and LookupPricing missed, so the
+      # traffic was unpriced in CLEAR Cost and the token-accounting block.
+      - name: "claude-fable-5-1"
+        provider_model_id: "claude-fable-5-1"
+        input_cost_per_1k: 0.010
+        output_cost_per_1k: 0.050
+        max_context_window: 1000000
+        max_output_tokens: 128000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "claude-opus-5-5"
+        provider_model_id: "claude-opus-5-5"
+        input_cost_per_1k: 0.004
+        output_cost_per_1k: 0.020
+        max_context_window: 1000000
+        max_output_tokens: 128000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "claude-opus-5"
+        provider_model_id: "claude-opus-5"
+        input_cost_per_1k: 0.005
+        output_cost_per_1k: 0.025
+        max_context_window: 1000000
+        max_output_tokens: 128000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "claude-sonnet-5-5"
+        provider_model_id: "claude-sonnet-5-5"
+        input_cost_per_1k: 0.002
+        output_cost_per_1k: 0.010
+        max_context_window: 1000000
+        max_output_tokens: 128000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "claude-sonnet-5"
+        provider_model_id: "claude-sonnet-5"
+        input_cost_per_1k: 0.002
+        output_cost_per_1k: 0.010
+        max_context_window: 1000000
+        max_output_tokens: 128000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # The canonical, undated Haiku 4.5 id. The dated variant below is the one
+      # this deployment has always sent and is kept so nothing in flight breaks.
+      - name: "claude-haiku-4-5"
+        provider_model_id: "claude-haiku-4-5"
+        input_cost_per_1k: 0.001
+        output_cost_per_1k: 0.005
+        max_context_window: 200000
+        max_output_tokens: 64000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # ---- previous generation ------------------------------------------------
       - name: "claude-opus-4-6"
         provider_model_id: "claude-opus-4-6"
         input_cost_per_1k: 0.015
@@ -91,8 +160,9 @@ providers:
         supports_structured_output: true
       - name: "claude-haiku-4-5-20251001"
         provider_model_id: "claude-haiku-4-5-20251001"
-        input_cost_per_1k: 0.0008
-        output_cost_per_1k: 0.004
+        # Corrected 2026-10-04: was 0.0008/0.004. Haiku 4.5 is $1/$5 per 1M.
+        input_cost_per_1k: 0.001
+        output_cost_per_1k: 0.005
         max_context_window: 200000
         max_output_tokens: 64000
         supports_functions: true

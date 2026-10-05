@@ -8,7 +8,7 @@ import "math"
 //
 // Format: `pricing-vYYYY-MM-DD` reflecting the publication date of the
 // rates encoded in modelPricing.
-const PricingVersion = "pricing-v2026-06-05"
+const PricingVersion = "pricing-v2026-10-04"
 
 // modelPricingEntry is the input/output rate pair for one vendor:model.
 // Rates are USD per 1,000 tokens (matches source-spec §2.1.3's CNA/CPS
@@ -34,14 +34,29 @@ var modelPricing = map[string]modelPricingEntry{
 	"openai:gpt-4-turbo":   {InputCostPer1K: 0.01000, OutputCostPer1K: 0.03000},
 	"openai:gpt-3.5-turbo": {InputCostPer1K: 0.00050, OutputCostPer1K: 0.00150},
 
-	// Anthropic — Claude 4.x family (current TAS deployment, see
+	// Anthropic — Claude 5 family and Haiku 4.5 (added 2026-10-04, Plan #18
+	// Phase 1). Absent these the scorer silently missed: LookupPricing returns
+	// ok=false, so a claude-opus-5-5 request produced no CLEAR Cost and no
+	// dollar figures in the token-accounting block — invisible to exactly the
+	// reports that exist to compare models.
+	"anthropic:claude-fable-5-1":  {InputCostPer1K: 0.01000, OutputCostPer1K: 0.05000},
+	"anthropic:claude-opus-5-5":   {InputCostPer1K: 0.00400, OutputCostPer1K: 0.02000},
+	"anthropic:claude-opus-5":     {InputCostPer1K: 0.00500, OutputCostPer1K: 0.02500},
+	"anthropic:claude-sonnet-5-5": {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000},
+	"anthropic:claude-sonnet-5":   {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000},
+	"anthropic:claude-haiku-4-5":  {InputCostPer1K: 0.00100, OutputCostPer1K: 0.00500},
+
+	// Anthropic — Claude 4.x family (previous generation, see
 	// tas-llm-router/configs/config.yaml). Keep rates in sync with that
 	// file; the config and this table can drift independently because
 	// the config doesn't feed the scorer (the table is the
 	// authoritative source for CLEAR.Cost).
-	"anthropic:claude-opus-4-6":           {InputCostPer1K: 0.01500, OutputCostPer1K: 0.07500},
-	"anthropic:claude-sonnet-4-6":         {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
-	"anthropic:claude-haiku-4-5-20251001": {InputCostPer1K: 0.00080, OutputCostPer1K: 0.00400},
+	"anthropic:claude-opus-4-6":   {InputCostPer1K: 0.01500, OutputCostPer1K: 0.07500},
+	"anthropic:claude-sonnet-4-6": {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
+	// Corrected 2026-10-04 (PricingVersion bump): was 0.00080/0.00400. Haiku 4.5
+	// is $1/$5 per 1M, so every cost figure for this model since the 4.x cutover
+	// was ~20% low. The dated id stays because it is what this deployment sends.
+	"anthropic:claude-haiku-4-5-20251001": {InputCostPer1K: 0.00100, OutputCostPer1K: 0.00500},
 
 	// Anthropic — Claude 3.x family (legacy, kept for replay /
 	// historical re-scoring; remove once Spark re-score has caught up

@@ -128,3 +128,97 @@ func TestAnthropicProvider_NoCacheControlByDefault(t *testing.T) {
 		t.Fatalf("unexpected cache_control when none was requested:\n%s", b)
 	}
 }
+
+// The other half of the 2026-10-03 finding: a multi-block system prompt has to
+// reach the vendor as multiple blocks. Merged into one, Claude Code's leading
+// `x-anthropic-billing-header:` marker consumes the whole block and the real
+// prompt never arrives — measured at 6,318 tokens counted against 14 billed.
+func TestAnthropicProvider_SystemBlocksStayBlocks(t *testing.T) {
+	const marker = "x-anthropic-billing-header: cc_version=2.1.288.7d4; cc_entrypoint=sdk-cli;"
+	provider := createTestProvider(t)
+	req := &types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001",
+		Messages: []types.Message{
+			{Role: "system", Content: []types.ContentPart{
+				{Type: "text", Text: marker},
+				{Type: "text", Text: "You are a Claude agent.", CacheControl: ephemeral()},
+				{Type: "text", Text: "Long operating instructions.", CacheControl: ephemeral()},
+			}},
+			{Role: "user", Content: "hi"},
+		},
+	}
+	got, err := provider.convertToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if len(got.System) != 3 {
+		t.Fatalf("want 3 system blocks on the wire, got %d — merging is the bug", len(got.System))
+	}
+	if got.System[0].Text != marker {
+		t.Errorf("block 0 must carry the marker alone, got %q", got.System[0].Text)
+	}
+	if strings.Contains(got.System[0].Text, "operating instructions") {
+		t.Error("instructions merged into the marker block: the prompt would be consumed with it")
+	}
+	b, _ := json.Marshal(got.System)
+	if n := strings.Count(string(b), `"cache_control"`); n != 2 {
+		t.Errorf("want 2 breakpoints across the system blocks, got %d:\n%s", n, b)
+	}
+}
+
+// A system message that arrives as []interface{} (the JSON round-trip shape)
+// must not degrade to "must be text only".
+func TestAnthropicProvider_SystemBlocksAfterJSONRoundTrip(t *testing.T) {
+	provider := createTestProvider(t)
+	raw := []interface{}{
+		map[string]interface{}{"type": "text", "text": "first"},
+		map[string]interface{}{"type": "text", "text": "second",
+			"cache_control": map[string]interface{}{"type": "ephemeral"}},
+	}
+	req := &types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001",
+		Messages: []types.Message{
+			{Role: "system", Content: raw},
+			{Role: "user", Content: "hi"},
+		},
+	}
+	got, err := provider.convertToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if len(got.System) != 2 {
+		t.Fatalf("want 2 system blocks, got %d", len(got.System))
+	}
+	b, _ := json.Marshal(got.System)
+	if !strings.Contains(string(b), `"cache_control"`) {
+		t.Errorf("breakpoint lost on the round-trip shape:\n%s", b)
+	}
+}
+
+// A message-level breakpoint on a block-form system prompt lands on the LAST
+// block, which is what "cache through the end of my system prompt" means.
+func TestAnthropicProvider_SystemBlocksMessageLevelBreakpointOnLast(t *testing.T) {
+	provider := createTestProvider(t)
+	req := &types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001",
+		Messages: []types.Message{
+			{Role: "system", CacheControl: ephemeral(), Content: []types.ContentPart{
+				{Type: "text", Text: "one"},
+				{Type: "text", Text: "two"},
+			}},
+			{Role: "user", Content: "hi"},
+		},
+	}
+	got, err := provider.convertToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	b0, _ := json.Marshal(got.System[0])
+	b1, _ := json.Marshal(got.System[1])
+	if strings.Contains(string(b0), "cache_control") {
+		t.Errorf("breakpoint on the wrong block:\n%s", b0)
+	}
+	if !strings.Contains(string(b1), "cache_control") {
+		t.Errorf("message-level breakpoint did not reach the last block:\n%s", b1)
+	}
+}

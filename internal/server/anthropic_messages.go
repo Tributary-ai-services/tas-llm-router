@@ -75,6 +75,11 @@ type anthropicWireTool struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description,omitempty"`
 	InputSchema map[string]interface{} `json:"input_schema,omitempty"`
+	// CacheControl on a tool caches the tool block, which renders first and is
+	// identical on every turn of an agent conversation — the cheapest large win
+	// there is. Dropping it meant an agent re-paid for its whole tool list on
+	// every request.
+	CacheControl *types.CacheControl `json:"cache_control,omitempty"`
 }
 
 // anthropicInputBlock is one element of a content-block array on an inbound
@@ -97,6 +102,11 @@ type anthropicInputBlock struct {
 	// tool_result (user returning a tool's output)
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // string | []block
+
+	// CacheControl marks this block as a prompt-cache breakpoint. Absent this
+	// field encoding/json discarded it: no error, no caching, full price on
+	// every turn (the #100 failure, reappearing on the native surface).
+	CacheControl *types.CacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicImageSource struct {
@@ -173,10 +183,8 @@ func parseAnthropicToChatRequest(body []byte, requireMaxTokens bool) (*types.Cha
 
 	// System prompt → a leading system message (the internal + OpenAI
 	// convention; the Anthropic provider lifts it back to top-level `system`).
-	if len(ar.System) > 0 {
-		if sys := anthropicTextFromField(ar.System); sys != "" {
-			req.Messages = append(req.Messages, types.Message{Role: "system", Content: sys})
-		}
+	if sys := anthropicSystemToMessage(ar.System); sys != nil {
+		req.Messages = append(req.Messages, *sys)
 	}
 
 	for _, m := range ar.Messages {
@@ -195,6 +203,7 @@ func parseAnthropicToChatRequest(body []byte, requireMaxTokens bool) (*types.Cha
 				Description: t.Description,
 				Parameters:  t.InputSchema,
 			},
+			CacheControl: t.CacheControl,
 		})
 	}
 
@@ -231,12 +240,24 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 	var parts []types.ContentPart // multimodal accumulation (text + image)
 	var toolCalls []types.ToolCall
 	hasImage := false
+	// A breakpoint anywhere in this turn forces the block-preserving form: the
+	// position of a cache_control IS its meaning ("cache the prefix through
+	// here"), so collapsing the blocks into one string would move it.
+	hasBlockCache := false
+	// A breakpoint on the final block of the turn is the common agentic case and
+	// is expressible at message level, which is how the provider and the
+	// auto-placement engine already model it.
+	var lastBlockCache *types.CacheControl
 
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
 			textParts = append(textParts, b.Text)
-			parts = append(parts, types.ContentPart{Type: "text", Text: b.Text})
+			parts = append(parts, types.ContentPart{Type: "text", Text: b.Text, CacheControl: b.CacheControl})
+			if b.CacheControl != nil {
+				hasBlockCache = true
+			}
+			lastBlockCache = b.CacheControl
 		case "image":
 			if b.Source != nil {
 				url := b.Source.URL
@@ -245,7 +266,11 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 				}
 				if url != "" {
 					hasImage = true
-					parts = append(parts, types.ContentPart{Type: "image_url", ImageURL: &types.ImageURL{URL: url}})
+					parts = append(parts, types.ContentPart{Type: "image_url", ImageURL: &types.ImageURL{URL: url}, CacheControl: b.CacheControl})
+					if b.CacheControl != nil {
+						hasBlockCache = true
+					}
+					lastBlockCache = b.CacheControl
 				}
 			}
 		case "tool_use":
@@ -262,6 +287,9 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 				Role:       "tool",
 				ToolCallID: b.ToolUseID,
 				Content:    anthropicTextFromField(b.Content),
+				// A tool_result is a whole message here, so its breakpoint is a
+				// message-level one.
+				CacheControl: b.CacheControl,
 			})
 		}
 	}
@@ -274,13 +302,20 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 	if len(toolCalls) > 0 || len(textParts) > 0 || hasImage {
 		msg := types.Message{Role: m.Role}
 		switch {
-		case hasImage:
-			msg.Content = parts // multimodal array
+		case hasImage || hasBlockCache:
+			msg.Content = parts // block array — preserves breakpoint position
 		default:
 			msg.Content = strings.Join(textParts, "")
+			// Content is a plain string, so the only place left to carry the
+			// breakpoint is the message, which means the same thing when it sat
+			// on the last block.
+			msg.CacheControl = lastBlockCache
 		}
 		if len(toolCalls) > 0 {
 			msg.ToolCalls = toolCalls
+			if msg.CacheControl == nil && !hasBlockCache {
+				msg.CacheControl = lastBlockCache
+			}
 		}
 		out = append(out, msg)
 	}
@@ -290,6 +325,71 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 		out = append(out, types.Message{Role: m.Role, Content: ""})
 	}
 	return out, nil
+}
+
+// anthropicSystemToMessage turns the Anthropic `system` field into the internal
+// system message, PRESERVING its block structure. Returns nil when there is no
+// text to carry.
+//
+// It must not flatten, and the reason is specific. Claude Code sends `system` as
+// three blocks whose first is
+//
+//	x-anthropic-billing-header: cc_version=…; cc_entrypoint=sdk-cli;
+//
+// a marker the vendor consumes when it owns a block. Concatenated into one block
+// that marker lands at the head of the merged text and the vendor consumes the
+// WHOLE block — silently discarding every instruction behind it. Measured
+// 2026-10-03 against the live gateway: the three real blocks counted 6,318
+// tokens and billed 14, returning HTTP 200 and a plausible answer, so an agent
+// routed through us ran with no system prompt at all and nothing said so. Only
+// the line-initial lowercase form does this (a capitalised marker, a leading
+// space, `x-anthropic-foo:` and the same marker in second position all survive),
+// which is what identifies it as the vendor's handling of its own marker rather
+// than anything of ours.
+//
+// Keeping one block per block also makes a per-block cache_control expressible,
+// which is the other half of the same bug: Claude Code marks its system prefix
+// cacheable and we were dropping the request.
+func anthropicSystemToMessage(raw json.RawMessage) *types.Message {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		if asString == "" {
+			return nil
+		}
+		return &types.Message{Role: "system", Content: asString}
+	}
+
+	var blocks []anthropicInputBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil
+	}
+
+	var parts []types.ContentPart
+	for _, b := range blocks {
+		if b.Type != "text" || b.Text == "" {
+			continue
+		}
+		parts = append(parts, types.ContentPart{
+			Type:         "text",
+			Text:         b.Text,
+			CacheControl: b.CacheControl,
+		})
+	}
+
+	switch {
+	case len(parts) == 0:
+		return nil
+	case len(parts) == 1 && parts[0].CacheControl == nil:
+		// One plain block is indistinguishable from a string system prompt, and
+		// the string form is what every other provider already handles best.
+		return &types.Message{Role: "system", Content: parts[0].Text}
+	default:
+		return &types.Message{Role: "system", Content: parts}
+	}
 }
 
 // anthropicTextFromField coerces an Anthropic field that may be a bare string

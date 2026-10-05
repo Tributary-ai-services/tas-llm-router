@@ -497,6 +497,57 @@ func (c *Config) setDefaults() {
 		},
 		Anthropic: &anthropic.AnthropicConfig{
 			Models: []types.ModelInfo{
+				// Current generation (2026-10-04). Mirrors configs/config.yaml;
+				// rates must match pkg/clear/cost.go (TestCatalogModelsArePriced).
+				{
+					Name:             "claude-fable-5-1",
+					ProviderModelID:  "claude-fable-5-1",
+					InputCostPer1K:   0.010,
+					OutputCostPer1K:  0.050,
+					MaxContextWindow: 1000000,
+					MaxOutputTokens:  128000,
+				},
+				{
+					Name:             "claude-opus-5-5",
+					ProviderModelID:  "claude-opus-5-5",
+					InputCostPer1K:   0.004,
+					OutputCostPer1K:  0.020,
+					MaxContextWindow: 1000000,
+					MaxOutputTokens:  128000,
+				},
+				{
+					Name:             "claude-opus-5",
+					ProviderModelID:  "claude-opus-5",
+					InputCostPer1K:   0.005,
+					OutputCostPer1K:  0.025,
+					MaxContextWindow: 1000000,
+					MaxOutputTokens:  128000,
+				},
+				{
+					Name:             "claude-sonnet-5-5",
+					ProviderModelID:  "claude-sonnet-5-5",
+					InputCostPer1K:   0.002,
+					OutputCostPer1K:  0.010,
+					MaxContextWindow: 1000000,
+					MaxOutputTokens:  128000,
+				},
+				{
+					Name:             "claude-sonnet-5",
+					ProviderModelID:  "claude-sonnet-5",
+					InputCostPer1K:   0.002,
+					OutputCostPer1K:  0.010,
+					MaxContextWindow: 1000000,
+					MaxOutputTokens:  128000,
+				},
+				{
+					Name:             "claude-haiku-4-5",
+					ProviderModelID:  "claude-haiku-4-5",
+					InputCostPer1K:   0.001,
+					OutputCostPer1K:  0.005,
+					MaxContextWindow: 200000,
+					MaxOutputTokens:  64000,
+				},
+				// Previous generation.
 				{
 					Name:             "claude-opus-4-6",
 					ProviderModelID:  "claude-opus-4-6",
@@ -516,8 +567,8 @@ func (c *Config) setDefaults() {
 				{
 					Name:             "claude-haiku-4-5-20251001",
 					ProviderModelID:  "claude-haiku-4-5-20251001",
-					InputCostPer1K:   0.0008,
-					OutputCostPer1K:  0.004,
+					InputCostPer1K:   0.001, // corrected 2026-10-04 (was 0.0008)
+					OutputCostPer1K:  0.005, // corrected 2026-10-04 (was 0.004)
 					MaxContextWindow: 200000,
 					MaxOutputTokens:  64000,
 				},

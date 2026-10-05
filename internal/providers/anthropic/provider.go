@@ -496,6 +496,14 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 	// is the largest, safest win available (see
 	// docs/AIQG-PROMPT-CACHE-CONTROL.md §4.1).
 	var systemCached bool
+	// systemBlocks is the block-preserving form. The vendor's `system` field is
+	// an ARRAY, and a caller who sent several blocks meant several blocks:
+	// merging them moves every cache_control and, when the first block is a
+	// marker the vendor consumes on its own (Claude Code's
+	// `x-anthropic-billing-header:` line), it feeds the whole merged block to
+	// that consumption and the real prompt disappears. See
+	// server.anthropicSystemToMessage for the measurement.
+	var systemBlocks []anthropic.TextBlockParam
 	var messages []anthropic.MessageParam
 
 	for _, msg := range req.Messages {
@@ -505,7 +513,22 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 			case string:
 				systemMessage = content
 			default:
-				return nil, fmt.Errorf("system messages must be text only for Anthropic")
+				parts, ok := systemPartsFrom(content)
+				if !ok {
+					return nil, fmt.Errorf("system messages must be text only for Anthropic")
+				}
+				for _, part := range parts {
+					if part.Type != "text" {
+						// A non-text system block has nowhere to go: the vendor's
+						// system field holds text blocks only.
+						return nil, fmt.Errorf("system messages must be text only for Anthropic")
+					}
+					block := anthropic.TextBlockParam{Text: part.Text, Type: "text"}
+					if part.CacheControl != nil {
+						block.CacheControl = ephemeralCacheControl()
+					}
+					systemBlocks = append(systemBlocks, block)
+				}
 			}
 			if msg.CacheControl != nil {
 				systemCached = true
@@ -535,8 +558,20 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 		Messages: messages,
 	}
 
-	// Set system message if present
-	if systemMessage != "" {
+	// Set system message if present. The block-preserving form wins when it is
+	// populated; the string form remains the path for the ordinary
+	// single-block/other-provider case.
+	if len(systemBlocks) > 0 {
+		if systemCached {
+			// A message-level breakpoint means "cache through the end of the
+			// system prompt", which is the last block.
+			last := &systemBlocks[len(systemBlocks)-1]
+			if last.CacheControl.Type == "" {
+				last.CacheControl = ephemeralCacheControl()
+			}
+		}
+		anthropicReq.System = systemBlocks
+	} else if systemMessage != "" {
 		block := anthropic.TextBlockParam{Text: systemMessage, Type: "text"}
 		if systemCached {
 			// The pinned SDK's CacheControlEphemeralParam carries Type only —
@@ -729,6 +764,32 @@ func setBlockCacheControl(b *anthropic.ContentBlockParamUnion) {
 		b.OfToolUse.CacheControl = ephemeralCacheControl()
 	case b.OfToolResult != nil:
 		b.OfToolResult.CacheControl = ephemeralCacheControl()
+	}
+}
+
+// systemPartsFrom coerces a system message's content into content parts.
+//
+// The in-process path hands over []types.ContentPart directly. The round-trip
+// path ([]interface{}, after the request has been through JSON) is handled too,
+// because a system prompt silently degrading to "must be text only" on whichever
+// path happens to re-serialize is the kind of difference nobody finds until it
+// is in production.
+func systemPartsFrom(content any) ([]types.ContentPart, bool) {
+	switch c := content.(type) {
+	case []types.ContentPart:
+		return c, true
+	case []interface{}:
+		raw, err := json.Marshal(c)
+		if err != nil {
+			return nil, false
+		}
+		var parts []types.ContentPart
+		if err := json.Unmarshal(raw, &parts); err != nil {
+			return nil, false
+		}
+		return parts, true
+	default:
+		return nil, false
 	}
 }
 
