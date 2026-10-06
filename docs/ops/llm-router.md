@@ -12,14 +12,28 @@ answers:
   - "Which metrics can I trust, which dashboard panels are showing fiction, and are streamed responses judged (what do the streaming exclusion reasons and the stream-buffer truncation counter mean)?"
   - "When do I escalate, to whom, and what do I attach?"
   - "Which hostnames reach this service, and why does /health return 404 or 403 on some of them?"
-  - "Which behaviours described here change when the next image is deployed, and how do I tell which code a pod is running?"
+  - "Which behaviours described here change when the next image is deployed (including which models a caller can pin to a provider and which dollar figures move), and how do I tell which code a pod is running?"
 depth: standard
-verified_against: "tas-llm-router@78c3cd2, 2026-10-05"
+verified_against: "tas-llm-router@b702931, 2026-10-05"
 ---
 
 # LLM Router — Operations
 
-> **Verified 2026-10-05 against `tas-llm-router@78c3cd2`**, a code-only refresh
+> **Verified 2026-10-05 against `tas-llm-router@b702931`**, a refresh for #241,
+> which grows the model catalog from 12 models to 46 (14 Anthropic, 32 OpenAI)
+> and fixes two wrong prices: Claude Opus 4.6 was charged at three times its
+> real rate, and the built-in OpenAI rates disagreed with the price table. See
+> "The model catalog and the price table" under "How it works end to end", and
+> the new #241 row under "What the next deploy changes". A read-only cluster
+> check at 00:28 UTC on 2026-10-06 (still the 2026-10-05 working day in the
+> owner's timezone) found no new image: `llm-router-aiqg` on `aiqg-v5.94`,
+> `llm-router` on `aiqg-v5.75`. Both pods' `/v1/models` still list the old
+> catalog, 12 and 6 models, so **#241 is on neither deployment** (observed).
+> The same pass read Loki and found Anthropic refusing every call for lack of
+> account credit from 20:19 to 23:39 UTC on 2026-10-05; see the new row under
+> "Failure modes". Nothing else was re-run.
+>
+> **Previously verified 2026-10-05 against `tas-llm-router@78c3cd2`**, a code-only refresh
 > for #242, which fixes three things in streamed responses served by Anthropic.
 > A streamed tool call is now passed to the caller; before, it was dropped and
 > the caller saw an empty, successful answer. The client's `usage` now reports
@@ -348,7 +362,7 @@ as a non-streaming response (`internal/server/server.go:1963`,
 `internal/server/server.go:2541`). The buffer holds at most 256 KiB per
 in-flight stream (`internal/server/stream_buffer.go:18`). The cap is set by
 `AIQG_STREAM_BUFFER_MAX_BYTES`, where `0` or unset means the default and a
-negative value turns buffering off (`internal/config/config.go:703`). No
+negative value turns buffering off (`internal/config/config.go:111`). No
 manifest sets it, and on 2026-10-02 the live `llm-router-aiqg` pod template
 did not set it either, so the default applies. Two streaming cases are
 counted under `aiqg_judge_excluded_total` rather than scored
@@ -442,10 +456,10 @@ breakpoint goes out as a plain 5-minute one
 (`internal/providers/anthropic/provider.go:851`). Claude Code asks for `1h`. A
 session that pauses for more than five minutes therefore writes its cache
 again at the cache-write rate, 1.25 times the input price
-(`pkg/clear/cost.go:141`), where a 1-hour cache would still have been read at a
-tenth of the input price (`pkg/clear/cost.go:140`). The #239 commit message names upgrading the
+(`pkg/clear/cost.go:163`), where a 1-hour cache would still have been read at a
+tenth of the input price (`pkg/clear/cost.go:162`). The #239 commit message names upgrading the
 library to `v1.66.0` as the fix, as a separate change, which has not been made
-at `78c3cd2`.
+at `b702931`.
 
 > [!UNVERIFIED] Whether `aiqg-v5.92`, the image `llm-router-aiqg` ran from
 > 2026-10-05 16:00 UTC, had the system-block fix was not checked, and neither
@@ -538,9 +552,14 @@ Anthropic's real JSON (`internal/providers/anthropic/provider_cache_control_test
 > so none was run here.
 
 **The model catalog and the price table.** The router keeps two lists of models
-and prices. The provider catalog in `configs/config.yaml`, the file the image
-runs, says which provider offers which model. The price table in
-`pkg/clear/cost.go` turns token counts into dollars. Both stopped at Claude 4.x
+and prices. The provider catalog says which provider offers which model. It
+starts as the built-in defaults compiled into the binary
+(`internal/config/config.go:393`), and the image then overlays its own copy of
+`configs/config.yaml`, baked in at build time (`docker/Dockerfile:82`, `:96`).
+Neither deployment mounts a config file of its own; on 2026-10-06 their only
+mounts were `/tmp`, `/app/cache` and the AIQG token Secret. A provider block
+absent from the YAML is left as the defaults set it. The price table in
+`pkg/clear/cost.go` turns token counts into dollars. Both lists stopped at Claude 4.x
 until `3b8526e`, with two effects.
 
 - **A request for a model not in the catalog cannot pin its provider.** The
@@ -555,16 +574,17 @@ until `3b8526e`, with two effects.
 
 `3b8526e` adds `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`,
 `claude-sonnet-5-5`, `claude-sonnet-5` and the undated `claude-haiku-4-5` to both
-lists (`configs/config.yaml:95`, `pkg/clear/cost.go:43`). It also corrects Claude
+lists (at `b702931` these entries sit at `configs/config.yaml:386` and
+`pkg/clear/cost.go:69`). It also corrects Claude
 Haiku 4.5 from $0.80/$4 to $1/$5 per million input/output tokens
-(`configs/config.yaml:163`, `pkg/clear/cost.go:59`). Haiku is the judge model, so
+(`configs/config.yaml:510`, `pkg/clear/cost.go:82`). Haiku is the judge model, so
 **the judge's dollar spend per token rises by 25% on a pod that has this
 change.** The traffic did not change. Earlier figures for Haiku were about 20% low.
 The table's version string moves to `pricing-v2026-10-04`
 (`pkg/clear/cost.go:11`). Each AIQG event records it as `model_pricing_version`,
 so cost figures before and after the change can be told apart in the data. Two
 tests now fail if the catalog and the price table drift apart
-(`internal/config/catalog_pricing_test.go:19`, `:44`).
+(`internal/config/catalog_pricing_test.go:21`, `:46`).
 
 **This half is live on `llm-router-aiqg`.** On 2026-10-05 its `aiqg-v5.92` pod
 listed all six new model ids, and the internal `llm-router` listed only the three
@@ -586,6 +606,77 @@ kubectl exec -n tas-llm-router deploy/llm-router-aiqg -c llm-router -- wget -qO-
 A Loki query for `model_pricing_version` over the eight hours before 23:45 UTC
 that day, limited to three lines, returned three AIQG events, all stamped
 `pricing-v2026-10-04`.
+
+**`b702931` (#241) advertises the full vendor catalog: 46 models, up from 12.**
+Before it, the router listed 9 Claude models and 3 OpenAI models, while the
+vendors' own model lists offered these accounts far more. So a request naming,
+for example, `gpt-5` or `claude-opus-4-8` could not pin its provider and had
+no price, the two effects above. The catalog now lists 14 Anthropic and 32
+OpenAI models (`configs/config.yaml:58`, `:381`). The three copies, the YAML,
+the built-in defaults and the price table, are generated from one table, so
+they agree. Scope, from the comment at the head of the catalog
+(`configs/config.yaml:43`): every model the vendor reports for this account
+*and* publishes a per-token rate for. Left out on purpose are dated snapshots
+(same rate as the base id), `-chat-latest` floating aliases, codex variants
+with no published rate, and `gpt-live-1`, which is billed per minute. A
+request naming a left-out id still behaves as before: no provider pin, no
+price.
+
+Two prices were wrong, and the fixes change dollar figures without any change
+in traffic:
+
+- **Claude Opus 4.6: $15/$75 → $5/$25 per million input/output tokens**
+  (`pkg/clear/cost.go:75`, `configs/config.yaml:444`). The old figure was the
+  retired Opus 4/4.1 rate. Every Opus 4.6 dollar figure on a pod without #241
+  is **three times too high**, and cost panels for it will drop to a third on
+  the next deploy.
+- **OpenAI built-in defaults.** `gpt-4o` was $5/$15 in the defaults against
+  $2.50/$10 in the price table, and `gpt-3.5-turbo` $1.50/$2 against
+  $0.50/$1.50. Before #241 the YAML's OpenAI block was commented out, so the
+  running OpenAI entries came from the defaults: cost-based routing ranked
+  OpenAI models on the wrong rates, while `llm_router_cost_total` and AIQG
+  events, which read the price table, were right. The defaults now match
+  (`internal/config/config.go:760`, `pkg/clear/cost.go:58`). The test that
+  missed this now checks both vendors and compares rates, not only names
+  (`internal/config/catalog_pricing_test.go:46`).
+
+The price-table version moves to `pricing-v2026-10-05` (`pkg/clear/cost.go:11`).
+An AIQG event stamped with it came from a pod with #241.
+
+**`0` for a model's context window or output limit means "not advertised, no
+cap".** Most models added by #241 carry `max_context_window: 0` and
+`max_output_tokens: 0` (34 of the 46 in `configs/config.yaml`), because their
+published limits were not verified (OPS-53, `configs/config.yaml:51`). The
+limit checks read `0` as no limit: the router neither rejects an over-long
+prompt nor lowers the caller's `max_tokens` for those models
+(`internal/routing/limits.go:121`, `aether-shared/go-aiqg-resilience/limits.go:147`).
+This is deliberate. The router lowers `max_tokens` to the advertised figure
+without telling the caller, so an understated limit would silently truncate
+answers. For such a model the request goes to the vendor as sent, so a limit
+breach is reported by the vendor, not by the router.
+
+**One advertised model is not on the account.** `claude-haiku-4-5`, the
+undated alias, is not in Anthropic's model list for this account, but it stays
+in the catalog (`configs/config.yaml:501`, `pkg/clear/cost.go:81`) because
+removing an advertised model changes routing for anyone pinning it (OPS-52).
+The dated `claude-haiku-4-5-20251001`, the judge model, is unaffected.
+
+> [!UNVERIFIED] Whether a request for `claude-haiku-4-5` succeeds at Anthropic
+> is not known. The #241 commit message says it could not be tested because the
+> Anthropic balance was at zero (OPS-51); see the credit-balance row under
+> "Failure modes".
+
+**#241 is not running anywhere yet.** At 00:28 UTC on 2026-10-06 both
+deployments still served the old catalog: 12 ids from `llm-router-aiqg`
+(`aiqg-v5.94`) and 6 from `llm-router` (`aiqg-v5.75`). #241 merged at
+00:25 UTC, after `aiqg-v5.94` rolled out. Count the ids to check a pod:
+
+```bash
+kubectl exec -n tas-llm-router deploy/llm-router-aiqg -c llm-router -- wget -qO- http://localhost:8086/v1/models | grep -oE '"id":"[^"]*"' | sort -u | wc -l
+12
+```
+
+`46` means the pod has #241; `12` on `llm-router-aiqg` means it does not.
 
 **How the semantic cache measures "close enough".** It turns each prompt into a
 384-number vector (an *embedding*) and compares vectors by similarity; a stored
@@ -744,7 +835,7 @@ roughly 3000ms, or either provider reporting anything other than `healthy`, as
 degraded rather than down.
 
 **What "sustained" means, as something you can check.** The router re-probes
-each provider every 30 seconds (the default at `internal/config/config.go:399`),
+each provider every 30 seconds (the default at `internal/config/config.go:405`),
 and `/health` returns the result of the last probe, so two calls inside one
 interval return the same number. "Sustained" here means **three consecutive
 probes**, which takes about 90 seconds to observe — run this after the
@@ -2163,6 +2254,8 @@ probe per later change. These probes cost nothing:
   `/aiqg/metrics`.
 - #239, price half: `claude-opus-5-5` in the pod's `/v1/models`, or
   `model_pricing_version` `pricing-v2026-10-04` on its AIQG events.
+- #241 (full catalog and price fixes): `/v1/models` lists 46 ids instead of
+  12, or AIQG events carry `model_pricing_version` `pricing-v2026-10-05`.
 - #242: AIQG events for streamed Anthropic requests showing `completion_tokens`
   `0`. This is indirect. It needs such traffic to exist, and it rests on the
   code-read warning under "Streamed responses from Anthropic: tool calls and
@@ -2177,7 +2270,7 @@ These need a paid request with a customer token:
 
 #233 (judge provenance) has no pod-level probe at all; see below.
 
-Everything in this list except its last five rows is merged at `552d869`. Since
+Everything in this list except its last six rows is merged at `552d869`. Since
 2026-09-21 it runs on `llm-router-aiqg` (`aiqg-v5.87`, built from `e6c24c0`,
 which contains all of it; `aiqg-v5.88` since 2026-09-26; `aiqg-v5.90` since
 2026-10-02 19:05 UTC; `aiqg-v5.92` since 2026-10-05 16:00 UTC; `aiqg-v5.94`
@@ -2191,7 +2284,7 @@ tell which code it runs. Two series bracket the range:
 |---|---|---|
 | Neither series below | older than `eee4b24` | None of this list. `llm-router`, 2026-09-23 and 2026-10-02 |
 | `llm_router_request_duration_seconds` | `eee4b24`, the exporter rewrite | The real exporter; not necessarily anything else here |
-| `llm_router_semcache_lookups_total` | `8e641ca`, the last code change before `552d869` | **Everything in this list except the last five rows**, which this test cannot see (the short answer above gives a probe for each). Both `llm-router-aiqg` pods, 2026-09-23 and 2026-10-02 |
+| `llm_router_semcache_lookups_total` | `8e641ca`, the last code change before `552d869` | **Everything in this list except the last six rows**, which this test cannot see (the short answer above gives a probe for each). Both `llm-router-aiqg` pods, 2026-09-23 and 2026-10-02 |
 
 `llm_router_semcache_lookups_total` is pre-seeded at zero, so it is present from
 the moment a new pod starts, before any traffic. Run the Prometheus query from
@@ -2220,8 +2313,9 @@ not. See also "How it works end to end".
 | Streamed responses buffered and judged (#238, `db5ae56`) — **on `llm-router-aiqg` since `aiqg-v5.90`, 2026-10-02 19:05 UTC (observed); not on `llm-router`** | On `llm-router-aiqg`, streamed responses join the judged sample; `aiqg_judge_excluded_total` gains `stream_error` and `stream_buffer_disabled`; `aiqg_stream_buffer_truncated_total` is exported at `0` by `llm-router-aiqg` now, and by `llm-router` only once it is deployed from `db5ae56` or later. Each in-flight stream holds up to 256 KiB of its text in memory until it ends | "Streamed responses and the judge" under "How it works end to end" |
 | System blocks, prompt-cache breakpoints, Claude 5 catalog and corrected prices (#239, `3b8526e`) — **the catalog and prices on `llm-router-aiqg` since `aiqg-v5.92`, 2026-10-05 16:00 UTC (observed on `aiqg-v5.92`; `aiqg-v5.93` and `aiqg-v5.94` not checked); the system-block fix not checked there; neither on `llm-router`** | Native `/v1/messages` requests keep a multi-block system prompt and their `cache_control` breakpoints, so a Claude Code caller's instructions reach the model and its cached prefix is read cheaply instead of re-paid. A 1-hour cache request still gets 5 minutes. Requests naming a Claude 5 model are routed to Anthropic, not chosen by cost. Haiku cost and judge spend step up 25%, and Claude 5 traffic gains dollar figures | "Native Anthropic requests: system blocks and prompt caching" and "The model catalog and the price table" under "How it works end to end" |
 | Streamed tool calls and streamed usage from Anthropic (#242, `78c3cd2`) — **not known to be on either deployment. `llm-router-aiqg` runs `aiqg-v5.94`, rolled out five minutes before #242 merged; its source commit is not recorded. Not on `llm-router`** | A streaming caller calling tools on an Anthropic model receives the tool call instead of an empty `end_turn` answer. The client's `usage` shows real `input_tokens` and cache counts instead of `0`. AIQG events for streamed Anthropic responses record `0` output tokens and `0` output cost (read from the code, not observed) | "Streamed responses from Anthropic: tool calls and usage" under "How it works end to end" |
+| Full vendor catalog and two price fixes (#241, `b702931`) — **on neither deployment: both served the old catalog at 00:28 UTC on 2026-10-06 (observed); #241 merged at 00:25 UTC, after `aiqg-v5.94` rolled out** | `/v1/models` lists 46 models instead of 12, so requests naming any of them, such as `gpt-5` or `claude-opus-4-8`, are pinned to their vendor instead of chosen by cost, and gain dollar figures. Claude Opus 4.6 dollar figures fall to a third. Cost-based ranking of OpenAI models uses the price-table rates, so `gpt-4o` and `gpt-3.5-turbo` look cheaper to the router than before. Events carry `pricing-v2026-10-05`. Most new models have no advertised limits, so the router does not cap their `max_tokens` | "The model catalog and the price table" under "How it works end to end" |
 
-The last five rows are the exceptions to "merged at `552d869`"; all five
+The last six rows are the exceptions to "merged at `552d869`"; all six
 landed after `e6c24c0`. The first two add no metric series, so the two-series
 test above cannot detect them. The flags are stamped in the chat-completion
 handler (`internal/server/server.go:1198`) and serialised only when set
@@ -2234,7 +2328,7 @@ exports `aiqg_stream_buffer_truncated_total` has #238. That counter is not a
 vector, so it is present from startup, and both `aiqg-v5.90` pods exported it
 at `0` on 2026-10-02. `llm-router` has neither change.
 
-#239, the last row, adds no metric either. Two checks find its price-table half.
+#239 adds no metric either. Two checks find its price-table half.
 Ask the pod for its model list with the `/v1/models` command under "The model
 catalog and the price table": a pod that lists `claude-opus-5-5` has the new
 catalog. Or look at `model_pricing_version` on its AIQG events in Loki:
@@ -2243,13 +2337,20 @@ it. Both passed on `llm-router-aiqg` on 2026-10-05. No check against the pod
 finds the system-block half without sending a paid request; see the caveat in
 that subsection.
 
-#242, the newest row, adds no metric and no log line either. Two indirect checks
+#242 adds no metric and no log line either. Two indirect checks
 find it. A streamed `/v1/messages` response from a pod with #242 has
 `cache_creation_input_tokens` and `cache_read_input_tokens` in its
 `message_start` event, even when both are `0`; a pod without it omits them.
 That check is a paid request. The free one is in Loki: AIQG events for streamed Anthropic requests showing
 `completion_tokens` of `0` where earlier ones did not mean the pod has #242
 (see the warning in that subsection). Neither check was run for this pass.
+
+#241, the newest row, adds no metric and no log line. Two free checks find it.
+Count the ids in the pod's `/v1/models` with the command at the end of "The
+model catalog and the price table": `46` means the pod has #241. Or look in
+Loki for AIQG events stamped `pricing-v2026-10-05`. On 2026-10-06 at 00:28 UTC
+the first check returned `12` on `llm-router-aiqg` and `6` on `llm-router`, so
+neither has it.
 
 Judge-score provenance is not logged at startup, and no image carries a commit
 label. There is no check you can run against the pod itself, only two indirect
@@ -2317,6 +2418,25 @@ message. The third is read from the code at `78c3cd2` and has not been observed.
 | A streaming agent, typically Claude Code, reports success with an empty result and takes no action; the same request with `stream: false` works | None. HTTP `200`, `stop_reason: end_turn`, no content blocks, but non-zero `output_tokens` | A pod older than `78c3cd2` discarded the tool-call events of a streamed Anthropic response. Affects every caller format. See "Streamed responses from Anthropic: tool calls and usage" | Deploy an image with #242 to the deployment that served the caller. Until then the caller can turn streaming off | The streamed response ends with a `tool_use` block and `stop_reason: tool_use` |
 | A streaming client shows `input_tokens: 0`, or `0` cache reads and writes, while the AIQG events for the same requests show real figures | None. The client's `usage` reads `"input_tokens":0`, and on `/v1/messages` the cache fields are absent from `message_start` | A pod older than `78c3cd2` discarded the input and cache counts from Anthropic's `message_start` event before they reached the client | Deploy an image with #242. Not a billing fault: the router's metrics and events were correct | `message_start` carries a non-zero `input_tokens` and both cache fields |
 | AIQG cost or output-token figures for Anthropic streaming traffic drop to near zero after a deploy, with no change in traffic | None. Events show `completion_tokens` `0` and `0` output cost for streamed Anthropic requests | From `78c3cd2` the event keeps the first usage it is given, which is now the input-only count from `message_start` (`internal/middleware/aiqg_routing.go:701`). See the warning in "Streamed responses from Anthropic: tool calls and usage" | A code fix; escalate to the owner. The `llm_router_*` cost metrics are unaffected and can stand in meanwhile | To tell it from a real drop: non-streaming events for the same model still show real `completion_tokens`. After a fix, streamed events do too |
+
+The row below was added on 2026-10-05 from Loki. The #241 commit message
+records the Anthropic balance at zero (OPS-51), and the log confirms it: from
+20:19:24 to 23:39:18 UTC on 2026-10-05 Anthropic refused every call from both
+deployments. That was 3,373 lines in total. 3,202 came from the provider health
+check, split almost evenly between the two deployments. 171 came from 57 real
+caller requests on `llm-router-aiqg`, each logged three times. No line matched
+after 23:39:18 UTC, and at 00:30 UTC on 2026-10-06 both deployments' `/health`
+reported Anthropic `healthy`.
+
+| Symptom | Literal error text | Cause | Fix | Confirm |
+|---|---|---|---|---|
+| Every request served by Anthropic fails; OpenAI requests succeed; pods stay Ready | `anthropic api call failed: POST "https://api.anthropic.com/v1/messages": 400 Bad Request ... {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`, logged as `Anthropic API call failed`, then `Completion attempt failed` and `All completion attempts failed`; the health check logs the same text as `Anthropic health check failed` | The Anthropic account has run out of prepaid credit (OPS-51). The status is `400`, not `401` or `429`, so it is not a key problem and retries never rescue it. Nothing on the router side is broken | Escalate to the account owner to add credit. Do **not** rotate the key or restart pods; neither changes the balance | `sum(count_over_time({namespace="tas-llm-router"} \|= "credit balance is too low" [10m]))` returns `"result":[]`, and the real-completion check in triage step 2 succeeds against a Claude model |
+
+> [!UNVERIFIED] What `/health` reported for Anthropic during the 20:19–23:39 UTC
+> window was not observed, so it is not known whether the provider was marked
+> unhealthy and traffic failed over to OpenAI. Nor is it confirmed that the
+> balance was topped up. The errors stopping and the health check passing at
+> 00:30 UTC suggest it was, but no paid request was sent to prove it.
 
 **Standing issue as of 2026-08-24:** 51 occurrences of `invalid x-api-key`
 against Anthropic in the preceding 48 hours. This was an active credential
@@ -2651,9 +2771,9 @@ compiled into the image (`pkg/clear/cost.go:30`), not from the vendor. A
 new model is unpriced and cannot be pinned to its provider until a release adds
 it, which is what happened to the Claude 5 family before `3b8526e`. Tests now
 keep the catalog and the table in step with each other
-(`internal/config/catalog_pricing_test.go:19`). Nothing checks the table against
+(`internal/config/catalog_pricing_test.go:21`). Nothing checks the table against
 the vendor's published prices: the Claude Haiku 4.5 rate was 20% low until
-`3b8526e`.
+`3b8526e`, and Claude Opus 4.6 three times too high until `b702931`.
 
 No NetworkPolicy exists in this namespace, so any pod in the cluster can reach
 port 8086 directly, bypassing the ingress and whatever the ingress enforces.
