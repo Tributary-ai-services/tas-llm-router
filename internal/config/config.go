@@ -479,7 +479,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -492,7 +492,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -505,7 +505,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -518,7 +518,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -531,7 +531,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -544,7 +544,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -557,7 +557,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -570,7 +570,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -583,7 +583,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -596,7 +596,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -609,7 +609,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -622,7 +622,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -635,7 +635,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -648,7 +648,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -661,7 +661,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -674,7 +674,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -756,7 +756,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -769,7 +769,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -782,7 +782,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -795,7 +795,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-					ReasoningModel:     true,
+					RestrictedParams:   true,
 				},
 			},
 			Timeout: 120 * time.Second,
@@ -812,6 +812,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -824,6 +825,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-opus-5-5",
@@ -835,6 +837,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-opus-5",
@@ -846,6 +849,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -858,6 +862,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -870,6 +875,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// rate CORRECTED 2026-10-05: was 0.015/0.075
 				{
@@ -905,6 +911,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-sonnet-5",
@@ -916,6 +923,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-sonnet-4-6",

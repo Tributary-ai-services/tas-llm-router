@@ -24,7 +24,7 @@ func testProvider() *OpenAIProvider {
 	return &OpenAIProvider{
 		config: &OpenAIConfig{
 			Models: []types.ModelInfo{
-				{Name: "gpt-5-mini", ProviderModelID: "gpt-5-mini", ReasoningModel: true},
+				{Name: "gpt-5-mini", ProviderModelID: "gpt-5-mini", RestrictedParams: true},
 				{Name: "gpt-4o-mini", ProviderModelID: "gpt-4o-mini"},
 			},
 		},

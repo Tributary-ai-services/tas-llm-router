@@ -76,17 +76,17 @@ func (p *OpenAIProvider) GetProviderName() string {
 }
 
 // GetCapabilities returns the capabilities of the OpenAI provider
-// isReasoningModel reports whether a model takes OpenAI's restricted
-// reasoning-era parameter set. It reads the DECLARED catalog flag rather than
+// hasRestrictedParams reports whether a model takes OpenAI's restricted
+// restricted-era parameter set. It reads the DECLARED catalog flag rather than
 // pattern-matching the name: a prefix rule is a guess that silently
 // mis-handles the next family OpenAI ships, and this catalog is generated from
 // one table so declaring it costs nothing. An unknown model falls back to the
 // classic parameter set, which is the pre-RT-5 behaviour and therefore cannot
 // regress a model that works today.
-func (p *OpenAIProvider) isReasoningModel(model string) bool {
+func (p *OpenAIProvider) hasRestrictedParams(model string) bool {
 	for _, m := range p.config.Models {
 		if strings.EqualFold(m.Name, model) || strings.EqualFold(m.ProviderModelID, model) {
-			return m.ReasoningModel
+			return m.RestrictedParams
 		}
 	}
 	return false
@@ -563,7 +563,7 @@ func (p *OpenAIProvider) convertToOpenAIRequest(req *types.ChatRequest) (*openai
 
 	// Set optional fields.
 	//
-	// The reasoning-era models (gpt-5/5.x/6, o1, o3, o4) take a RESTRICTED
+	// The restricted-era models (gpt-5/5.x/6, o1, o3, o4) take a RESTRICTED
 	// parameter set, measured against the vendor 2026-10-06 one parameter at a
 	// time: max_tokens is rejected in favour of max_completion_tokens, and
 	// top_p / frequency_penalty / presence_penalty / stop are rejected
@@ -576,48 +576,48 @@ func (p *OpenAIProvider) convertToOpenAIRequest(req *types.ChatRequest) (*openai
 	// the caller gets, so each drop is COUNTED. A rising
 	// aiqg_openai_param_dropped_total is callers asking for determinism or
 	// penalties and not getting them, which is otherwise invisible.
-	reasoning := p.isReasoningModel(req.Model)
+	restricted := p.hasRestrictedParams(req.Model)
 
 	if req.Temperature != nil {
 		// Only the default is accepted, and the SDK omits the zero value, so an
 		// explicit 1 and an absent field are the same request on the wire.
-		if !reasoning || *req.Temperature == 1 {
+		if !restricted || *req.Temperature == 1 {
 			openaiReq.Temperature = *req.Temperature
 		} else {
-			metrics.OpenAIParamDroppedTotal.WithLabelValues("temperature").Inc()
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "temperature").Inc()
 		}
 	}
 	if req.MaxTokens != nil {
-		if reasoning {
+		if restricted {
 			openaiReq.MaxCompletionTokens = *req.MaxTokens
 		} else {
 			openaiReq.MaxTokens = *req.MaxTokens
 		}
 	}
 	if req.TopP != nil {
-		if !reasoning {
+		if !restricted {
 			openaiReq.TopP = *req.TopP
 		} else {
-			metrics.OpenAIParamDroppedTotal.WithLabelValues("top_p").Inc()
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "top_p").Inc()
 		}
 	}
 	if req.FrequencyPenalty != nil {
-		if !reasoning {
+		if !restricted {
 			openaiReq.FrequencyPenalty = *req.FrequencyPenalty
 		} else {
-			metrics.OpenAIParamDroppedTotal.WithLabelValues("frequency_penalty").Inc()
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "frequency_penalty").Inc()
 		}
 	}
 	if req.PresencePenalty != nil {
-		if !reasoning {
+		if !restricted {
 			openaiReq.PresencePenalty = *req.PresencePenalty
 		} else {
-			metrics.OpenAIParamDroppedTotal.WithLabelValues("presence_penalty").Inc()
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "presence_penalty").Inc()
 		}
 	}
-	if reasoning && len(openaiReq.Stop) > 0 {
+	if restricted && len(openaiReq.Stop) > 0 {
 		openaiReq.Stop = nil
-		metrics.OpenAIParamDroppedTotal.WithLabelValues("stop").Inc()
+		metrics.ParamDroppedTotal.WithLabelValues("openai", "stop").Inc()
 	}
 	if req.Seed != nil {
 		openaiReq.Seed = req.Seed

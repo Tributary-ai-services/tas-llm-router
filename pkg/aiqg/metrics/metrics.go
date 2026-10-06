@@ -299,13 +299,15 @@ var StreamBufferTruncatedTotal = prometheus.NewCounter(
 	},
 )
 
-// OpenAIParamDroppedTotal counts sampling parameters the OpenAI translation
-// layer had to drop because the target model refuses them.
+// ParamDroppedTotal counts sampling parameters a translation layer had to drop
+// because the target model refuses them. Labelled by vendor, since both have a
+// restricted generation and the sets differ.
 //
-// The reasoning-era models (gpt-5/5.x/6, o1, o3, o4) reject top_p,
-// frequency_penalty, presence_penalty and stop outright, and accept only
-// temperature's default of 1 -- measured against the vendor 2026-10-06, one
-// parameter at a time. Sending any of them is a hard 400 that reaches the
+// OpenAI's reasoning-era models reject top_p, frequency_penalty,
+// presence_penalty and stop outright and accept only temperature's default of
+// 1; Anthropic's 4.7+ generation rejects temperature, top_p and top_k as
+// "deprecated" but keeps stop_sequences. Measured 2026-10-06 one parameter at
+// a time against each vendor. Sending any of them is a hard 400 that reaches the
 // caller as a 500, so the request is shaped instead.
 //
 // Dropping is the only way to serve the request, but it is NOT free: a caller
@@ -314,12 +316,12 @@ var StreamBufferTruncatedTotal = prometheus.NewCounter(
 // scores. Counting it is what keeps "we quietly changed your request" from
 // being invisible -- the same reason JudgeExcludedTotal exists. A rising count
 // on the temperature label is the one to care about.
-var OpenAIParamDroppedTotal = prometheus.NewCounterVec(
+var ParamDroppedTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
-		Name: "aiqg_openai_param_dropped_total",
-		Help: "Sampling parameters dropped because the target OpenAI model rejects them (reasoning-era models).",
+		Name: "aiqg_param_dropped_total",
+		Help: "Sampling parameters dropped because the target model's vendor rejects them (restricted-parameter generations).",
 	},
-	[]string{"param"},
+	[]string{"vendor", "param"},
 )
 
 // EvalCredentialSourceTotal records which key an evaluation call billed, by
@@ -453,7 +455,7 @@ func init() {
 		UnpricedCallsTotal,
 		JudgeExcludedTotal,
 		StreamBufferTruncatedTotal,
-		OpenAIParamDroppedTotal,
+		ParamDroppedTotal,
 		EvalEventsTotal,
 		EvalEventsFailedTotal,
 		EvalCredentialSourceTotal,
