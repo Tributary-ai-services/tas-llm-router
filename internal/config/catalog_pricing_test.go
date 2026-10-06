@@ -7,6 +7,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/tributary-ai/llm-router-waf/internal/types"
+
 	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 )
 
@@ -42,16 +44,43 @@ func TestCatalogModelsArePriced(t *testing.T) {
 // misconfigured pod runs the defaults, and a model present in one and absent from
 // the other is the same unresolved-pin failure in a place nobody looks.
 func TestDefaultCatalogMatchesYAML(t *testing.T) {
-	yamlModels := catalogModels(t)["anthropic"]
-	inYAML := map[string]bool{}
-	for _, m := range yamlModels {
-		inYAML[m.Name] = true
-	}
+	// Covers BOTH vendors. It used to check anthropic only, and that gap is
+	// exactly how the OpenAI rates drifted: TestCatalogModelsArePriced reads
+	// configs/config.yaml, OpenAI was commented out there, so the Go defaults'
+	// OpenAI block was checked by nothing and gpt-4o sat at 0.005/0.015 against
+	// 0.00250/0.01000 in pkg/clear/cost.go. The live pods run the defaults, so
+	// cost-optimized routing was ranking OpenAI models on prices that CLEAR
+	// disagreed with. Found and fixed 2026-10-05.
+	cat := catalogModels(t)
 	def := &Config{}
 	def.setDefaults()
-	for _, m := range def.Providers.Anthropic.Models {
-		if !inYAML[m.Name] {
-			t.Errorf("anthropic model %q is in the Go defaults but not in configs/config.yaml", m.Name)
+
+	for _, v := range []struct {
+		vendor string
+		models []types.ModelInfo
+	}{
+		{"openai", def.Providers.OpenAI.Models},
+		{"anthropic", def.Providers.Anthropic.Models},
+	} {
+		yamlByName := map[string]catalogModel{}
+		for _, m := range cat[v.vendor] {
+			yamlByName[m.Name] = m
+		}
+		if len(yamlByName) == 0 {
+			t.Errorf("no %s models in configs/config.yaml — this check would pass vacuously", v.vendor)
+			continue
+		}
+		for _, m := range v.models {
+			y, ok := yamlByName[m.Name]
+			if !ok {
+				t.Errorf("%s model %q is in the Go defaults but not in configs/config.yaml", v.vendor, m.Name)
+				continue
+			}
+			// Presence is not enough: the two were present-and-disagreeing before.
+			if y.InputCostPer1K != m.InputCostPer1K || y.OutputCostPer1K != m.OutputCostPer1K {
+				t.Errorf("%s:%s rates disagree: config.yaml %.5f/%.5f, Go defaults %.5f/%.5f",
+					v.vendor, m.Name, y.InputCostPer1K, y.OutputCostPer1K, m.InputCostPer1K, m.OutputCostPer1K)
+			}
 		}
 	}
 }

@@ -32,70 +32,380 @@ router:
     require_same_features: true
 
 providers:
-  # OpenAI provider disabled - uncomment and add API key to enable
-  # openai:
-  #   api_key: "${OPENAI_API_KEY}"
-  #   base_url: "https://api.openai.com/v1"
-  #   timeout: 120s
-  #   models:
-  #     - name: "gpt-4o"
-  #       provider_model_id: "gpt-4o"
-  #       input_cost_per_1k: 0.005
-  #       output_cost_per_1k: 0.015
-  #       max_context_window: 128000
-  #       max_output_tokens: 4096
-  #       supports_functions: true
-  #       supports_vision: true
-  #       supports_structured_output: true
-  #     - name: "gpt-4o-mini"
-  #       provider_model_id: "gpt-4o-mini"
-  #       input_cost_per_1k: 0.00015
-  #       output_cost_per_1k: 0.0006
-  #       max_context_window: 128000
-  #       max_output_tokens: 16384
-  #       supports_functions: true
-  #       supports_vision: true
-  #       supports_structured_output: true
-  #     - name: "gpt-3.5-turbo"
-  #       provider_model_id: "gpt-3.5-turbo"
-  #       input_cost_per_1k: 0.0015
-  #       output_cost_per_1k: 0.002
-  #       max_context_window: 16385
-  #       max_output_tokens: 4096
-  #       supports_functions: true
-  #       supports_vision: false
-  #       supports_structured_output: false
+  # The full catalog, generated 2026-10-05 from ONE table so that this file,
+  # internal/config/config.go's setDefaults() and pkg/clear/cost.go cannot
+  # drift apart. TestCatalogModelsArePriced and TestDefaultCatalogMatchesYAML
+  # enforce the coupling; both had blind spots before this change (the price
+  # test reads THIS file, and OpenAI was commented out here, so the Go
+  # defaults' OpenAI rates went unchecked and had drifted - gpt-4o was
+  # 0.005/0.015 in the defaults against 0.00250/0.01000 in cost.go).
+  #
+  # Scope: every model the vendor's own /v1/models reports for this account
+  # AND for which the vendor publishes a per-token rate. Excluded on purpose:
+  # dated snapshots (same rate as the base id, pure bloat), `-chat-latest`
+  # floating aliases (same objection as a floating image tag - you cannot say
+  # what is running), gpt-5.1/5.2-codex* (on the account, no published rate),
+  # o3-pro (published rate, NOT on the account), and gpt-live-1 (billed per
+  # minute, so it has no per-1K rate to put here).
+  #
+  # max_context_window / max_output_tokens of 0 mean NOT ADVERTISED, which
+  # both limit paths treat as "no cap" (EffectiveOutputTokens skips v<=0,
+  # ExceedsContext returns false on window<=0). That is deliberate wherever
+  # the published limits were not verified: an understated max_output_tokens
+  # is not inert - ApplyOutputCap MUTATES max_tokens down to it and would
+  # silently truncate the caller's request. Filling these in is OPS-53.
+
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    timeout: 120s
+    models:
+      # added 2026-10-05
+      - name: "gpt-6-astra"
+        provider_model_id: "gpt-6-astra"
+        input_cost_per_1k: 0.01000
+        output_cost_per_1k: 0.05000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-6.1-sol"
+        provider_model_id: "gpt-6.1-sol"
+        input_cost_per_1k: 0.00200
+        output_cost_per_1k: 0.01000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-6-sol"
+        provider_model_id: "gpt-6-sol"
+        input_cost_per_1k: 0.00200
+        output_cost_per_1k: 0.01000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-6-luna"
+        provider_model_id: "gpt-6-luna"
+        input_cost_per_1k: 0.00010
+        output_cost_per_1k: 0.00050
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.6-sol"
+        provider_model_id: "gpt-5.6-sol"
+        input_cost_per_1k: 0.00400
+        output_cost_per_1k: 0.02000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.6-terra"
+        provider_model_id: "gpt-5.6-terra"
+        input_cost_per_1k: 0.00200
+        output_cost_per_1k: 0.01200
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.6-luna"
+        provider_model_id: "gpt-5.6-luna"
+        input_cost_per_1k: 0.00020
+        output_cost_per_1k: 0.00120
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.5"
+        provider_model_id: "gpt-5.5"
+        input_cost_per_1k: 0.00500
+        output_cost_per_1k: 0.03000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.5-pro"
+        provider_model_id: "gpt-5.5-pro"
+        input_cost_per_1k: 0.03000
+        output_cost_per_1k: 0.18000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.4"
+        provider_model_id: "gpt-5.4"
+        input_cost_per_1k: 0.00250
+        output_cost_per_1k: 0.01500
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.4-mini"
+        provider_model_id: "gpt-5.4-mini"
+        input_cost_per_1k: 0.00075
+        output_cost_per_1k: 0.00450
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.4-nano"
+        provider_model_id: "gpt-5.4-nano"
+        input_cost_per_1k: 0.00020
+        output_cost_per_1k: 0.00125
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.4-pro"
+        provider_model_id: "gpt-5.4-pro"
+        input_cost_per_1k: 0.03000
+        output_cost_per_1k: 0.18000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.3-codex"
+        provider_model_id: "gpt-5.3-codex"
+        input_cost_per_1k: 0.00175
+        output_cost_per_1k: 0.01400
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.2"
+        provider_model_id: "gpt-5.2"
+        input_cost_per_1k: 0.00175
+        output_cost_per_1k: 0.01400
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.2-pro"
+        provider_model_id: "gpt-5.2-pro"
+        input_cost_per_1k: 0.02100
+        output_cost_per_1k: 0.16800
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5.1"
+        provider_model_id: "gpt-5.1"
+        input_cost_per_1k: 0.00125
+        output_cost_per_1k: 0.01000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5"
+        provider_model_id: "gpt-5"
+        input_cost_per_1k: 0.00125
+        output_cost_per_1k: 0.01000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5-mini"
+        provider_model_id: "gpt-5-mini"
+        input_cost_per_1k: 0.00025
+        output_cost_per_1k: 0.00200
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5-nano"
+        provider_model_id: "gpt-5-nano"
+        input_cost_per_1k: 0.00005
+        output_cost_per_1k: 0.00040
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-5-pro"
+        provider_model_id: "gpt-5-pro"
+        input_cost_per_1k: 0.01500
+        output_cost_per_1k: 0.12000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-4.1"
+        provider_model_id: "gpt-4.1"
+        input_cost_per_1k: 0.00200
+        output_cost_per_1k: 0.00800
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-4.1-mini"
+        provider_model_id: "gpt-4.1-mini"
+        input_cost_per_1k: 0.00040
+        output_cost_per_1k: 0.00160
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "gpt-4.1-nano"
+        provider_model_id: "gpt-4.1-nano"
+        input_cost_per_1k: 0.00010
+        output_cost_per_1k: 0.00040
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "gpt-4o"
+        provider_model_id: "gpt-4o"
+        input_cost_per_1k: 0.00250
+        output_cost_per_1k: 0.01000
+        max_context_window: 128000
+        max_output_tokens: 4096
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "gpt-4o-mini"
+        provider_model_id: "gpt-4o-mini"
+        input_cost_per_1k: 0.00015
+        output_cost_per_1k: 0.00060
+        max_context_window: 128000
+        max_output_tokens: 16384
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      - name: "gpt-3.5-turbo"
+        provider_model_id: "gpt-3.5-turbo"
+        input_cost_per_1k: 0.00050
+        output_cost_per_1k: 0.00150
+        max_context_window: 16385
+        max_output_tokens: 4096
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "o1"
+        provider_model_id: "o1"
+        input_cost_per_1k: 0.01500
+        output_cost_per_1k: 0.06000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "o1-pro"
+        provider_model_id: "o1-pro"
+        input_cost_per_1k: 0.15000
+        output_cost_per_1k: 0.60000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "o3"
+        provider_model_id: "o3"
+        input_cost_per_1k: 0.00200
+        output_cost_per_1k: 0.00800
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "o3-mini"
+        provider_model_id: "o3-mini"
+        input_cost_per_1k: 0.00110
+        output_cost_per_1k: 0.00440
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "o4-mini"
+        provider_model_id: "o4-mini"
+        input_cost_per_1k: 0.00110
+        output_cost_per_1k: 0.00440
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
 
   anthropic:
     api_key: "${ANTHROPIC_API_KEY}"
     base_url: "https://api.anthropic.com"
     timeout: 120s
     models:
-      # ---- current generation (added 2026-10-04) -------------------------------
-      # Rates are per 1K tokens; the authoritative per-1M figures are $10/$50
-      # (Fable 5.1), $4/$20 (Opus 5.5), $5/$25 (Opus 5), $2/$10 (Sonnet 5.5 and
-      # Sonnet 5), $1/$5 (Haiku 4.5). Keep in lockstep with pkg/clear/cost.go —
-      # TestCatalogModelsArePriced enforces it.
-      #
-      # These were missing until Plan #18 Phase 1. The consequence was not
-      # cosmetic: isSpecificProviderRequested (internal/routing/router.go) only
-      # resolves a model pin when some provider ADVERTISES the model, so a
-      # request naming claude-opus-5-5 fell through to cost_optimized selection
-      # and could be handed to the wrong vendor, and LookupPricing missed, so the
-      # traffic was unpriced in CLEAR Cost and the token-accounting block.
       - name: "claude-fable-5-1"
         provider_model_id: "claude-fable-5-1"
-        input_cost_per_1k: 0.010
-        output_cost_per_1k: 0.050
+        input_cost_per_1k: 0.01000
+        output_cost_per_1k: 0.05000
         max_context_window: 1000000
         max_output_tokens: 128000
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+      # added 2026-10-05
+      - name: "claude-fable-5"
+        provider_model_id: "claude-fable-5"
+        input_cost_per_1k: 0.01000
+        output_cost_per_1k: 0.05000
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
       - name: "claude-opus-5-5"
         provider_model_id: "claude-opus-5-5"
-        input_cost_per_1k: 0.004
-        output_cost_per_1k: 0.020
+        input_cost_per_1k: 0.00400
+        output_cost_per_1k: 0.02000
         max_context_window: 1000000
         max_output_tokens: 128000
         supports_functions: true
@@ -103,17 +413,57 @@ providers:
         supports_structured_output: true
       - name: "claude-opus-5"
         provider_model_id: "claude-opus-5"
-        input_cost_per_1k: 0.005
-        output_cost_per_1k: 0.025
+        input_cost_per_1k: 0.00500
+        output_cost_per_1k: 0.02500
         max_context_window: 1000000
         max_output_tokens: 128000
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+      # added 2026-10-05
+      - name: "claude-opus-4-8"
+        provider_model_id: "claude-opus-4-8"
+        input_cost_per_1k: 0.00500
+        output_cost_per_1k: 0.02500
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "claude-opus-4-7"
+        provider_model_id: "claude-opus-4-7"
+        input_cost_per_1k: 0.00500
+        output_cost_per_1k: 0.02500
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # rate CORRECTED 2026-10-05: was 0.015/0.075
+      - name: "claude-opus-4-6"
+        provider_model_id: "claude-opus-4-6"
+        input_cost_per_1k: 0.00500
+        output_cost_per_1k: 0.02500
+        max_context_window: 1000000
+        max_output_tokens: 128000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "claude-opus-4-5-20251101"
+        provider_model_id: "claude-opus-4-5-20251101"
+        input_cost_per_1k: 0.00500
+        output_cost_per_1k: 0.02500
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
       - name: "claude-sonnet-5-5"
         provider_model_id: "claude-sonnet-5-5"
-        input_cost_per_1k: 0.002
-        output_cost_per_1k: 0.010
+        input_cost_per_1k: 0.00200
+        output_cost_per_1k: 0.01000
         max_context_window: 1000000
         max_output_tokens: 128000
         supports_functions: true
@@ -121,29 +471,8 @@ providers:
         supports_structured_output: true
       - name: "claude-sonnet-5"
         provider_model_id: "claude-sonnet-5"
-        input_cost_per_1k: 0.002
-        output_cost_per_1k: 0.010
-        max_context_window: 1000000
-        max_output_tokens: 128000
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
-      # The canonical, undated Haiku 4.5 id. The dated variant below is the one
-      # this deployment has always sent and is kept so nothing in flight breaks.
-      - name: "claude-haiku-4-5"
-        provider_model_id: "claude-haiku-4-5"
-        input_cost_per_1k: 0.001
-        output_cost_per_1k: 0.005
-        max_context_window: 200000
-        max_output_tokens: 64000
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
-      # ---- previous generation ------------------------------------------------
-      - name: "claude-opus-4-6"
-        provider_model_id: "claude-opus-4-6"
-        input_cost_per_1k: 0.015
-        output_cost_per_1k: 0.075
+        input_cost_per_1k: 0.00200
+        output_cost_per_1k: 0.01000
         max_context_window: 1000000
         max_output_tokens: 128000
         supports_functions: true
@@ -151,18 +480,37 @@ providers:
         supports_structured_output: true
       - name: "claude-sonnet-4-6"
         provider_model_id: "claude-sonnet-4-6"
-        input_cost_per_1k: 0.003
-        output_cost_per_1k: 0.015
+        input_cost_per_1k: 0.00300
+        output_cost_per_1k: 0.01500
         max_context_window: 1000000
+        max_output_tokens: 64000
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # added 2026-10-05
+      - name: "claude-sonnet-4-5-20250929"
+        provider_model_id: "claude-sonnet-4-5-20250929"
+        input_cost_per_1k: 0.00300
+        output_cost_per_1k: 0.01500
+        max_context_window: 0
+        max_output_tokens: 0
+        supports_functions: true
+        supports_vision: true
+        supports_structured_output: true
+      # NOT in the account model list - see OPS-52
+      - name: "claude-haiku-4-5"
+        provider_model_id: "claude-haiku-4-5"
+        input_cost_per_1k: 0.00100
+        output_cost_per_1k: 0.00500
+        max_context_window: 200000
         max_output_tokens: 64000
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
       - name: "claude-haiku-4-5-20251001"
         provider_model_id: "claude-haiku-4-5-20251001"
-        # Corrected 2026-10-04: was 0.0008/0.004. Haiku 4.5 is $1/$5 per 1M.
-        input_cost_per_1k: 0.001
-        output_cost_per_1k: 0.005
+        input_cost_per_1k: 0.00100
+        output_cost_per_1k: 0.00500
         max_context_window: 200000
         max_output_tokens: 64000
         supports_functions: true

@@ -8,7 +8,7 @@ import "math"
 //
 // Format: `pricing-vYYYY-MM-DD` reflecting the publication date of the
 // rates encoded in modelPricing.
-const PricingVersion = "pricing-v2026-10-04"
+const PricingVersion = "pricing-v2026-10-05"
 
 // modelPricingEntry is the input/output rate pair for one vendor:model.
 // Rates are USD per 1,000 tokens (matches source-spec §2.1.3's CNA/CPS
@@ -28,39 +28,61 @@ type modelPricingEntry struct {
 // out of scope for the in-binary table; the dashboard-backed Resolver
 // slice will eventually pull per-account overrides.
 var modelPricing = map[string]modelPricingEntry{
-	// OpenAI
-	"openai:gpt-4o-mini":   {InputCostPer1K: 0.00015, OutputCostPer1K: 0.00060},
+	// OpenAI — every chat model this account can serve that the vendor
+	// publishes a per-token rate for. Rates from
+	// developers.openai.com/api/docs/pricing, 2026-10-05.
+	"openai:gpt-6-astra":   {InputCostPer1K: 0.01000, OutputCostPer1K: 0.05000}, // added 2026-10-05
+	"openai:gpt-6.1-sol":   {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000}, // added 2026-10-05
+	"openai:gpt-6-sol":     {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000}, // added 2026-10-05
+	"openai:gpt-6-luna":    {InputCostPer1K: 0.00010, OutputCostPer1K: 0.00050}, // added 2026-10-05
+	"openai:gpt-5.6-sol":   {InputCostPer1K: 0.00400, OutputCostPer1K: 0.02000}, // added 2026-10-05
+	"openai:gpt-5.6-terra": {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01200}, // added 2026-10-05
+	"openai:gpt-5.6-luna":  {InputCostPer1K: 0.00020, OutputCostPer1K: 0.00120}, // added 2026-10-05
+	"openai:gpt-5.5":       {InputCostPer1K: 0.00500, OutputCostPer1K: 0.03000}, // added 2026-10-05
+	"openai:gpt-5.5-pro":   {InputCostPer1K: 0.03000, OutputCostPer1K: 0.18000}, // added 2026-10-05
+	"openai:gpt-5.4":       {InputCostPer1K: 0.00250, OutputCostPer1K: 0.01500}, // added 2026-10-05
+	"openai:gpt-5.4-mini":  {InputCostPer1K: 0.00075, OutputCostPer1K: 0.00450}, // added 2026-10-05
+	"openai:gpt-5.4-nano":  {InputCostPer1K: 0.00020, OutputCostPer1K: 0.00125}, // added 2026-10-05
+	"openai:gpt-5.4-pro":   {InputCostPer1K: 0.03000, OutputCostPer1K: 0.18000}, // added 2026-10-05
+	"openai:gpt-5.3-codex": {InputCostPer1K: 0.00175, OutputCostPer1K: 0.01400}, // added 2026-10-05
+	"openai:gpt-5.2":       {InputCostPer1K: 0.00175, OutputCostPer1K: 0.01400}, // added 2026-10-05
+	"openai:gpt-5.2-pro":   {InputCostPer1K: 0.02100, OutputCostPer1K: 0.16800}, // added 2026-10-05
+	"openai:gpt-5.1":       {InputCostPer1K: 0.00125, OutputCostPer1K: 0.01000}, // added 2026-10-05
+	"openai:gpt-5":         {InputCostPer1K: 0.00125, OutputCostPer1K: 0.01000}, // added 2026-10-05
+	"openai:gpt-5-mini":    {InputCostPer1K: 0.00025, OutputCostPer1K: 0.00200}, // added 2026-10-05
+	"openai:gpt-5-nano":    {InputCostPer1K: 0.00005, OutputCostPer1K: 0.00040}, // added 2026-10-05
+	"openai:gpt-5-pro":     {InputCostPer1K: 0.01500, OutputCostPer1K: 0.12000}, // added 2026-10-05
+	"openai:gpt-4.1":       {InputCostPer1K: 0.00200, OutputCostPer1K: 0.00800}, // added 2026-10-05
+	"openai:gpt-4.1-mini":  {InputCostPer1K: 0.00040, OutputCostPer1K: 0.00160}, // added 2026-10-05
+	"openai:gpt-4.1-nano":  {InputCostPer1K: 0.00010, OutputCostPer1K: 0.00040}, // added 2026-10-05
 	"openai:gpt-4o":        {InputCostPer1K: 0.00250, OutputCostPer1K: 0.01000},
-	"openai:gpt-4-turbo":   {InputCostPer1K: 0.01000, OutputCostPer1K: 0.03000},
+	"openai:gpt-4o-mini":   {InputCostPer1K: 0.00015, OutputCostPer1K: 0.00060},
 	"openai:gpt-3.5-turbo": {InputCostPer1K: 0.00050, OutputCostPer1K: 0.00150},
+	"openai:o1":            {InputCostPer1K: 0.01500, OutputCostPer1K: 0.06000}, // added 2026-10-05
+	"openai:o1-pro":        {InputCostPer1K: 0.15000, OutputCostPer1K: 0.60000}, // added 2026-10-05
+	"openai:o3":            {InputCostPer1K: 0.00200, OutputCostPer1K: 0.00800}, // added 2026-10-05
+	"openai:o3-mini":       {InputCostPer1K: 0.00110, OutputCostPer1K: 0.00440}, // added 2026-10-05
+	"openai:o4-mini":       {InputCostPer1K: 0.00110, OutputCostPer1K: 0.00440}, // added 2026-10-05
 
-	// Anthropic — Claude 5 family and Haiku 4.5 (added 2026-10-04, Plan #18
-	// Phase 1). Absent these the scorer silently missed: LookupPricing returns
-	// ok=false, so a claude-opus-5-5 request produced no CLEAR Cost and no
-	// dollar figures in the token-accounting block — invisible to exactly the
-	// reports that exist to compare models.
-	"anthropic:claude-fable-5-1":  {InputCostPer1K: 0.01000, OutputCostPer1K: 0.05000},
-	"anthropic:claude-opus-5-5":   {InputCostPer1K: 0.00400, OutputCostPer1K: 0.02000},
-	"anthropic:claude-opus-5":     {InputCostPer1K: 0.00500, OutputCostPer1K: 0.02500},
-	"anthropic:claude-sonnet-5-5": {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000},
-	"anthropic:claude-sonnet-5":   {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000},
-	"anthropic:claude-haiku-4-5":  {InputCostPer1K: 0.00100, OutputCostPer1K: 0.00500},
+	// Anthropic — every model /v1/models reports for this account, priced
+	// from platform.claude.com/docs/en/about-claude/pricing, 2026-10-05.
+	"anthropic:claude-fable-5-1":           {InputCostPer1K: 0.01000, OutputCostPer1K: 0.05000},
+	"anthropic:claude-fable-5":             {InputCostPer1K: 0.01000, OutputCostPer1K: 0.05000}, // added 2026-10-05
+	"anthropic:claude-opus-5-5":            {InputCostPer1K: 0.00400, OutputCostPer1K: 0.02000},
+	"anthropic:claude-opus-5":              {InputCostPer1K: 0.00500, OutputCostPer1K: 0.02500},
+	"anthropic:claude-opus-4-8":            {InputCostPer1K: 0.00500, OutputCostPer1K: 0.02500}, // added 2026-10-05
+	"anthropic:claude-opus-4-7":            {InputCostPer1K: 0.00500, OutputCostPer1K: 0.02500}, // added 2026-10-05
+	"anthropic:claude-opus-4-6":            {InputCostPer1K: 0.00500, OutputCostPer1K: 0.02500}, // rate CORRECTED 2026-10-05: was 0.015/0.075
+	"anthropic:claude-opus-4-5-20251101":   {InputCostPer1K: 0.00500, OutputCostPer1K: 0.02500}, // added 2026-10-05
+	"anthropic:claude-sonnet-5-5":          {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000},
+	"anthropic:claude-sonnet-5":            {InputCostPer1K: 0.00200, OutputCostPer1K: 0.01000},
+	"anthropic:claude-sonnet-4-6":          {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
+	"anthropic:claude-sonnet-4-5-20250929": {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500}, // added 2026-10-05
+	"anthropic:claude-haiku-4-5":           {InputCostPer1K: 0.00100, OutputCostPer1K: 0.00500}, // NOT in the account model list - see OPS-52
+	"anthropic:claude-haiku-4-5-20251001":  {InputCostPer1K: 0.00100, OutputCostPer1K: 0.00500},
 
-	// Anthropic — Claude 4.x family (previous generation, see
-	// tas-llm-router/configs/config.yaml). Keep rates in sync with that
-	// file; the config and this table can drift independently because
-	// the config doesn't feed the scorer (the table is the
-	// authoritative source for CLEAR.Cost).
-	"anthropic:claude-opus-4-6":   {InputCostPer1K: 0.01500, OutputCostPer1K: 0.07500},
-	"anthropic:claude-sonnet-4-6": {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
-	// Corrected 2026-10-04 (PricingVersion bump): was 0.00080/0.00400. Haiku 4.5
-	// is $1/$5 per 1M, so every cost figure for this model since the 4.x cutover
-	// was ~20% low. The dated id stays because it is what this deployment sends.
-	"anthropic:claude-haiku-4-5-20251001": {InputCostPer1K: 0.00100, OutputCostPer1K: 0.00500},
-
-	// Anthropic — Claude 3.x family (legacy, kept for replay /
-	// historical re-scoring; remove once Spark re-score has caught up
-	// to the 4.x cutover).
+	// Legacy / replay-only rows, kept for historical re-scoring.
+	"openai:gpt-4-turbo":                   {InputCostPer1K: 0.01000, OutputCostPer1K: 0.03000},
 	"anthropic:claude-3-7-sonnet-20250219": {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
 	"anthropic:claude-3-5-sonnet-20241022": {InputCostPer1K: 0.00300, OutputCostPer1K: 0.01500},
 	"anthropic:claude-3-5-haiku-20241022":  {InputCostPer1K: 0.00080, OutputCostPer1K: 0.00400},
