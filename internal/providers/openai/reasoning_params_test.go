@@ -137,3 +137,40 @@ func TestUnknownModel_FallsBackToClassic(t *testing.T) {
 		t.Errorf("unknown model should keep classic params, got %+v", got)
 	}
 }
+
+// OpenAI rejects multipart content on the tool role, so a tool result carrying
+// an image — which only the Anthropic surface can produce — must be flattened
+// to its text rather than sent as blocks. Sending blocks would 400 the whole
+// request, which is worse than losing an image this vendor cannot accept in
+// that position at all.
+func TestToolResultWithImage_FlattensForOpenAI(t *testing.T) {
+	p := &OpenAIProvider{config: &OpenAIConfig{Models: []types.ModelInfo{{Name: "gpt-4o-mini", ProviderModelID: "gpt-4o-mini"}}}}
+	got, err := p.convertToOpenAIRequest(&types.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{
+			{Role: "user", Content: "screenshot it"},
+			{Role: "tool", ToolCallID: "call_1", Content: []types.ContentPart{
+				{Type: "text", Text: "captured"},
+				{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:image/png;base64,iVBORw0KGgo="}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var toolMsg *openai.ChatCompletionMessage
+	for i := range got.Messages {
+		if got.Messages[i].Role == "tool" {
+			toolMsg = &got.Messages[i]
+		}
+	}
+	if toolMsg == nil {
+		t.Fatal("tool message missing")
+	}
+	if len(toolMsg.MultiContent) != 0 {
+		t.Errorf("tool role must carry a string, not %d multipart items — OpenAI 400s on this", len(toolMsg.MultiContent))
+	}
+	if toolMsg.Content != "captured" {
+		t.Errorf("tool content = %q, want the flattened text", toolMsg.Content)
+	}
+}

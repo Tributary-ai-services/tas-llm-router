@@ -897,6 +897,41 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 	return anthropicReq, nil
 }
 
+// anthropicImageBlock turns the internal OpenAI-shaped image URL into an
+// Anthropic image block. Two forms reach here, and both are real traffic:
+//
+//	data:image/png;base64,iVBORw0...   a pasted or screenshotted image
+//	https://example.com/diagram.png    a hosted one
+//
+// The data-URL form is what the /v1/messages boundary produces from a native
+// Anthropic base64 source, so a round trip through this gateway has to rebuild
+// exactly what the caller sent. Anything else -- a bare path, a blob: URL, a
+// data URL that is not base64 -- is reported unusable rather than silently
+// dropped, because a model answering about an image it never received looks
+// like a model being wrong.
+func anthropicImageBlock(url string) (anthropic.ContentBlockParamUnion, bool) {
+	if strings.HasPrefix(url, "data:") {
+		rest := strings.TrimPrefix(url, "data:")
+		comma := strings.Index(rest, ",")
+		if comma < 0 {
+			return anthropic.ContentBlockParamUnion{}, false
+		}
+		meta, data := rest[:comma], rest[comma+1:]
+		if !strings.Contains(meta, "base64") || data == "" {
+			return anthropic.ContentBlockParamUnion{}, false
+		}
+		mediaType := strings.TrimSuffix(meta, ";base64")
+		if mediaType == "" {
+			return anthropic.ContentBlockParamUnion{}, false
+		}
+		return anthropic.NewImageBlockBase64(mediaType, data), true
+	}
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+		return anthropic.NewImageBlock(anthropic.URLImageSourceParam{URL: url}), true
+	}
+	return anthropic.ContentBlockParamUnion{}, false
+}
+
 // toAnthropicInputSchema translates an OpenAI tool's JSON-Schema parameters
 // (an interface{} that decodes to a map with "type"/"properties"/"required")
 // into Anthropic's ToolInputSchemaParam. Anthropic requires input_schema to be
@@ -937,6 +972,38 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 	// Tool result (role=tool): Anthropic carries results in a USER message as
 	// tool_result blocks keyed by the originating tool_use id.
 	if msg.Role == "tool" {
+		// A tool that returns a screenshot carries blocks rather than a string.
+		// The vendor accepts text AND image inside a tool_result, so the image
+		// reaches the model instead of being flattened away.
+		if parts, ok := msg.Content.([]types.ContentPart); ok {
+			var content []anthropic.ToolResultBlockParamContentUnion
+			for _, part := range parts {
+				switch part.Type {
+				case "text":
+					content = append(content, anthropic.ToolResultBlockParamContentUnion{
+						OfText: &anthropic.TextBlockParam{Text: part.Text},
+					})
+				case "image_url":
+					if part.ImageURL == nil {
+						continue
+					}
+					blk, ok := anthropicImageBlock(part.ImageURL.URL)
+					if !ok || blk.OfImage == nil {
+						metrics.ParamDroppedTotal.WithLabelValues("anthropic", "image_unsupported").Inc()
+						continue
+					}
+					content = append(content, anthropic.ToolResultBlockParamContentUnion{OfImage: blk.OfImage})
+				}
+			}
+			if len(content) > 0 {
+				return anthropic.NewUserMessage(anthropic.ContentBlockParamUnion{
+					OfToolResult: &anthropic.ToolResultBlockParam{
+						ToolUseID: msg.ToolCallID,
+						Content:   content,
+					},
+				}), nil
+			}
+		}
 		return anthropic.NewUserMessage(
 			anthropic.NewToolResultBlock(msg.ToolCallID, messageContentString(msg.Content), false),
 		), nil
@@ -972,7 +1039,7 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 		}
 
 	case []types.ContentPart:
-		// Multimodal message - only handle text parts for now
+		// Multimodal message: text, images and replayed reasoning blocks.
 		var blocks []anthropic.ContentBlockParamUnion
 		for _, part := range content {
 			// Reasoning blocks first: they must keep their position and their
@@ -1008,7 +1075,21 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 				}
 				blocks = append(blocks, blk)
 			}
-			// Skip image parts for now - would need base64 conversion
+			if part.Type == "image_url" && part.ImageURL != nil {
+				blk, ok := anthropicImageBlock(part.ImageURL.URL)
+				if !ok {
+					// Unusable rather than absent: a URL we cannot classify
+					// would be sent as nothing at all, and a model answering
+					// about an image it never received looks like a model being
+					// wrong. Counted so the loss is visible.
+					metrics.ParamDroppedTotal.WithLabelValues("anthropic", "image_unsupported").Inc()
+					continue
+				}
+				if part.CacheControl != nil {
+					setBlockCacheControl(&blk)
+				}
+				blocks = append(blocks, blk)
+			}
 		}
 
 		if msg.Role == "user" {

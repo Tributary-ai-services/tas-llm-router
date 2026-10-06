@@ -890,3 +890,73 @@ func TestParseBetaHeader(t *testing.T) {
 		t.Error("no header must produce no betas, not an empty slice that serialises")
 	}
 }
+
+// A tool_result carrying a screenshot must keep its blocks; the text-only
+// flattening would drop the image between the client and the model.
+func TestParseAnthropic_ToolResultImageSurvives(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":64,"messages":[
+		{"role":"user","content":"screenshot it"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"shot","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[
+			{"type":"text","text":"captured"},
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}
+		]}]}
+	]}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var tool *types.Message
+	for i := range req.Messages {
+		if req.Messages[i].Role == "tool" {
+			tool = &req.Messages[i]
+		}
+	}
+	if tool == nil {
+		t.Fatal("tool result message missing")
+	}
+	parts, ok := tool.Content.([]types.ContentPart)
+	if !ok {
+		t.Fatalf("a tool result with an image must keep its blocks, got %T", tool.Content)
+	}
+	var sawImage, sawText bool
+	for _, p := range parts {
+		if p.Type == "image_url" && p.ImageURL != nil && strings.Contains(p.ImageURL.URL, "iVBORw0KGgo=") {
+			sawImage = true
+		}
+		if p.Type == "text" && p.Text == "captured" {
+			sawText = true
+		}
+	}
+	if !sawImage || !sawText {
+		t.Errorf("tool_result blocks lost content: %+v", parts)
+	}
+}
+
+// An ordinary text-only tool result must still be a plain string — the block
+// form is reserved for the case that needs it.
+func TestParseAnthropic_PlainToolResultStaysAString(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":64,"messages":[
+		{"role":"user","content":"read it"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"read","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[
+			{"type":"text","text":"file contents"}
+		]}]}
+	]}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, m := range req.Messages {
+		if m.Role != "tool" {
+			continue
+		}
+		s, ok := m.Content.(string)
+		if !ok {
+			t.Fatalf("text-only tool result changed shape to %T", m.Content)
+		}
+		if s != "file contents" {
+			t.Errorf("tool result text = %q", s)
+		}
+	}
+}
