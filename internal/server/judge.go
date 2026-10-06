@@ -515,7 +515,20 @@ type routerCompletion struct {
 }
 
 func (rc *routerCompletion) Complete(ctx context.Context, model, system, user string) (string, error) {
-	maxTokens := 400
+	// 1024, not 400, because for a REASONING judge (o3 and the gpt-5/6 line)
+	// max_completion_tokens covers the model's internal reasoning as well as
+	// its answer -- so a budget sized for a ~80-token JSON verdict can be
+	// consumed entirely by reasoning, leaving an empty response that reads as
+	// an abstention. Measured 2026-10-06: o3 spends 140-242 completion tokens
+	// on a short grading task, so 400 happens to fit, but the margin is 1.6x
+	// and a longer response to judge would not.
+	//
+	// 1024 is also the budget every published judge figure was measured at
+	// (cmd/judge-score sends 1024), so this makes the deployed judge match the
+	// evidence rather than approximating it. It is a cap, not a target: the
+	// rubric asks for strict JSON and classic models return ~80 tokens, so
+	// raising it costs nothing on models that were already fine. See RT-5.
+	maxTokens := 1024
 	req := &types.ChatRequest{
 		Model:     model,
 		MaxTokens: &maxTokens,

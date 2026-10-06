@@ -94,7 +94,18 @@ data:
   # score is recorded to aiqg-dashboard-be (/internal/judge) as a feedback
   # signal for per-variant quality. Judge model differs from typical traffic
   # to avoid self-preference bias. Empty model / 0 pct disables judging.
-  AIQG_JUDGE_MODEL: "claude-haiku-4-5-20251001"
+  # o3, not claude-haiku, since 2026-10-06. Measured over all 40 catalogued
+  # models at n=150: o3 decides 95.9% of pairs against haiku's 86.7% (+18
+  # pairs, p=0.004) at accuracy that is a dead heat (80.1% vs 80.8%, p=1.000,
+  # 9/9 discordant). No judge in the catalog is significantly MORE accurate
+  # than haiku, so coverage is the only axis that separates them.
+  #
+  # The decisive property is that o3 is NOT a Claude model. AIQG-29 excludes
+  # self-judged rows, haiku is most of served traffic, and Plan #18 routes
+  # Claude Code through the gateway -- so a Claude judge abstains on exactly
+  # the traffic we most need scored. o3 is the first measured judge that can
+  # score it. Costs $0.70 per 150 judgements against haiku's $0.38.
+  AIQG_JUDGE_MODEL: "o3"
   AIQG_JUDGE_SAMPLE_PCT: "20"
   # Pairwise shadow-eval (§6.3): % of CONTROL-arm experiment samples to replay
   # through each variant offline + judge head-to-head. ~2× cost per shadow
