@@ -445,3 +445,61 @@ func TestImages_PlainToolResultShapeUnchanged(t *testing.T) {
 		t.Errorf("ordinary tool result changed shape:\n%s", b)
 	}
 }
+
+// The /v1/messages handler marshals the internal request between the boundary
+// and the provider, so every block-form message makes a JSON round trip. Before
+// Message.UnmarshalJSON existed, Content came back as []interface{}, every
+// `case []types.ContentPart:` missed, and the block array was stringified into
+// the vendor request by a `fmt.Sprintf("%v", …)` default.
+//
+// Found live: a 512x512 image cost 2,822 input tokens (text tokenisation of its
+// base64) and the model replied "the image data came through as a raw encoded
+// string". The same loss hit per-block cache_control and replayed thinking
+// blocks, so this test covers all three.
+func TestRoundTrip_BlockContentSurvivesTheHandlerMarshal(t *testing.T) {
+	orig := &types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(64),
+		Messages: []types.Message{
+			{Role: "user", Content: []types.ContentPart{
+				{Type: "text", Text: "what is this", CacheControl: &types.CacheControl{Type: "ephemeral"}},
+				{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:image/png;base64,iVBORw0KGgo="}},
+			}},
+			{Role: "assistant", Content: []types.ContentPart{
+				{Type: "thinking", Thinking: "step one", Signature: "sig-abc"},
+				{Type: "text", Text: "answer"},
+			}},
+			{Role: "user", Content: "and then?"},
+		},
+	}
+	buf, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var round types.ChatRequest
+	if err := json.Unmarshal(buf, &round); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := round.Messages[0].Content.([]types.ContentPart); !ok {
+		t.Fatalf("content lost its type across the round trip: %T", round.Messages[0].Content)
+	}
+	if s, ok := round.Messages[2].Content.(string); !ok || s != "and then?" {
+		t.Errorf("a plain string message must stay a string, got %T", round.Messages[2].Content)
+	}
+
+	p := testProvider()
+	got, err := p.convertToAnthropicRequest(&round)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	b, _ := json.Marshal(got.Messages)
+	s := string(b)
+	for _, want := range []string{`"source"`, "iVBORw0KGgo=", "sig-abc", "step one", "cache_control"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("round trip lost %q — it would reach the vendor as text:\n%.400s", want, s)
+		}
+	}
+	// The giveaway when this regresses: Go's rendering of a map slice.
+	if strings.Contains(s, "map[") {
+		t.Errorf("block array was stringified into the request:\n%.400s", s)
+	}
+}

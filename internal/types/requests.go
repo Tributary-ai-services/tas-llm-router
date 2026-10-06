@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/json"
 	"time"
 )
 
@@ -136,6 +137,59 @@ type CacheControl struct {
 	// requires an SDK upgrade (see docs/AIQG-PROMPT-CACHE-CONTROL.md §7), so it
 	// is carried but may not yet be honoured.
 	TTL string `json:"ttl,omitempty"`
+}
+
+// UnmarshalJSON restores Content's block form after a JSON round trip.
+//
+// Without this, `Content` decodes to []interface{} of map[string]interface{},
+// every provider's `case []types.ContentPart:` misses, and the block array
+// falls through to a `fmt.Sprintf("%v", content)` default -- so the vendor
+// receives the Go rendering of a map slice AS TEXT.
+//
+// That is not hypothetical and it was not only an images problem. The
+// /v1/messages handler marshals the internal request between the boundary and
+// the provider, so EVERY block-form message crossed that boundary: a pasted
+// image arrived as `[map[image_url:map[url:data:image/png;base64,...]]]`,
+// which is why a model would say "the image data came through as a raw encoded
+// string"; a per-block cache_control was lost the same way; and so was a
+// replayed thinking block, signature and all.
+//
+// Fixed here rather than in each provider because the type is what was lost,
+// so anything that type-switches on Content -- both providers, token
+// estimation, scanning -- was wrong in the same way for the same reason.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type alias Message // avoids recursing into this method
+	var raw struct {
+		alias
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = Message(raw.alias)
+	m.Content = nil
+	if len(raw.Content) == 0 || string(raw.Content) == "null" {
+		return nil
+	}
+	// A string stays a string: that is what most callers send.
+	var str string
+	if err := json.Unmarshal(raw.Content, &str); err == nil {
+		m.Content = str
+		return nil
+	}
+	var parts []ContentPart
+	if err := json.Unmarshal(raw.Content, &parts); err == nil {
+		m.Content = parts
+		return nil
+	}
+	// Anything else is preserved as-is rather than dropped, so an unknown
+	// shape degrades to today's behaviour instead of becoming empty.
+	var any interface{}
+	if err := json.Unmarshal(raw.Content, &any); err != nil {
+		return err
+	}
+	m.Content = any
+	return nil
 }
 
 type ImageURL struct {
