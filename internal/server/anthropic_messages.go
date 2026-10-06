@@ -876,6 +876,14 @@ type anthropicStreamEncoder struct {
 	cacheCreationTokens int
 	cacheReadTokens     int
 
+	// Reasoning blocks stream through live rather than being buffered to the
+	// end like tool calls, because the vendor emits them BEFORE the answer and
+	// a client replaying the turn must preserve that order. Buffering would
+	// also defeat the point: the thinking is what arrives first, so holding it
+	// back is the one thing that makes a streamed response feel stalled.
+	thinkingOpen  bool
+	thinkingIndex int
+
 	toolOrder []string
 	tools     map[string]*anthropicStreamTool
 }
@@ -950,10 +958,38 @@ func (e *anthropicStreamEncoder) start(c *types.ChatChunk) {
 	})
 }
 
+// ensureThinkingBlock opens the reasoning block on the first delta that needs
+// it, mirroring how the text block opens lazily.
+func (e *anthropicStreamEncoder) ensureThinkingBlock() {
+	if e.thinkingOpen {
+		return
+	}
+	e.thinkingIndex = e.nextIndex
+	e.nextIndex++
+	e.thinkingOpen = true
+	e.emit("content_block_start", map[string]interface{}{
+		"type":          "content_block_start",
+		"index":         e.thinkingIndex,
+		"content_block": map[string]interface{}{"type": "thinking", "thinking": "", "signature": ""},
+	})
+}
+
+func (e *anthropicStreamEncoder) closeThinkingBlock() {
+	if !e.thinkingOpen {
+		return
+	}
+	e.emit("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": e.thinkingIndex})
+	e.thinkingOpen = false
+}
+
 func (e *anthropicStreamEncoder) ensureTextBlock() {
 	if e.textOpen {
 		return
 	}
+	// Reasoning closes before the answer opens. Two blocks cannot be open at
+	// the same index position, and a client reading an interleaved stream has
+	// no way to tell which block a delta belongs to.
+	e.closeThinkingBlock()
 	e.textIndex = e.nextIndex
 	e.nextIndex++
 	e.textOpen = true
@@ -1011,6 +1047,40 @@ func (e *anthropicStreamEncoder) writeChunk(c *types.ChatChunk) {
 	}
 	for _, ch := range c.Choices {
 		if ch.Delta != nil {
+			for _, r := range ch.Delta.Reasoning {
+				switch {
+				case r.Type == "redacted_thinking" && r.Data != "":
+					// Complete in one event, so it is emitted as a whole block
+					// rather than opened and streamed.
+					e.closeThinkingBlock()
+					idx := e.nextIndex
+					e.nextIndex++
+					e.emit("content_block_start", map[string]interface{}{
+						"type":          "content_block_start",
+						"index":         idx,
+						"content_block": map[string]interface{}{"type": "redacted_thinking", "data": r.Data},
+					})
+					e.emit("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": idx})
+				case r.Thinking != "":
+					e.ensureThinkingBlock()
+					e.emit("content_block_delta", map[string]interface{}{
+						"type":  "content_block_delta",
+						"index": e.thinkingIndex,
+						"delta": map[string]interface{}{"type": "thinking_delta", "thinking": r.Thinking},
+					})
+				case r.Signature != "":
+					// Opens the block if the text was empty, which is the normal
+					// case on the 4.7+ generation: display defaults to "omitted",
+					// so a signature with no thinking text is a complete and
+					// REPLAYABLE block, not a malformed one.
+					e.ensureThinkingBlock()
+					e.emit("content_block_delta", map[string]interface{}{
+						"type":  "content_block_delta",
+						"index": e.thinkingIndex,
+						"delta": map[string]interface{}{"type": "signature_delta", "signature": r.Signature},
+					})
+				}
+			}
 			if txt := messageContentToString(ch.Delta.Content); txt != "" {
 				e.ensureTextBlock()
 				e.emit("content_block_delta", map[string]interface{}{
@@ -1033,6 +1103,9 @@ func (e *anthropicStreamEncoder) done() {
 	if !e.started {
 		e.start(nil)
 	}
+	// A reasoning-only turn never opens a text block, so done() is where its
+	// block gets closed. Leaving it open ends the stream mid-block.
+	e.closeThinkingBlock()
 	if e.textOpen {
 		e.emit("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": e.textIndex})
 		e.textOpen = false

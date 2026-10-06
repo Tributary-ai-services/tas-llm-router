@@ -308,3 +308,68 @@ func TestConvertStreamEvent_TextDeltaUnaffected(t *testing.T) {
 		t.Error("a text delta must not produce a tool call")
 	}
 }
+
+// RT-7: streamed reasoning. Claude Code always streams, so without these the
+// thinking RT-6 enabled reaches the vendor and never comes back to the client
+// — and the signature is what makes a turn replayable, so losing it on the
+// streaming path loses interleaved thinking on the NEXT turn, silently.
+//
+// Built from the wire JSON Anthropic actually sends, not SDK struct literals:
+// the SDK re-parses each union variant from unexported raw JSON, so a literal
+// passes against a converter that handles nothing (the #242 lesson).
+func TestConvertStreamEvent_ThinkingDeltaCarriesText(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"content_block_delta","index":0,
+		"delta":{"type":"thinking_delta","thinking":"Let me check the file first."}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c == nil {
+		t.Fatal("thinking_delta was dropped — the client receives no reasoning at all")
+	}
+	r := c.Choices[0].Delta.Reasoning
+	if len(r) != 1 || r[0].Type != "thinking" || r[0].Thinking != "Let me check the file first." {
+		t.Fatalf("thinking text lost: %+v", r)
+	}
+}
+
+func TestConvertStreamEvent_SignatureDeltaCarriesSignature(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"content_block_delta","index":0,
+		"delta":{"type":"signature_delta","signature":"ErUBCkYIBRgCIkDx3a"}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c == nil {
+		t.Fatal("signature_delta was dropped — the block cannot be replayed without it")
+	}
+	r := c.Choices[0].Delta.Reasoning
+	if len(r) != 1 || r[0].Signature != "ErUBCkYIBRgCIkDx3a" {
+		t.Fatalf("signature lost: %+v", r)
+	}
+}
+
+// Redacted reasoning arrives complete in the start event with no deltas after,
+// so it is forwarded there or not at all.
+func TestConvertStreamEvent_RedactedThinkingBlockStart(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"content_block_start","index":0,
+		"content_block":{"type":"redacted_thinking","data":"EroBCkYIBRgCKkBc"}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c == nil {
+		t.Fatal("redacted_thinking start was dropped — no delta follows it, so it is lost for good")
+	}
+	r := c.Choices[0].Delta.Reasoning
+	if len(r) != 1 || r[0].Type != "redacted_thinking" || r[0].Data != "EroBCkYIBRgCKkBc" {
+		t.Fatalf("redacted payload lost: %+v", r)
+	}
+}
+
+// A thinking block's own start event carries nothing but an empty string, so
+// it must NOT open anything — the encoder opens lazily on the first delta, the
+// same way it does for text. Emitting a chunk here would open an empty block.
+func TestConvertStreamEvent_ThinkingBlockStartIsNotAChunk(t *testing.T) {
+	p := createTestProvider(t)
+	c := p.convertStreamEvent(streamEvent(t, `{"type":"content_block_start","index":0,
+		"content_block":{"type":"thinking","thinking":"","signature":""}}`),
+		&types.ChatRequest{Model: "claude-sonnet-5-5"}, &anthropic.Message{ID: "msg_1"})
+	if c != nil {
+		t.Errorf("thinking block_start produced a chunk; it carries no content: %+v", c.Choices[0].Delta)
+	}
+}
