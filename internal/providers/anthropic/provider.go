@@ -678,11 +678,25 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 		}
 	}
 
+	// Anthropic refuses temperature and top_p TOGETHER on every model -- 400
+	// "`temperature` and `top_p` cannot both be specified for this model.
+	// Please use only one." Either alone is fine. Measured 2026-10-06 on
+	// claude-haiku-4-5, i.e. on an UNrestricted model, so this is independent
+	// of the 4.7+ restriction above and breaks the older models too.
+	//
+	// OpenAI accepts both, so an OpenAI-shaped client that sets both is a
+	// perfectly ordinary request here and must not 500. temperature wins
+	// because it is the knob nearly every client sets and the one callers
+	// reason about; top_p is the specialist alternative. The drop is counted,
+	// so "we ignored your top_p" is visible rather than silent.
 	if req.TopP != nil {
-		if !restricted {
-			anthropicReq.TopP = anthropic.Float(float64(*req.TopP))
-		} else {
+		switch {
+		case restricted:
 			metrics.ParamDroppedTotal.WithLabelValues("anthropic", "top_p").Inc()
+		case anthropicReq.Temperature.Valid():
+			metrics.ParamDroppedTotal.WithLabelValues("anthropic", "top_p_with_temperature").Inc()
+		default:
+			anthropicReq.TopP = anthropic.Float(float64(*req.TopP))
 		}
 	}
 

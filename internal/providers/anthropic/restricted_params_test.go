@@ -67,18 +67,18 @@ func TestRestricted_KeepsDefaultTemperature(t *testing.T) {
 	}
 }
 
-func TestUnrestricted_KeepsEverything(t *testing.T) {
+func TestUnrestricted_KeepsTemperature(t *testing.T) {
 	p := testProvider()
 	got, err := p.convertToAnthropicRequest(&types.ChatRequest{
 		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(16),
-		Temperature: f32(0.3), TopP: f32(0.9),
-		Messages: []types.Message{{Role: "user", Content: "hi"}},
+		Temperature: f32(0.3),
+		Messages:    []types.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
-	if !got.Temperature.Valid() || !got.TopP.Valid() {
-		t.Errorf("<=4.6 model lost a parameter it accepts")
+	if !got.Temperature.Valid() {
+		t.Errorf("<=4.6 model lost temperature, which it accepts")
 	}
 }
 
@@ -93,5 +93,42 @@ func TestUnknownModel_KeepsEverything(t *testing.T) {
 	}
 	if !got.Temperature.Valid() {
 		t.Errorf("unknown model should keep classic params (pre-RT-5 behaviour)")
+	}
+}
+
+// Anthropic 400s when temperature and top_p are both present, on EVERY model
+// (measured on claude-haiku-4-5, which has no other restriction). OpenAI
+// accepts both, so an OpenAI-shaped client setting both is an ordinary request
+// that must not fail. temperature wins; top_p is dropped and counted.
+func TestUnrestricted_TemperatureAndTopPAreMutuallyExclusive(t *testing.T) {
+	p := testProvider()
+	got, err := p.convertToAnthropicRequest(&types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(16),
+		Temperature: f32(0.3), TopP: f32(0.9),
+		Messages: []types.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if !got.Temperature.Valid() {
+		t.Errorf("temperature should win; it is the knob callers actually set")
+	}
+	if got.TopP.Valid() {
+		t.Errorf("top_p was sent alongside temperature; the vendor 400s on the pair")
+	}
+}
+
+// top_p alone must still reach the vendor — it is accepted on its own.
+func TestUnrestricted_TopPAloneSurvives(t *testing.T) {
+	p := testProvider()
+	got, err := p.convertToAnthropicRequest(&types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(16), TopP: f32(0.9),
+		Messages: []types.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if !got.TopP.Valid() {
+		t.Errorf("top_p alone was dropped, but the vendor accepts it")
 	}
 }
