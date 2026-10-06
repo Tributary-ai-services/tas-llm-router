@@ -332,10 +332,20 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 				},
 			})
 		case "tool_result":
+			// A tool returning a screenshot is the case this exists for: the
+			// text-only flattening below keeps text blocks and nothing else, so
+			// an image in a tool result vanished between client and model.
+			// Blocks are kept ONLY when an image is actually present, so an
+			// ordinary text result still travels as a plain string and nothing
+			// downstream meets a shape it has not seen before.
+			var resultContent interface{} = anthropicTextFromField(b.Content)
+			if parts := anthropicToolResultParts(b.Content); parts != nil {
+				resultContent = parts
+			}
 			toolMsgs = append(toolMsgs, types.Message{
 				Role:       "tool",
 				ToolCallID: b.ToolUseID,
-				Content:    anthropicTextFromField(b.Content),
+				Content:    resultContent,
 				// A tool_result is a whole message here, so its breakpoint is a
 				// message-level one.
 				CacheControl: b.CacheControl,
@@ -443,6 +453,44 @@ func anthropicSystemToMessage(raw json.RawMessage) *types.Message {
 
 // anthropicTextFromField coerces an Anthropic field that may be a bare string
 // or a content-block array (system, tool_result content) into plain text.
+// anthropicToolResultParts returns a tool_result's content as blocks when it
+// contains at least one usable image, and nil when it does not -- nil meaning
+// "nothing here needs the block form", so the caller keeps the plain string.
+func anthropicToolResultParts(raw json.RawMessage) []types.ContentPart {
+	if len(raw) == 0 {
+		return nil
+	}
+	var blocks []anthropicInputBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil
+	}
+	var parts []types.ContentPart
+	hasImage := false
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			parts = append(parts, types.ContentPart{Type: "text", Text: b.Text})
+		case "image":
+			if b.Source == nil {
+				continue
+			}
+			url := b.Source.URL
+			if b.Source.Type == "base64" && b.Source.Data != "" {
+				url = fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
+			}
+			if url == "" {
+				continue
+			}
+			hasImage = true
+			parts = append(parts, types.ContentPart{Type: "image_url", ImageURL: &types.ImageURL{URL: url}})
+		}
+	}
+	if !hasImage {
+		return nil
+	}
+	return parts
+}
+
 func anthropicTextFromField(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""

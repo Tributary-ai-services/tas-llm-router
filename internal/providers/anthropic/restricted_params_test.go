@@ -347,3 +347,101 @@ func TestBetaHeader_ReachesTheWire(t *testing.T) {
 		t.Errorf("wire header = %q, want only the allowlisted beta", seen)
 	}
 }
+
+// Images (AIQG-43 item 3). `convertMessage` carried a literal
+// "// Skip image parts for now", so a screenshot in a user turn never reached
+// the model at all — the model answered about an image it had not seen, which
+// reads as the model being wrong rather than as a gateway dropping content.
+func TestImages_UserTurnCarriesBase64AndURL(t *testing.T) {
+	p := testProvider()
+	got, err := p.convertToAnthropicRequest(&types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(64),
+		Messages: []types.Message{{Role: "user", Content: []types.ContentPart{
+			{Type: "text", Text: "What is in these?"},
+			{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:image/png;base64,iVBORw0KGgo="}},
+			{Type: "image_url", ImageURL: &types.ImageURL{URL: "https://example.com/diagram.png"}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	b, _ := json.Marshal(got.Messages)
+	for _, want := range []string{"iVBORw0KGgo=", "image/png", "https://example.com/diagram.png", "What is in these?"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("image content lost (%q):\n%s", want, b)
+		}
+	}
+}
+
+// A URL shape we cannot classify is reported, never sent as nothing: a model
+// answering about an image it never received looks like a wrong model.
+func TestImages_UnusableSourceIsDroppedAndCounted(t *testing.T) {
+	p := testProvider()
+	got, err := p.convertToAnthropicRequest(&types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(64),
+		Messages: []types.Message{{Role: "user", Content: []types.ContentPart{
+			{Type: "text", Text: "keep me"},
+			{Type: "image_url", ImageURL: &types.ImageURL{URL: "blob:https://app.local/9f2c"}},
+			{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:text/plain,hello"}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	b, _ := json.Marshal(got.Messages)
+	for _, never := range []string{"blob:", "text/plain"} {
+		if strings.Contains(string(b), never) {
+			t.Errorf("unusable source %q was sent upstream:\n%s", never, b)
+		}
+	}
+	if !strings.Contains(string(b), "keep me") {
+		t.Errorf("dropping an unusable image took the rest of the turn with it:\n%s", b)
+	}
+}
+
+// The second half of the finding: a tool that returns a screenshot. Anthropic
+// accepts text AND image inside a tool_result, so it must survive.
+func TestImages_ToolResultCarriesAnImage(t *testing.T) {
+	p := testProvider()
+	got, err := p.convertToAnthropicRequest(&types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(64),
+		Messages: []types.Message{
+			{Role: "user", Content: "screenshot the page"},
+			{Role: "assistant", ToolCalls: []types.ToolCall{{ID: "toolu_1", Type: "function",
+				Function: types.Function{Name: "screenshot", Arguments: "{}"}}}},
+			{Role: "tool", ToolCallID: "toolu_1", Content: []types.ContentPart{
+				{Type: "text", Text: "captured"},
+				{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:image/jpeg;base64,/9j/4AAQ"}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	b, _ := json.Marshal(got.Messages)
+	for _, want := range []string{"tool_result", "toolu_1", "captured", "/9j/4AAQ", "image/jpeg"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("tool_result lost %q:\n%s", want, b)
+		}
+	}
+}
+
+// A plain text tool result must still travel as a plain string, so nothing
+// downstream meets a shape it has not seen before.
+func TestImages_PlainToolResultShapeUnchanged(t *testing.T) {
+	p := testProvider()
+	got, err := p.convertToAnthropicRequest(&types.ChatRequest{
+		Model: "claude-haiku-4-5-20251001", MaxTokens: ip(64),
+		Messages: []types.Message{
+			{Role: "user", Content: "read it"},
+			{Role: "tool", ToolCallID: "toolu_2", Content: "file contents"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	b, _ := json.Marshal(got.Messages)
+	if !strings.Contains(string(b), "file contents") || !strings.Contains(string(b), "toolu_2") {
+		t.Errorf("ordinary tool result changed shape:\n%s", b)
+	}
+}

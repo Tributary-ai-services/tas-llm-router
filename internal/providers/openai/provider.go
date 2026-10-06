@@ -507,6 +507,30 @@ func (p *OpenAIProvider) convertToOpenAIRequest(req *types.ChatRequest) (*openai
 			ToolCallID: msg.ToolCallID,
 		}
 
+		// A tool result must be a STRING on this vendor -- OpenAI rejects
+		// multipart content on the tool role -- so a tool result carrying an
+		// image (which only the Anthropic surface can produce) is flattened to
+		// its text here. Sending the blocks instead would 400 the whole
+		// request, which is worse than losing an image this vendor cannot
+		// accept in that position at all. The loss is counted so it is visible
+		// rather than inferred from a model answering about nothing.
+		if msg.Role == "tool" {
+			if parts, ok := msg.Content.([]types.ContentPart); ok {
+				var sb strings.Builder
+				for _, part := range parts {
+					switch part.Type {
+					case "text":
+						sb.WriteString(part.Text)
+					case "image_url":
+						metrics.ParamDroppedTotal.WithLabelValues("openai", "image_in_tool_result").Inc()
+					}
+				}
+				openaiMsg.Content = sb.String()
+				messages = append(messages, openaiMsg)
+				continue
+			}
+		}
+
 		// Handle content (string or multipart)
 		switch content := msg.Content.(type) {
 		case string:
