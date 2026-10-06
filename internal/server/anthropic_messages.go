@@ -60,10 +60,23 @@ type anthropicMessagesRequest struct {
 	Stream        bool                   `json:"stream,omitempty"`
 	Tools         []anthropicWireTool    `json:"tools,omitempty"`
 	ToolChoice    json.RawMessage        `json:"tool_choice,omitempty"`
+	// Thinking was decoded into nothing before this: Go discards unknown
+	// fields, so a client asking for extended thinking got a silent no. Claude
+	// Code asks for it on every request (budget 31,999), which means the
+	// gateway was serving a measurably different, weaker model than the one the
+	// caller configured, with nothing anywhere saying so.
+	Thinking *anthropicWireThinking `json:"thinking,omitempty"`
 
 	// TAS-native routing extensions (optimize_for, max_cost, retry/fallback…),
 	// settable via the Anthropic SDK's extra_body.
 	tasExtensions
+}
+
+// anthropicWireThinking is the client's `thinking` block as sent.
+type anthropicWireThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"`
 }
 
 type anthropicWireMessage struct {
@@ -103,6 +116,13 @@ type anthropicInputBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // string | []block
 
+	// thinking / redacted_thinking (an assistant turn being replayed). The
+	// signature is what makes a thinking block replayable, so it travels with
+	// the text or the block is useless.
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
+
 	// CacheControl marks this block as a prompt-cache breakpoint. Absent this
 	// field encoding/json discarded it: no error, no caching, full price on
 	// every turn (the #100 failure, reappearing on the native surface).
@@ -124,11 +144,18 @@ type anthropicToolChoice struct {
 // ---- outbound wire types (what we render back to the SDK) --------------------
 
 type anthropicContentBlock struct {
-	Type  string          `json:"type"`            // text | tool_use
+	Type  string          `json:"type"`            // text | tool_use | thinking | redacted_thinking
 	Text  string          `json:"text,omitempty"`  // type=text
 	ID    string          `json:"id,omitempty"`    // type=tool_use
 	Name  string          `json:"name,omitempty"`  // type=tool_use
 	Input json.RawMessage `json:"input,omitempty"` // type=tool_use (object)
+	// type=thinking. Thinking may legitimately be empty (display:"omitted" is
+	// the vendor default on the 4.7+ generation) while Signature is not — the
+	// signature is what makes the block replayable, so it is never omitted.
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	// type=redacted_thinking: opaque, round-tripped verbatim.
+	Data string `json:"data,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -213,6 +240,14 @@ func parseAnthropicToChatRequest(body []byte, requireMaxTokens bool) (*types.Cha
 		}
 	}
 
+	if t := ar.Thinking; t != nil && t.Type != "" {
+		req.Thinking = &types.ThinkingConfig{
+			Type:         t.Type,
+			BudgetTokens: t.BudgetTokens,
+			Display:      t.Display,
+		}
+	}
+
 	applyTASExtensions(req, ar.tasExtensions)
 
 	return req, nil
@@ -244,6 +279,9 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 	// position of a cache_control IS its meaning ("cache the prefix through
 	// here"), so collapsing the blocks into one string would move it.
 	hasBlockCache := false
+	// Reasoning blocks only exist in the block form, so a turn carrying one can
+	// never collapse to a plain string.
+	hasReasoning := false
 	// A breakpoint on the final block of the turn is the common agentic case and
 	// is expressible at message level, which is how the provider and the
 	// auto-placement engine already model it.
@@ -273,6 +311,17 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 					lastBlockCache = b.CacheControl
 				}
 			}
+		case "thinking", "redacted_thinking":
+			// Preserved verbatim, signature included. A thinking block whose
+			// signature is stripped is rejected by the vendor on replay, so
+			// forwarding one without it would be worse than dropping it.
+			parts = append(parts, types.ContentPart{
+				Type:      b.Type,
+				Thinking:  b.Thinking,
+				Signature: b.Signature,
+				Data:      b.Data,
+			})
+			hasReasoning = true
 		case "tool_use":
 			toolCalls = append(toolCalls, types.ToolCall{
 				ID:   b.ID,
@@ -299,10 +348,10 @@ func anthropicMessageToInternal(m anthropicWireMessage) ([]types.Message, error)
 
 	// Assemble the primary message for this turn (if any non-tool_result
 	// content was present).
-	if len(toolCalls) > 0 || len(textParts) > 0 || hasImage {
+	if len(toolCalls) > 0 || len(textParts) > 0 || hasImage || hasReasoning {
 		msg := types.Message{Role: m.Role}
 		switch {
-		case hasImage || hasBlockCache:
+		case hasImage || hasBlockCache || hasReasoning:
 			msg.Content = parts // block array — preserves breakpoint position
 		default:
 			msg.Content = strings.Join(textParts, "")
@@ -463,6 +512,20 @@ func chatResponseToAnthropic(resp *types.ChatResponse) anthropicMessage {
 	if len(resp.Choices) > 0 {
 		c := resp.Choices[0]
 		finish = c.FinishReason
+		// Reasoning precedes the answer, which is the order the vendor emits and
+		// the order a client replaying the turn must preserve.
+		for _, r := range c.Message.Reasoning {
+			switch r.Type {
+			case "thinking":
+				msg.Content = append(msg.Content, anthropicContentBlock{
+					Type: "thinking", Thinking: r.Thinking, Signature: r.Signature,
+				})
+			case "redacted_thinking":
+				msg.Content = append(msg.Content, anthropicContentBlock{
+					Type: "redacted_thinking", Data: r.Data,
+				})
+			}
+		}
 		if text := messageContentToString(c.Message.Content); text != "" {
 			msg.Content = append(msg.Content, anthropicContentBlock{Type: "text", Text: text})
 		}
