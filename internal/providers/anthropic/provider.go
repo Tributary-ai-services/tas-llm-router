@@ -333,20 +333,47 @@ func (p *AnthropicProvider) convertStreamEvent(event anthropic.MessageStreamEven
 		// A tool_use block opens here, and this is the ONLY event carrying its
 		// id and name. Text blocks need no opening chunk — their deltas carry
 		// everything the encoders need.
-		if tu, ok := variant.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
+		switch cb := variant.ContentBlock.AsAny().(type) {
+		case anthropic.ToolUseBlock:
 			return chunk(&types.Message{
 				Role: "assistant",
 				ToolCalls: []types.ToolCall{{
-					ID:       tu.ID,
+					ID:       cb.ID,
 					Type:     "function",
-					Function: types.Function{Name: tu.Name},
+					Function: types.Function{Name: cb.Name},
 				}},
 			})
+		case anthropic.RedactedThinkingBlock:
+			// Redacted reasoning arrives COMPLETE in the start event with no
+			// deltas following, so it is forwarded here or not at all.
+			return chunk(&types.Message{
+				Role:      "assistant",
+				Reasoning: []types.ContentPart{{Type: "redacted_thinking", Data: cb.Data}},
+			})
 		}
+		// A thinking block's start event carries nothing but an empty string;
+		// the content arrives as deltas, so the encoder opens the block lazily
+		// on the first one, exactly as it does for text.
 	case anthropic.ContentBlockDeltaEvent:
 		switch delta := variant.Delta.AsAny().(type) {
 		case anthropic.TextDelta:
 			return chunk(&types.Message{Role: "assistant", Content: delta.Text})
+		case anthropic.ThinkingDelta:
+			return chunk(&types.Message{
+				Role:      "assistant",
+				Reasoning: []types.ContentPart{{Type: "thinking", Thinking: delta.Thinking}},
+			})
+		case anthropic.SignatureDelta:
+			// The signature arrives in its own event at the END of the block,
+			// and it is the part that makes the reasoning replayable. A client
+			// that receives the thinking text without it cannot send the turn
+			// back, so this event matters even when the text was empty --
+			// which is the normal case, since display defaults to "omitted" on
+			// the 4.7+ generation.
+			return chunk(&types.Message{
+				Role:      "assistant",
+				Reasoning: []types.ContentPart{{Type: "thinking", Signature: delta.Signature}},
+			})
 		case anthropic.InputJSONDelta:
 			// Argument fragment for the block opened above. The id is left
 			// empty deliberately: that is how the encoders know this continues

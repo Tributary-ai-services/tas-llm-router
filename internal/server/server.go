@@ -2076,6 +2076,35 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	s.writeChatResponse(w, r, resp)
 }
 
+// stripReasoningForCache returns a shallow copy of resp with every thinking
+// block removed, for storage only (RT-7).
+//
+// A thinking block's signature is bound to the conversation that produced it,
+// and a cache hit serves it to a DIFFERENT one by definition -- the key is the
+// request, so the same prompt in a new conversation is exactly the hit case. A
+// client that replays a block carrying a foreign signature gets a 400 on its
+// next turn, which looks like a client bug and is not. The reasoning is also
+// worthless on a hit: it is reasoning produced in a context this caller was
+// never part of. The answer caches; the thinking does not.
+//
+// The caller's own response is left untouched, because it is still on its way
+// to the client with its reasoning intact.
+func stripReasoningForCache(resp *types.ChatResponse) *types.ChatResponse {
+	if resp == nil {
+		return nil
+	}
+	cached := *resp
+	if len(cached.Choices) > 0 {
+		choices := make([]types.Choice, len(cached.Choices))
+		copy(choices, cached.Choices)
+		for i := range choices {
+			choices[i].Message.Reasoning = nil
+		}
+		cached.Choices = choices
+	}
+	return &cached
+}
+
 // maybeStoreInCache persists a produced response under the key stamped at lookup
 // time. Best-effort and off the client's latency path: a store failure is logged
 // and swallowed. Skips responses over MaxBodyBytes and any response carrying tool
@@ -2088,7 +2117,7 @@ func (s *Server) maybeStoreInCache(r *http.Request, resp *types.ChatResponse) {
 	if !ok || !responsecache.ResponseCacheable(resp) {
 		return
 	}
-	body, err := json.Marshal(resp)
+	body, err := json.Marshal(stripReasoningForCache(resp))
 	if err != nil {
 		return
 	}

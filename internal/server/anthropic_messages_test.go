@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -608,5 +609,256 @@ func TestChatResponseToAnthropic_EmitsReasoningBeforeText(t *testing.T) {
 	}
 	if msg.Content[1].Type != "text" || msg.Content[1].Text != "the answer" {
 		t.Errorf("answer block wrong: %+v", msg.Content[1])
+	}
+}
+
+// RT-7: the encoder renders streamed reasoning as real Anthropic block events.
+//
+// eventSeq extracts the (event, block-type-or-delta-type, index) sequence, so
+// the assertions are about ORDER and BLOCK STRUCTURE — which is where this can
+// go wrong in ways that still look like valid SSE.
+func eventSeq(body string) []string {
+	var seq []string
+	for _, frame := range strings.Split(body, "\n\n") {
+		var name, data string
+		for _, line := range strings.Split(frame, "\n") {
+			if strings.HasPrefix(line, "event: ") {
+				name = strings.TrimPrefix(line, "event: ")
+			}
+			if strings.HasPrefix(line, "data: ") {
+				data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+		if name == "" {
+			continue
+		}
+		var p struct {
+			Index        *int `json:"index"`
+			ContentBlock *struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
+			Delta *struct {
+				Type string `json:"type"`
+			} `json:"delta"`
+		}
+		_ = json.Unmarshal([]byte(data), &p)
+		label := name
+		switch {
+		case p.ContentBlock != nil:
+			label += ":" + p.ContentBlock.Type
+		case p.Delta != nil && p.Delta.Type != "":
+			label += ":" + p.Delta.Type
+		}
+		if p.Index != nil {
+			label += fmt.Sprintf("#%d", *p.Index)
+		}
+		seq = append(seq, label)
+	}
+	return seq
+}
+
+func TestAnthropicStreamEncoder_ThinkingPrecedesTextAndCloses(t *testing.T) {
+	rec := httptest.NewRecorder()
+	enc := newAnthropicStreamEncoder(rec, nil, &types.ChatRequest{Model: "claude-sonnet-5-5"}, nil)
+
+	enc.writeChunk(&types.ChatChunk{ID: "chatcmpl-1", Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		Reasoning: []types.ContentPart{{Type: "thinking", Thinking: "Check the file "}}}}}})
+	enc.writeChunk(&types.ChatChunk{Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		Reasoning: []types.ContentPart{{Type: "thinking", Thinking: "before editing."}}}}}})
+	enc.writeChunk(&types.ChatChunk{Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		Reasoning: []types.ContentPart{{Type: "thinking", Signature: "sig-abc"}}}}}})
+	enc.writeChunk(&types.ChatChunk{Choices: []types.ChoiceChunk{{Delta: &types.Message{Content: "Done."}}}})
+	enc.writeChunk(&types.ChatChunk{Choices: []types.ChoiceChunk{{Delta: &types.Message{}, FinishReason: "stop"}}})
+	enc.done()
+
+	got := eventSeq(rec.Body.String())
+	want := []string{
+		"message_start",
+		"content_block_start:thinking#0",
+		"content_block_delta:thinking_delta#0",
+		"content_block_delta:thinking_delta#0",
+		"content_block_delta:signature_delta#0",
+		// The reasoning block MUST close before the answer opens: two open
+		// blocks at once leave the client unable to attribute a delta.
+		"content_block_stop#0",
+		"content_block_start:text#1",
+		"content_block_delta:text_delta#1",
+		"content_block_stop#1",
+		"message_delta",
+		"message_stop",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("event count %d, want %d:\n got: %v\nwant: %v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("event %d = %q, want %q\nfull: %v", i, got[i], want[i], got)
+		}
+	}
+	if !strings.Contains(rec.Body.String(), "sig-abc") {
+		t.Error("signature never reached the wire — the turn cannot be replayed")
+	}
+}
+
+// The normal case on the 4.7+ generation: display defaults to "omitted", so
+// there is no thinking TEXT at all and the block is nothing but a signature.
+// It must still produce a complete, replayable block.
+func TestAnthropicStreamEncoder_SignatureOnlyStillOpensABlock(t *testing.T) {
+	rec := httptest.NewRecorder()
+	enc := newAnthropicStreamEncoder(rec, nil, &types.ChatRequest{Model: "claude-sonnet-5-5"}, nil)
+
+	enc.writeChunk(&types.ChatChunk{ID: "chatcmpl-1", Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		Reasoning: []types.ContentPart{{Type: "thinking", Signature: "sig-only"}}}}}})
+	enc.writeChunk(&types.ChatChunk{Choices: []types.ChoiceChunk{{Delta: &types.Message{Content: "Answer."}}}})
+	enc.done()
+
+	got := eventSeq(rec.Body.String())
+	want := []string{
+		"message_start",
+		"content_block_start:thinking#0",
+		"content_block_delta:signature_delta#0",
+		"content_block_stop#0",
+		"content_block_start:text#1",
+		"content_block_delta:text_delta#1",
+		"content_block_stop#1",
+		"message_delta",
+		"message_stop",
+	}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("event %d wrong\n got: %v\nwant: %v", i, got, want)
+		}
+	}
+}
+
+// A reasoning-only turn never opens a text block, so done() is the only place
+// its block can be closed. Leaving it open ends the stream mid-block.
+func TestAnthropicStreamEncoder_ReasoningOnlyTurnClosesAtDone(t *testing.T) {
+	rec := httptest.NewRecorder()
+	enc := newAnthropicStreamEncoder(rec, nil, &types.ChatRequest{Model: "claude-sonnet-5-5"}, nil)
+	enc.writeChunk(&types.ChatChunk{ID: "chatcmpl-1", Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		Reasoning: []types.ContentPart{{Type: "thinking", Thinking: "Thinking...", Signature: ""}}}}}})
+	enc.done()
+
+	got := eventSeq(rec.Body.String())
+	want := []string{
+		"message_start",
+		"content_block_start:thinking#0",
+		"content_block_delta:thinking_delta#0",
+		"content_block_stop#0",
+		"message_delta",
+		"message_stop",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("event %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Redacted reasoning is complete in one event, so it is emitted as a whole
+// block rather than opened and streamed — and it must not swallow the answer.
+func TestAnthropicStreamEncoder_RedactedThinkingIsAWholeBlock(t *testing.T) {
+	rec := httptest.NewRecorder()
+	enc := newAnthropicStreamEncoder(rec, nil, &types.ChatRequest{Model: "claude-sonnet-5-5"}, nil)
+	enc.writeChunk(&types.ChatChunk{ID: "chatcmpl-1", Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		Reasoning: []types.ContentPart{{Type: "redacted_thinking", Data: "opaque-xyz"}}}}}})
+	enc.writeChunk(&types.ChatChunk{Choices: []types.ChoiceChunk{{Delta: &types.Message{Content: "Answer."}}}})
+	enc.done()
+
+	body := rec.Body.String()
+	got := eventSeq(body)
+	want := []string{
+		"message_start",
+		"content_block_start:redacted_thinking#0",
+		"content_block_stop#0",
+		"content_block_start:text#1",
+		"content_block_delta:text_delta#1",
+		"content_block_stop#1",
+		"message_delta",
+		"message_stop",
+	}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("event %d wrong\n got: %v\nwant: %v", i, got, want)
+		}
+	}
+	if !strings.Contains(body, "opaque-xyz") {
+		t.Error("redacted payload never reached the wire; it must round-trip verbatim")
+	}
+}
+
+// Tool calls are buffered to done() and must land AFTER the reasoning block,
+// with no index collision — the two features share nextIndex.
+func TestAnthropicStreamEncoder_ThinkingAndToolCallsDoNotCollide(t *testing.T) {
+	rec := httptest.NewRecorder()
+	enc := newAnthropicStreamEncoder(rec, nil, &types.ChatRequest{Model: "claude-sonnet-5-5"}, nil)
+	enc.writeChunk(&types.ChatChunk{ID: "chatcmpl-1", Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		Reasoning: []types.ContentPart{{Type: "thinking", Signature: "sig-1"}}}}}})
+	enc.writeChunk(&types.ChatChunk{Choices: []types.ChoiceChunk{{Delta: &types.Message{
+		ToolCalls: []types.ToolCall{{ID: "toolu_1", Type: "function",
+			Function: types.Function{Name: "read_file", Arguments: `{"path":"a.py"}`}}}}}}})
+	enc.done()
+
+	got := eventSeq(rec.Body.String())
+	want := []string{
+		"message_start",
+		"content_block_start:thinking#0",
+		"content_block_delta:signature_delta#0",
+		"content_block_stop#0",
+		"content_block_start:tool_use#1",
+		"content_block_delta:input_json_delta#1",
+		"content_block_stop#1",
+		"message_delta",
+		"message_stop",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("event %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// RT-7: a thinking block must never be stored in the response cache. Its
+// signature is bound to the conversation that produced it, and a cache hit
+// serves it to a different one by definition — the key is the request, so the
+// same prompt in a new conversation IS the hit case. A client replaying a
+// foreign signature gets a 400 on its next turn and it looks like its own bug.
+//
+// Exercises the real stripReasoningForCache that maybeStoreInCache calls,
+// rather than a copy of its logic — a test that reimplements the thing it is
+// checking passes whatever the code does.
+func TestResponseCache_ReasoningIsNotStored(t *testing.T) {
+	resp := &types.ChatResponse{
+		ID: "chatcmpl-1", Model: "claude-sonnet-5-5",
+		Choices: []types.Choice{{
+			Message: types.Message{
+				Role: "assistant", Content: "the answer",
+				Reasoning: []types.ContentPart{{Type: "thinking", Thinking: "step one", Signature: "sig-abc"}},
+			},
+		}},
+	}
+	body, err := json.Marshal(stripReasoningForCache(resp))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, leaked := range []string{"sig-abc", "step one", "reasoning"} {
+		if strings.Contains(string(body), leaked) {
+			t.Errorf("cached body carries %q; a replayed signature 400s in another conversation:\n%s", leaked, body)
+		}
+	}
+	if !strings.Contains(string(body), "the answer") {
+		t.Errorf("stripping reasoning took the answer with it:\n%s", body)
+	}
+	// The caller's own copy must be untouched — it is still being written to
+	// the client, reasoning included.
+	if len(resp.Choices[0].Message.Reasoning) != 1 {
+		t.Error("stripping mutated the live response; the client would lose its thinking block")
 	}
 }
