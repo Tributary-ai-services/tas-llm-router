@@ -14,8 +14,8 @@ answers:
   - "How do I retry a failed request without paying for the generation twice?"
   - "Can this gateway substitute a different model for the one I named?"
 depth: deep
-verified_against: "tas-llm-router@dc1957b (code), 2026-09-24"
-captures: "INHERITED, not re-taken. This refresh is code-only: no request was sent to any gateway for it. Every live capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). The gateway still runs image aiqg-v5.87 (Deployment re-read 2026-09-24), which its events stamp as commit e6c24c0; e6c24c0 differs from dc1957b across routing, server, middleware, providers and config only in internal/server/judge.go (judge score provenance, not yet deployed), so every routing behaviour described here IS the deployed code, while the captures remain from the older build."
+verified_against: "tas-llm-router@b702931 (code), 2026-10-05"
+captures: "MOSTLY INHERITED. No completion request was sent for either 2026-10-05 refresh. The b702931 refresh (2026-10-05 Pacific, 2026-10-06T00:29Z) read, read-only: the Deployment and ReplicaSets (strict gateway on aiqg-v5.94 since 2026-10-05T23:54Z, about 31 minutes BEFORE b702931 merged at 2026-10-06T00:25Z; permissive still aiqg-v5.75), GET /v1/models (still the same twelve names, byte-identical to the earlier read), GET /v1/capabilities (still the pre-b702931 prices: gpt-4o 0.005/0.015, claude-opus-4-6 0.015/0.075), and Loki (response events stamp gateway_version aiqg-v5.94; every Anthropic probe failure in the last three hours is the zero-credit-balance 400). So b702931 is merged and NOT serving. Earlier 2026-10-05 notes follow. Every completion capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). Read-only observations taken 2026-10-05: GET /v1/models on the strict gateway (twelve names, including the Claude 5 family), the Deployment and ReplicaSets (strict gateway on aiqg-v5.92 since 2026-10-05T16:00Z, permissive still aiqg-v5.75), the ConfigMap flags (unchanged), and Loki response events (which now stamp gateway_version with the image tag, aiqg-v5.92, not a commit). 3b8526e changes no file under internal/routing, internal/middleware or internal/server/server.go; it changes routing outcomes only through the model catalog it extends, and the live /v1/models shows that catalog is served. 78c3cd2 (#242) changes only the Anthropic adapter's streaming conversion and the /v1/messages stream encoder; it moves no routing decision, and whether any deployed image carries it was not checked."
 ---
 
 # Routing in the TAS LLM Router
@@ -29,7 +29,10 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > **strict gateway** is
 > the customer-facing deployment of this router (`llm-router-aiqg`, started with
 > `AIQG_STRICT=true`), which rejects any request that does not carry both a
-> `TAS-Auth` token and an `Authorization` header; the other deployment,
+> `TAS-Auth` token and an `Authorization` header. Its authenticated route in is
+> internally called *Path A*, which is why a rejected request carries the error
+> code `path_a_auth_required` and logs `aiqg.path_a_auth_rejected`; the term means
+> nothing more than "the strict gateway's front door". The other deployment,
 > `llm-router`, lets internal callers through without either, and everything in
 > this document was exercised against the strict one. An **event** is a JSON
 > record the gateway emits about a request — two per request, a *request event*
@@ -41,17 +44,70 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > and whether you can reach it is a question the forensics section settles.
 >
 > **Two commits, and how far apart they now are.** Every line citation in this
-> document is against `tas-llm-router@dc1957b` (2026-09-24). The only code change
-> since the previous refresh at `e574173` is in `internal/server/judge.go`, which
-> no citation in the routing and server paths below points into, so those
-> citations carry over unchanged. Every live capture was taken on 2026-08-27 from the deployed strict
-> gateway `gateway.aiqg.tas.scharber.com` (deployment `llm-router-aiqg` in
-> namespace `tas-llm-router`, image tag `aiqg-v5.86`), whose events stamp
-> `gateway_version: 39e8d77`. **No capture in this document was re-taken for this
-> refresh** — it is a code-only pass, and the captures are inherited.
+> document is against `tas-llm-router@b702931` (verified 2026-10-05). Three code
+> changes have landed since the refresh at `db5ae56`; the newest, `b702931`, is
+> described in its own paragraph below because, unlike the other two, it is not
+> running yet. The first,
+> `3b8526e` (#239), touches routing in one way only: it adds the Claude 5 family and an
+> undated `claude-haiku-4-5` to the model catalog, and corrects Haiku 4.5's price.
+> Because the `model` field resolves a vendor only for names the catalog lists,
+> that changes where a request naming `claude-opus-5-5` goes — see "What the
+> `model` field actually does", which carries the new table. The same commit
+> stops `/v1/messages` flattening a multi-block system prompt and keeps prompt-cache
+> breakpoints through translation; neither moves a routing decision (see "How it
+> works end to end"). It added lines to `internal/config/config.go`,
+> `configs/config.yaml` and `internal/server/anthropic_messages.go`, so every
+> citation into those files past an insertion point moved and was re-pointed; the
+> code at each cited line is unchanged.
+>
+> The second, `78c3cd2` (#242), moves no routing decision either. It repairs how
+> the Anthropic adapter converts a *streamed* response: a tool call streamed by an
+> Anthropic model used to be dropped, so the client saw a `200` ending in
+> `end_turn` with no content, and a streamed response told the client
+> `input_tokens: 0` and no cache counts — see "Retry safety" for what that meant
+> to a caller. It changes only `internal/providers/anthropic/provider.go`,
+> `internal/server/anthropic_messages.go` and their tests; `internal/routing`,
+> `internal/middleware`, `internal/server/server.go` and `pkg` are byte-identical
+> to `3b8526e`. Citations into `provider.go` past line 267 moved by 49 lines and
+> were re-pointed; no citation into `anthropic_messages.go` sits past its first
+> insertion. `[!UNVERIFIED]` Whether any deployed image carries `78c3cd2` was not
+> checked for this refresh. Every live *completion* capture was taken
+> on 2026-08-27 from the deployed strict gateway `gateway.aiqg.tas.scharber.com`
+> (deployment `llm-router-aiqg` in namespace `tas-llm-router`, image tag
+> `aiqg-v5.86`), whose events stamp `gateway_version: 39e8d77`. **No completion
+> was re-sent for this refresh**; the read-only observations taken on 2026-10-05
+> are named where they are used.
+>
+> **The third, `b702931` (#241), is merged but not deployed.** It is the change
+> this refresh exists for, and it touches routing in the same single way
+> `3b8526e` did — through the model catalog — but on a larger scale. The catalog
+> grows from twelve names to forty-six: fourteen Anthropic and thirty-two OpenAI,
+> including `gpt-5`, the `o`-series and `claude-opus-4-8`. Because the `model`
+> field resolves a vendor only for a name some vendor advertises, every one of
+> those thirty-four new names changes from "fails with a free 503" to "routes to
+> its owner" the moment a build carrying the commit is served. It also corrects
+> three prices the router ranks and estimates on: `gpt-4o` from $0.005 / $0.015 to
+> $0.0025 / $0.010 per 1k, `gpt-3.5-turbo` from $0.0015 / $0.002 to
+> $0.0005 / $0.0015, and `claude-opus-4-6` from $0.015 / $0.075 to $0.005 / $0.025,
+> a third of what was carried. It changes only `configs/config.yaml`,
+> `internal/config/config.go`, `internal/config/catalog_pricing_test.go` and
+> `pkg/clear/cost.go`; `internal/routing`, `internal/server`,
+> `internal/middleware` and `internal/providers` are byte-identical to `78c3cd2`
+> (`git diff --stat 78c3cd2 b702931` on those paths is empty). The insertion into
+> `config.go` is one block at line 468, so every citation into that file past it
+> moved by 443 lines and was re-pointed; citations into `configs/config.yaml`
+> past line 32 moved as well. **Observed 2026-10-06 at 00:29 UTC:** the strict
+> gateway runs `aiqg-v5.94`, which rolled out at 23:54 UTC, about half an hour
+> before `b702931` merged, and its `GET /v1/models` still lists exactly the
+> twelve names below while `GET /v1/capabilities` still reports the old
+> `gpt-4o` and `claude-opus-4-6` prices. So everything this document says about
+> the forty-six-name catalog is *Source*, and describes what a deploy will
+> change, not what happens to your request today. See "What the `model` field
+> actually does" for both tables.
 >
 > The gap between those two has widened, so it was measured rather than assumed.
-> `39e8d77` is an ancestor of `e574173`, with 86 commits between them. Across
+> `39e8d77` is an ancestor of `b702931`, the commit cited here, with 96 commits
+> between them (`git rev-list --count 39e8d77..b702931`). Across
 > that range `internal/routing/router.go` gained 143 lines and **lost none**:
 > every line the captures exercised is still there, unmodified. The additions are
 > three — a model-registry hook at the top of `Route()`, a check that a pinned
@@ -59,40 +115,89 @@ captures: "INHERITED, not re-taken. This refresh is code-only: no request was se
 > breaker's gateway-wide default. The first is inert unless a registry is
 > configured and none is; the second fires only on a pinned request, and no
 > pinned request was ever captured. So no captured outcome is contradicted by
-> the code now running. `internal/server/server.go` moved further — 202 lines added,
-> 161 removed, mostly metrics instrumentation and a refactor that pulled both
-> streaming handlers onto one shared chunk pump — and one of those changes *is*
+> the code now running. `internal/server/server.go` moved further — 253 lines added,
+> 161 removed, mostly metrics instrumentation, a refactor that pulled both
+> streaming handlers onto one shared chunk pump, and the stream buffer that pump
+> now fills for the quality judge — and one of those changes *is*
 > caller-visible, at the end of a broken stream; it is called out in "Retry
 > safety" below.
 >
 > **What is actually running, and how to check it yourself.** The image the
-> Deployment names has moved from `aiqg-v5.86` to `aiqg-v5.87`, and an image tag
-> is not a commit, so the tag was resolved rather than trusted. The deployed
-> gateway stamps `gateway_version: e6c24c0` on its events — that field is how
+> Deployment names moved twice on the day of this refresh, and an image tag is
+> not a commit, so each tag was resolved rather than trusted. Until 2026-10-02 the
+> pods ran `aiqg-v5.88`, whose events stamped `gateway_version: dc2fe59` — the
+> documentation refresh after `dc1957b`, so the running code was `dc1957b`, which
+> changed what the quality judge records (see "Efficacy" below). Re-read on
+> 2026-10-02, `aiqg-v5.89` rolled out at about 15:37 UTC, and the response events
+> its pods wrote to Loki stamp `gateway_version: 43fc830` — that field is how
 > anyone can do this check, by reading any recent response event and taking the
-> value. `e6c24c0` is `feat(semcache): switch to TEI + langcache-embed-v3-small,
-> keeping 0.87 (#222)`, dated 2026-09-21 — a change to the embedding service
-> behind the semantic response cache, text-embeddings-inference (TEI), which
-> touches no routing code at all. It is an ancestor of `dc1957b`, behind
-> by five commits: the release commit that recorded the tag, three documentation
-> refreshes, and `dc1957b` itself, which changes what the quality judge records
-> (see "Efficacy" below). The Deployment still named `aiqg-v5.87` when re-read on
-> 2026-09-24, so that judge change is merged but not running.
+> value. `43fc830` adds two flags to the response event, `schema_requested` (you
+> set `response_format`) and `tools_declared` (you sent a non-empty `tools`
+> list). Both are omitted from the event, rather than written as `false`, when the
+> request was never examined. They are measurement for a future efficacy score
+> and nothing in routing reads them.
+>
+> About three and a half hours later, at about 19:05 UTC the same day, the
+> Deployment rolled to `aiqg-v5.90`, which is what `llm-router-aiqg` ran at the
+> 2026-10-02 refresh; the permissive `llm-router` is unchanged on `aiqg-v5.75`. The
+> streaming judge described below is live on the strict gateway: its metrics
+> endpoint (`/aiqg/metrics`, port 8086) exports
+> `aiqg_stream_buffer_truncated_total 0`, a counter that exists only from
+> `db5ae56` (read 2026-10-02). `[!UNVERIFIED]` That `aiqg-v5.90` is exactly
+> `db5ae56` is inferred, not resolved: no response event from its pods had
+> reached Loki to stamp a `gateway_version`, the images carry no Open Container Initiative (OCI) version labels, and
+> the registry timestamps fall about two minutes after the `db5ae56` merge. Note
+> also that `k8s/deployment-aiqg-strict.yaml` in the repository still pins
+> `aiqg-v5.88` at `db5ae56`; no commit records the move to `v5.89` or `v5.90`, so
+> the manifest is not a reliable statement of what runs.
+>
+> Since then the strict gateway has moved twice more, read from its ReplicaSets on
+> 2026-10-05: `aiqg-v5.91` at 2026-10-04T19:44Z and `aiqg-v5.92` at
+> 2026-10-05T16:00Z, which served traffic at that refresh (it has since been
+> replaced; see below). The
+> manifest at `3b8526e` still pins `aiqg-v5.88`. The `gateway_version` check
+> described above no longer resolves a commit by itself: response events written
+> on 2026-10-05 stamp `gateway_version: aiqg-v5.92`, the image tag, so the field
+> now says which image and not which code. What can be checked is behaviour.
+> `GET /v1/models` on the strict gateway, read 2026-10-05 at 23:42 UTC, lists the
+> twelve names `3b8526e` ships, the Claude 5 family included, so the catalog half
+> of that commit is serving. `[!UNVERIFIED]` That `aiqg-v5.92` contains the
+> other half — the `/v1/messages` system-prompt and cache-breakpoint fix — is not
+> established: the image rolled out about three hours *before* `3b8526e` merged
+> (18:49 UTC), so it was built from the pull request branch at some point, and
+> neither the event field nor the manifest says which.
+>
+> Two more images followed the same evening, read from the ReplicaSets at
+> 2026-10-06T00:29Z: `aiqg-v5.93` at 2026-10-05T23:44Z and `aiqg-v5.94` at
+> 23:54Z, which now serves (two ready pods); response events stamp
+> `gateway_version: aiqg-v5.94`. The manifest at `b702931` still pins
+> `aiqg-v5.88`. Whatever those two images contain, it is not `b702931`'s catalog:
+> the live model list is unchanged at twelve names and the live prices are the
+> ones `b702931` corrects. `[!UNVERIFIED]` What `aiqg-v5.93` and `aiqg-v5.94`
+> *do* contain was not resolved; the event field names only the tag, and the
+> routing code is byte-identical from `3b8526e` through `b702931`, so no routing
+> behaviour depends on the answer.
 >
 > That resolution settles the question this document would otherwise leave open.
-> `git diff e6c24c0..dc1957b` across `internal/routing`, `internal/server`,
-> `internal/middleware`, `internal/providers` and `internal/config` touches only
-> `internal/server/judge.go` and its test —
-> `router.go` and `server.go` are byte-identical between the running build and
-> the source cited here. So every behaviour described below, including the three
-> that arrived in September (the pin-versus-model check, the registry hook, and
-> the `X-TAS-Stream-Fallback` header), **is present in the build serving traffic
-> today**. Where this document says "since 2026-09", that means deployed, not
-> merely merged.
+> `git diff 43fc830..db5ae56` touches no routing code: `internal/routing`,
+> `internal/providers` and `internal/middleware` are byte-identical, and the
+> changes to `internal/server/server.go`, `internal/server/judge.go` and
+> `internal/config/config.go` add the stream buffer, the streaming judge call,
+> and the one setting that sizes the buffer. `git diff db5ae56..3b8526e` again
+> leaves `internal/routing`, `internal/middleware` and `internal/server/server.go`
+> untouched; its routing effect is entirely the catalog, and `78c3cd2..b702931`
+> leaves all of `internal/routing`, `internal/server`, `internal/middleware` and
+> `internal/providers` untouched too. So every routing behaviour described
+> below, including the three that arrived in September (the pin-versus-model
+> check, the registry hook, and the `X-TAS-Stream-Fallback` header), **is present
+> in the build serving traffic today**.
+> Where this document says "since 2026-09", that means deployed, not merely
+> merged. The one exception is the catalog and prices `b702931` ships, which are
+> merged and not deployed, and are labelled that way wherever they appear.
 >
-> What that does *not* do is make anything observed. No traffic was sent for this
-> refresh, and the captures below are still from `aiqg-v5.86` / `39e8d77` on
-> 2026-08-27. The resolution makes the *Source* rows trustworthy as descriptions
+> What that does *not* do is make anything observed. No completion was sent for
+> this refresh, and the completion captures below are still from `aiqg-v5.86` /
+> `39e8d77` on 2026-08-27. The resolution makes the *Source* rows trustworthy as descriptions
 > of the running code; it does not turn any of them into a measurement.
 >
 > Where a behaviour is read from source rather than observed, the text says so.
@@ -132,8 +237,9 @@ Four words in that table are load-bearing and are used throughout, so take them
 here. A **route rule** is a piece of policy your tenant administrator saves in
 the AI Quality Gateway dashboard; the gateway fetches the matching one while your
 request is in flight, and it can carry any of a vendor to prefer, a failover
-plan, a list of vendors you are forbidden to use, quality floors, and a choice of
-ranking strategy. You cannot see it from a response, and nothing you put in a
+plan, a list of vendors you are forbidden to use (the tenant's *constraints*;
+"tenant constraints" below always means this list), quality floors, and a choice
+of ranking strategy (the rule's *selection*). You cannot see it from a response, and nothing you put in a
 request creates or changes one. A **pin** is the part of a rule that names a
 vendor — the field is called `provider_override` — and it outranks the ranking
 strategy. **Ejection**, also called *passive outlier detection*, is the gateway
@@ -143,21 +249,35 @@ directly every thirty seconds, and it is switched off here. **Affinity** is a
 preference for keeping one conversation on one vendor so that vendor's prompt
 cache stays warm, which makes repeat requests cheaper; it is also switched off.
 
+Two different mechanisms are both called "fallback" in this document, and the
+table below contains both, so keep them apart from here on. The **rule fallback
+chain** (also "the chain", stored as `preferred_chain` on a route rule) is the
+failover plan your tenant administrator writes: an ordered list of tiers, each
+naming a vendor *and* a model. It never runs on this gateway. **Body-level
+fallback** is the `fallback_config` (and `retry_config`) object *you* put in a
+request body: it retries the same model on other registered vendors, ignores the
+rule chain entirely, and is the only failover that runs. Both are written to set
+`X-TAS-Router-Fallback-Used` (`internal/server/fallback.go:147`,
+`internal/server/server.go:2656`), so were the chain ever reached, that header
+alone would not say which one acted.
+
 | Cause | How you would know | Live here? |
 |---|---|---|
 | **You named a model only one vendor sells.** The model *is* the vendor choice; asking for `gpt-4o` is asking for openai | `X-TAS-Router-Provider` matches the model's owner. This is not a surprise so much as the rule people forget | Yes |
 | **A rule your tenant administrator wrote names a vendor** — a *pin*, set as `provider_override` on a route rule you cannot see from here | `X-TAS-Router-Provider` names a vendor you did not choose, and `router_metadata.routing_reason` contains `pinned by route rule: <vendor>` | Yes, if your tenant has such a rule |
-| **The same rule also replaced your model.** A pin may carry a model as well as a vendor, and then your `model` field is overwritten before routing starts | `X-TAS-Router-Model` differs from what you sent — **and that is the only signal.** The rewrite appends nothing to `routing_reason`; the pin is recorded, the model substitution is not (`internal/server/server.go:1092-1097`) | Yes, if your tenant has such a rule |
+| **The same rule also replaced your model.** A pin may carry a model as well as a vendor, and then your `model` field is overwritten before routing starts | `X-TAS-Router-Model` differs from what you sent — **and that is the only signal.** The rewrite appends nothing to `routing_reason`; the pin is recorded, the model substitution is not (`internal/server/server.go:1104-1109`) | Yes, if your tenant has such a rule |
 | **Your tenant forbids the vendor** the strategy picked, so a permitted one was used instead | `routing_reason` contains `strategy chose <vendor>, which tenant constraints deny; used <other>` | Yes, if constraints are configured |
 | **The pinned vendor could not be used** — denied, unconfigured, failing its health probe, or not selling your model — so the pin was dropped | `routing_reason` begins `pinned provider <vendor> ` and names which of the four it was | Yes |
 | **Your own `fallback_config` sent it elsewhere** after the first vendor failed. This is a body field you set, and it ignores `preferred_chain` entirely | `X-TAS-Router-Fallback-Used: true`, and `routing_reason` contains `Fallback to <vendor>` | Yes, only when you set it |
-| **Two vendors advertise the same model name** and the cheaper one won | `X-TAS-Router-Provider` is whichever priced lower. Cannot happen with the six models shipped today; an operator adding an alias to both vendors creates it | No, not as configured |
+| **Two vendors advertise the same model name** and the cheaper one won | `X-TAS-Router-Provider` is whichever priced lower. Cannot happen with the twelve models served today, nor with the forty-six `b702931` ships; an operator adding an alias to both vendors creates it | No, not as configured |
 | **A rule's failover chain advanced a tier**, replacing both vendor and model | `X-TAS-Router-Fallback-Used: true` with a model you never sent | **No** — the chain's code has no reachable caller |
 | **The circuit breaker moved you off a failing vendor** | `routing_reason` contains `breaker ejected <vendor>; routed to <other>` | **No** — off gateway-wide |
 | **Affinity held you on a warm-cache vendor** | An affinity line in `routing_reason` | **No** — off gateway-wide, and its recording step is unreachable |
 | **The model registry rewrote your model name** before any of the above ran | `router_metadata.original_model` and `resolved_model` both appear | **No** — the registry is not enabled |
 
-Four of those eleven cannot happen on this gateway today. That is the gap this
+Five of those eleven cannot happen on this gateway today: the two-vendor alias
+because no shipped model is sold by two vendors, and the other four because the
+mechanism is off or unreachable. That is the gap this
 document exists to make visible, and the next section is the inventory behind it.
 
 If you are holding a response right now and want the short version: read
@@ -189,10 +309,10 @@ inferring it later.
 
 | What you get back | Did it cost you? |
 |---|---|
-| `503 Routing failed: ...` (`internal/server/server.go:1375`) | **No.** Selection never chose a vendor, so nothing was dialled |
-| `402 provider_key_required: ...` (`internal/server/server.go:1472-1473`) | **No.** Credential resolution runs before the call |
-| `500 Streaming failed: ...` (`internal/server/server.go:2462`) | **No.** On both adapters this error can only be raised before a single token could be generated — see below |
-| `500 Completion failed: ...` (`internal/server/server.go:1930`) | **Unknowable from the response.** Some causes billed, some not, and a retry can make it several |
+| `503 Routing failed: ...` (`internal/server/server.go:1392`) | **No.** Selection never chose a vendor, so nothing was dialled |
+| `402 provider_key_required: ...` (`internal/server/server.go:1489-1490`) | **No.** Credential resolution runs before the call |
+| `500 Streaming failed: ...` (`internal/server/server.go:2508`) | **No.** On both adapters this error can only be raised before a single token could be generated — see below |
+| `500 Completion failed: ...` (`internal/server/server.go:1976`) | **Unknowable from the response.** Some causes billed, some not, and a retry can make it several |
 | `200` whose stream ends in an `error` event | **Yes.** Tokens were generated and billed; you were handed a truncated answer |
 | `200` | Yes, as expected |
 
@@ -225,8 +345,8 @@ scan blocks returns `403 response blocked by content policy` **after** a
 successful, paid vendor call, and a scan that errors returns
 `500 response content scan failed` in the same position. Neither can happen here.
 Blocking is gated on `block_on_critical`, which the configuration this gateway
-loads sets to `false` for both directions (`configs/config.yaml:111`,
-`configs/config.yaml:119`), and `ShouldBlock` returns false outright when that
+loads sets to `false` for both directions (`configs/config.yaml:529`,
+`configs/config.yaml:537`), and `ShouldBlock` returns false outright when that
 flag is off (`internal/gatekeeper/gatekeeper.go:515-516`); the scan-error path is
 gated on `GATEKEEPER_FAIL_OPEN`, which the live ConfigMap sets to `"true"`
 (re-read 2026-09-23). If either setting is ever changed, a paid `403` becomes
@@ -246,11 +366,19 @@ guards the pin and nothing else. Everywhere else the coupling stays indirect,
 and the places where it breaks are where the surprises live.
 
 The inputs are ordered, and the order is deliberate. Reading downward, each layer
-may override the one above it:
+may override the one above it. A few names in the diagram are explained fully
+later and need only a clause here. **Rule selection** is a route rule's choice of
+ranking strategy, which, when present, is consulted before the ordinary one.
+`expected_cost` is a ranking strategy that prices each vendor from how long that
+model's answers have measurably run, rather than from your `max_tokens`;
+`weighted` splits traffic between vendors by fixed proportions. `specific` is the
+ordinary strategy used when your model name identifies exactly one vendor, which
+is every request on this gateway today. `escapePin` is the step that takes over
+when a pinned vendor cannot be used.
 
 ```mermaid
 flowchart TD
-  A["POST /v1/chat/completions"] --> B["policy resolution<br/>internal/server/server.go:1085-1148<br/>pin · chain · constraints · selection · gates · limits"]
+  A["POST /v1/chat/completions"] --> B["policy resolution<br/>internal/server/server.go:1097-1160<br/>pin · chain · constraints · selection · gates · limits"]
   B --> R["model registry rewrite<br/>internal/routing/router.go:95<br/>INERT — not configured"]
   R --> C["determineStrategy<br/>internal/routing/router.go:541"]
   C --> D{"rule selection?<br/>internal/routing/router.go:612"}
@@ -263,8 +391,8 @@ flowchart TD
   G --> J["breaker admit<br/>internal/routing/router.go:1316<br/>INERT — off on this gateway"]
   I --> J
   J --> K["affinity, last and weakest<br/>internal/routing/affinity.go:48<br/>INERT — off on this gateway"]
-  K --> L["X-TAS-Router-* headers<br/>internal/server/server.go:1806"]
-  L --> M["vendor call<br/>internal/server/server.go:2494"]
+  K --> L["X-TAS-Router-* headers<br/>internal/server/server.go:1823"]
+  L --> M["vendor call<br/>internal/server/server.go:2545"]
   M -.-> N["route-rule fallback chain<br/>internal/server/fallback.go:44<br/>UNREACHABLE — no caller"]
   classDef inert fill:#eee,stroke:#999,stroke-dasharray:4 3,color:#555
   class R,J,K,N inert
@@ -301,18 +429,20 @@ through `gateway.aiqg.tas.scharber.com` on 2026-08-27 and the outcome was read
 from the response, the log, or the event — or, for the gateway-configuration
 rows, that the running Deployment and ConfigMap were read directly rather than
 inferred from a manifest in the repository. *Source* means it was read from the
-code at `dc1957b` and no live traffic exercised it. That distinction earns its
-place here: this same document found four configuration knobs that parse cleanly,
+code at `b702931` and no live traffic exercised it. That distinction earns its
+place here: this same document found four configuration knobs (the four rows
+marked "None" in the gateway-configuration table below — a different count from
+the five impossible causes above) that parse cleanly,
 validate at startup, and change nothing, so "the code says so" is weaker evidence
 than it looks.
 
-**No *Observed* row below was re-observed for the 2026-09-23 or 2026-09-24
-refreshes**, both code-only. Each was re-checked a weaker way instead: the code path it rests on
+**No *Observed* request row below was re-observed for the 2026-09-23, 2026-09-24,
+2026-10-02 or 2026-10-05 refreshes**, none of which sent a completion. Each was re-checked a weaker way instead: the code path it rests on
 was compared against the build that produced it, and none of those paths has lost
 a line. The gateway-configuration rows are the exception — those were re-read
 from the live `llm-router-aiqg` Deployment and the `llm-router-config` ConfigMap
-on 2026-09-23, which is the same evidence that established them, so they are
-current rather than inherited.
+on 2026-09-23 and again on 2026-10-02 and 2026-10-05 (unchanged), which is the same evidence
+that established them, so they are current rather than inherited.
 
 **"Scope" is the column to read before you generalise.** *Gateway* means the row
 holds for every caller — it follows from the deployed model table or from code
@@ -354,22 +484,55 @@ beginning "judged efficacy gate abstained"; only a rule that sets
 
 One consequence of the judged form is worth knowing before you set that floor.
 When the judge model is the same model that served the response, the score is
-still recorded but marked `self_judged` (`internal/server/judge.go:156`), and
+still recorded but marked `self_judged` (`internal/server/judge.go:204`), and
 the aggregate that routing reads leaves those scores out — as it does any score
 that does not carry the flag at all
 (`aiqg-dashboard-be/internal/store/quality.go:182-200`). So a model never votes
 on its own eligibility. The cost is evidence: if your judge is the model you
 serve most, most of that model's judged samples do not count, and a judged floor
 on it is more likely to sit below the sample count and admit it by default than
-to test it. The provenance flag arrived in `dc1957b`, after the build the
-gateway runs (`aiqg-v5.87`), so today's judged scores are written without it.
-`[!UNVERIFIED]` Whether the deployed dashboard already applies the exclusion was
-not checked. If it does, every judged score written until a release that sets
-the flag is deployed counts as self-judged, so no model has judged evidence, and
-every judged floor admits every candidate by default until new scores
-accumulate. Under `on_insufficient_data: exclude` it would reject them all, and
-the routing gate then yields and keeps the whole set rather than fail the request
+to test it. The provenance flag arrived in `dc1957b` and has been written by the
+deployed gateway since `aiqg-v5.88` rolled out on 2026-09-26; judged scores
+written before that date carry no flag, so under the rule above they do not
+count either, and a pair's judged evidence effectively starts from 2026-09-26.
+`[!UNVERIFIED]` Whether the deployed dashboard applies the exclusion was not
+checked for this refresh. The commit that deployed `aiqg-v5.88` reports that it
+does — judge rows carrying all four provenance fields, and self-judged Haiku rows
+showing zero judged samples so the gate abstains — but that is the deployer's
+observation, not one re-taken here. Where a pair has too few judged samples,
+every judged floor admits it by default until new scores accumulate. Under
+`on_insufficient_data: exclude` it would be rejected, and if that empties the
+set the routing gate yields and keeps the whole set rather than fail the request
 (`internal/routing/signals.go:76-110`), so the outcome is the same.
+
+The second thing to know is **which responses the judge has ever seen**. Until
+`db5ae56` it had never scored a streamed response. That was not a decision: the
+judge was called from the non-streaming handler only, and a streamed answer left
+no text anywhere for it to read, because the gateway forwarded each chunk and
+kept only the token counts. Nothing counted the omission either, so a pair
+served mostly by streaming had judged evidence drawn from its non-streaming
+minority alone, and its judged floor was that much likelier to sit at
+"abstained, admitted by default". Since `db5ae56` the gateway keeps the text of each streamed
+answer as it passes, up to a cap of 256 KiB per stream
+(`internal/server/stream_buffer.go:18`), and hands it to the same sampling,
+exclusion and recording path the non-streaming answer uses
+(`internal/server/judge.go:136-149`). Two kinds of streamed answer are refused
+rather than scored, and each is counted under its own exclusion reason: a stream
+that died mid-answer (`stream_error`), because judging a fragment would file a
+vendor failure as poor model quality, and any stream on a gateway whose operator
+switched buffering off (`stream_buffer_disabled`). A stream that hit the cap is
+**not** refused — the judge reads only the first 6,000 bytes of any
+response (`pkg/aiqg/judge/judge.go:136`), so a 256 KiB prefix is all it would
+have read anyway. The cap is set by `AIQG_STREAM_BUFFER_MAX_BYTES`, unset on the
+deployed strict gateway (ConfigMap and Deployment re-read 2026-10-02), so the
+default applies; a negative value turns buffering off. The commit records
+streaming as 0.24% of AIQG events when it was written (15 of 6,219), and calls
+that a selection artifact: the traffic was almost all the gateway's own demo
+generator and probes, which do not stream, while production applications
+usually do. If your traffic streams, expect your pairs' judged sample counts to
+start climbing from 2026-10-02, when a build carrying this change reached the
+strict gateway (see "What is actually running" at the top); streamed answers
+before that date were never judged, and nothing will back-fill them.
 
 **Verbosity** is how long a model's answers tend to be — specifically the mean
 number of output tokens it produces for a given workflow, measured from past
@@ -397,20 +560,23 @@ absent, so `TAS-Workflow: qa` is the same as sending nothing. When you send
 nothing the gateway classifies the request from its shape
 (`internal/workflow/classifier.go:22`) and records that on the event as
 `workflow_inferred`, but routing's measurement lookups read the header only
-(`internal/server/server.go:1142`). That is why the walkthrough below reports
+(`internal/server/server.go:1154`). That is why the walkthrough below reports
 `(no workflow)` while its own event says `single_turn_qa`.
 
 **Controls you set on your tenant or your request**
 
 Every row marked *Observed* in this table was captured on 2026-08-27 against
 image `aiqg-v5.86`; none was re-observed for this refresh. The gateway now runs
-`aiqg-v5.87` (commit `e6c24c0`), whose routing and server code is byte-identical
-to the source cited here — so a row marked *Source* describes what is running,
+`aiqg-v5.94`, whose routing code is byte-identical to the source cited here and
+whose live model list matches the catalog at `3b8526e`, not the larger one at
+`b702931` (see the top for how that was established, and what remains
+inferred) — so a row marked *Source* describes what is running, except where it
+names `b702931`'s catalog,
 and a row marked *Observed* describes what an older build did on one day.
 
 | Control | Effect today | Scope | Evidence (Observed = 2026-08-27, `v5.86`) |
 |---|---|---|---|
-| `model` in the request body | Selects the vendor whenever exactly one vendor advertises the name | Gateway | Observed |
+| `model` in the request body | Selects the vendor whenever exactly one vendor advertises the name. Since `3b8526e` that includes the Claude 5 names, which before it were unknown and failed with a free 503. `b702931` adds thirty-four more names (`gpt-5`, `o3`, `claude-opus-4-8` and others) that still 503 today because it is not deployed | Gateway | Observed (2026-08-27); catalog re-read from live `/v1/models` 2026-10-05 and 2026-10-06 (twelve names); the forty-six-name catalog is Source |
 | `optimize_for` in the body | Never reaches a decision. Every name in the deployed table is served by exactly one vendor, so the strategy is always `specific`, which is chosen before `optimize_for` is consulted; an unknown name fails at selection instead. A rule selection pre-empts it as well | Gateway | Source (reasoning); Observed (ignored, on a rule-carrying tenant) |
 | `retry_config` / `fallback_config` in the body | The only failover that runs. See "The fallback that does work" | Gateway | Observed |
 | `TAS-Conversation-Id` header | No effect — affinity is off gateway-wide, and the recording step is unreachable in code | Gateway | Observed |
@@ -427,15 +593,15 @@ and a row marked *Observed* describes what an older build did on one day.
 **Gateway configuration, which only an operator can change**
 
 These rows are the current ones: every entry marked *Observed* here was re-read
-from the live Deployment and ConfigMap on 2026-09-23, not inherited from the
-August captures.
+from the live Deployment and ConfigMap on 2026-09-23 and re-read unchanged on
+2026-10-02 and 2026-10-05, not inherited from the August captures.
 
-| Setting | Effect today | Evidence (Observed = live config, 2026-09-23) |
+| Setting | Effect today | Evidence (Observed = live config, 2026-09-23, re-read 2026-10-02 and 2026-10-05) |
 |---|---|---|
 | `router.default_strategy` (`LLM_ROUTER_DEFAULT_STRATEGY`) | None. Validated at startup, never read | Source |
 | `router.max_cost_threshold` and body `max_cost` | None. Parsed onto the request, read by nothing | Source |
 | `router.default_retry` / `router.default_fallback` | None. Never applied; only body-level config engages retry | Source |
-| `FEATURE_ADVANCED_ROUTING`, `FEATURE_CIRCUIT_BREAKER` | None. Present in the ConfigMap (both `"true"`, re-read 2026-09-23), absent from the source | Observed (present) / Source (unread) |
+| `FEATURE_ADVANCED_ROUTING`, `FEATURE_CIRCUIT_BREAKER` | None. Present in the ConfigMap (both `"true"`, re-read 2026-09-23, 2026-10-02 and 2026-10-05), absent from the source | Observed (present) / Source (unread) |
 | `registry.enabled` — the model registry | Off, and not reachable without a new image. It is a YAML-only key with no environment binding and no default; the only config file the container reads is `configs/config.yaml` baked into the image, and that file has no `registry:` block. Nothing mounts over it | Source (code + image config + live Deployment spec) |
 | `AIQG_BREAKER_ENABLED` | Unset, so no vendor is ever ejected unless a tenant control enables it. Outcomes are still recorded, which is bookkeeping, not protection | Observed |
 | `AIQG_AFFINITY_ENABLED` | Unset, so affinity is off unless a tenant control enables it | Observed |
@@ -447,7 +613,7 @@ per tenant, so it is worth being exact about what that means for you. The contro
 is not a request header and not a body field; nothing you can put in a request
 reaches it. It arrives on the policy bundle that the dashboard backend returns
 when the gateway resolves your tenant's policy, alongside your route rules
-(`internal/middleware/aiqg.go:1303-1308`), and the router folds it over the
+(`internal/middleware/aiqg.go:1306-1311`), and the router folds it over the
 gateway default at the moment each feature is consulted
 (`internal/routing/router.go:915-917`). So it is set where route rules are set —
 the dashboard, under Governance → Policies → Routing, which holds runtime
@@ -459,19 +625,20 @@ gains a breaker or affinity line only when one of them actually moved a decision
 
 **Facts about the code that no configuration can change**
 
-Rows marked *Source* here are current as of `dc1957b`, which for these files is
-the same code the gateway is running. Rows marked *Observed* are from the
-2026-08-27 captures against image `aiqg-v5.86`.
+Rows marked *Source* here are current as of `b702931`, which for the code paths
+these rows describe is the same code the gateway is running. Rows marked
+*Observed* are from the 2026-08-27 captures against image `aiqg-v5.86`.
 
-| Fact | Consequence | Evidence (Source = `dc1957b`; Observed = 2026-08-27, `v5.86`) |
+| Fact | Consequence | Evidence (Source = `b702931`; Observed = 2026-08-27, `v5.86`, unless dated) |
 |---|---|---|
 | `completeWithFallback` has no reachable caller | The rule chain, pre-flight context check, tenant output cap, and served-affinity recording all never run | Source (call graph) confirmed by Observed: an over-window prompt that the pre-flight check would have caught was forwarded to the vendor and returned 200 |
 | `round_robin` is unreachable | Nothing can select it; it is not an option | Source. `determineStrategy` returns only the other three and no other caller sets it; no configuration path reaches the constant |
-| Vendor adapters refuse to price unknown models | An unrecognised model name fails at selection with 503 rather than routing anywhere | Observed, twice |
+| Vendor adapters refuse to price unknown models | An unrecognised model name fails at selection with 503 rather than routing anywhere | Observed, twice; and once more on 2026-10-04 in Loki, a `claude-opus-5-5` request on `aiqg-v5.91` (before the Claude 5 catalog) recorded as `http_status: 503`, `end_to_end_ms: 3`, no `vendor` |
 | A chain tier replaces the model as well as the vendor | Were the chain live, your response could name a model you did not send | Source |
 | Body-level fallback does not re-check that vendor and model agree | A `fallback_config` retry re-sends your model name to a vendor that does not serve it, so cross-vendor fallback cannot succeed on this gateway | Observed |
 | A pin *is* now checked against your model | A rule pinning a vendor that does not advertise your model is dropped with a recorded reason rather than producing a paid 500. A vendor whose model list is empty is exempt — an empty list means "cannot tell", not "serves nothing" | Source |
 | Streaming never retries | `retry_config` is not consulted on the streaming path, and no `RecordOutcome` call is made there. Since 2026-09 a stream that dies mid-answer ends with an explicit error event instead of the ordinary terminator | Source |
+| Streamed answers are judged since `db5ae56` | A streamed answer now enters the same judged-efficacy sample as a non-streamed one, except a stream that died mid-answer, which is refused and counted. Before 2026-10-02 no streamed answer was ever judged | Source; the buffer's counter observed on the live metrics endpoint 2026-10-02 |
 
 The rest of this document explains each of these. If you read only the table,
 the two rows that will cost you time are the unreachable chain and the abstaining
@@ -480,17 +647,42 @@ the two rows that will cost you time are the unreachable chain and the abstainin
 ## How it works end to end
 
 A completion arrives at `handleChatCompletion`
-(`internal/server/server.go:1063`). All three completion surfaces — the OpenAI
+(`internal/server/server.go:1075`). All three completion surfaces — the OpenAI
 chat surface, `/v1/messages`, and `/v1/responses` — translate their bodies and
-then call this one function (`internal/server/anthropic_messages.go:509` and
+then call this one function (`internal/server/anthropic_messages.go:609` and
 `internal/server/responses_api.go:339`), so everything below applies identically
 to all three.
 
+What the translation carries changed in `3b8526e`, and it is worth one paragraph
+because it looks as though it ought to affect routing and does not. A
+`/v1/messages` `system` field sent as several blocks used to be concatenated into
+one string; it is now kept as a block array, with any `cache_control` breakpoint
+each block carried (`internal/server/anthropic_messages.go:353`), and a single
+plain block still collapses to a string. Breakpoints on content blocks and on
+tool definitions now survive translation as well
+(`internal/server/anthropic_messages.go:82`,
+`internal/server/anthropic_messages.go:109`). The commit records why: Claude
+Code's first system block is an `x-anthropic-billing-header:` marker, and once
+merged into one block with everything behind it, the vendor discarded the whole
+block — a 6,318-token system prompt billed as 14 tokens, measured 2026-10-03,
+returning 200 with a plausible answer. None of this moves a routing decision. The
+feature filter treats only `image_url` parts as requiring a capability
+(`internal/routing/router.go:1069`), so a system prompt arriving as text blocks
+selects exactly the vendor a string would have. Two limits remain. A request
+whose `model` belongs to OpenAI receives the blocks as ordinary text parts and
+loses the breakpoints, since that adapter has nowhere to put them. And a
+breakpoint's `ttl` is carried but not honoured: the pinned Anthropic SDK
+(`v1.7.0`) has no TTL field, so a `1h` request is sent as the vendor's 5-minute
+default (`internal/providers/anthropic/provider.go:851-855`). That matters to
+the cache economics in "Why it stays put" below — a warm prefix this gateway
+creates stays warm for five minutes, whatever you asked for.
+
 Before routing runs, the handler resolves your tenant's policy onto the request
-context (`internal/server/server.go:1085-1148`): a provider pin, per-request
+context (`internal/server/server.go:1097-1160`): a provider pin, per-request
 resilience overrides, tenant feature controls, context and output limits, quality
-gates, a selection strategy with its hysteresis settings — the margin an
-alternative must beat before a switch is allowed — and its measured verbosity
+gates, a selection strategy with its hysteresis settings — *hysteresis* being
+deliberate reluctance to switch: the margin an alternative must beat before a
+switch is allowed — and its measured verbosity
 table, and a fallback chain with the tenant's vendor constraints. These ride the
 context rather than the request body on purpose — the request body is serialised
 toward a vendor, and routing metadata must never end up in a vendor payload
@@ -500,7 +692,7 @@ That policy comes from a synchronous call to the dashboard backend, and it
 happens **twice** per request. The first resolution runs at receipt, before the
 model is known. The second runs at routing time, once the model and the inferred
 workflow are available, so that rules targeting a model or a workflow can match
-at all (`internal/server/server.go:1085`,
+at all (`internal/server/server.go:1097`,
 `internal/middleware/aiqg.go:796`). Both calls carry a two-second timeout
 (`pkg/aiqg/policy/policy.go:167`), and the second one **fails silently**: on any
 error it returns and leaves the receipt-time resolution in place
@@ -579,47 +771,200 @@ target for it to prefer is on the unreachable branch described below.
 
 `isSpecificProviderRequested` (`internal/routing/router.go:560`) counts how many
 registered vendors advertise the name you sent and returns true only when the
-count is exactly one (`internal/routing/router.go:570`). On the deployed gateway
-the model table is assembled from two places, neither of which an operator can
-edit without a new image. The Anthropic three come from `configs/config.yaml`
-baked into the container, which the image's own start command loads
-(`docker/Dockerfile:96`); the OpenAI three come from the compiled-in defaults
-(`internal/config/config.go:461-520`), because that file's `openai:` block is
-commented out and so never overrides them. The deployment's ConfigMap carries no
-model list at all. The two sources agree on every price and window, and together
-they give six names across two vendors with no overlap:
+count is exactly one (`internal/routing/router.go:570`). That makes the model
+table the single most consequential input in this section: a name in it routes
+to its owner, and a name outside it fails. There are two tables to know about
+right now, because the one in the source and the one being served have
+diverged.
 
-| Name | Vendor | Input per 1k | Output per 1k | Context window |
-|---|---|---|---|---|
-| `gpt-4o` | openai | $0.005 | $0.015 | 128,000 |
-| `gpt-4o-mini` | openai | $0.00015 | $0.0006 | 128,000 |
-| `gpt-3.5-turbo` | openai | $0.0015 | $0.002 | 16,385 |
-| `claude-opus-4-6` | anthropic | $0.015 | $0.075 | 1,000,000 |
-| `claude-sonnet-4-6` | anthropic | $0.003 | $0.015 | 1,000,000 |
-| `claude-haiku-4-5-20251001` | anthropic | $0.0008 | $0.004 | 200,000 |
+**What is served today.** On the deployed gateway the model table is assembled
+from two places, neither of which an operator can edit without a new image. The
+nine Anthropic names come from `configs/config.yaml` baked into the container,
+which the image's own start command loads (`docker/Dockerfile:96`); the OpenAI
+three come from the compiled-in defaults, because in the build that is running
+that file's `openai:` block is commented out and so never overrides them. The
+live Deployment sets no `command` or `args` and mounts nothing over `/app/configs`
+(read 2026-10-06), so that start command is what runs. The deployment's ConfigMap
+carries no model list at all. Together they give twelve names across two vendors
+with no overlap. The prices and windows below are what the running gateway
+itself reports from `GET /v1/capabilities`, read 2026-10-06 at 00:29 UTC — an
+unauthenticated read like `/v1/models` below — and the last column is what
+`b702931` changes once it is deployed:
 
-You do not have to take that table on trust, and you should not — every value in
-it ships inside the image, so it changes with a deployment rather than with a
-config edit you can see.
+| Name | Vendor | Input per 1k | Output per 1k | Context window | At `b702931` (not deployed) |
+|---|---|---|---|---|---|
+| `gpt-4o` | openai | $0.005 | $0.015 | 128,000 | $0.0025 / $0.010 |
+| `gpt-4o-mini` | openai | $0.00015 | $0.0006 | 128,000 | unchanged |
+| `gpt-3.5-turbo` | openai | $0.0015 | $0.002 | 16,385 | $0.0005 / $0.0015 |
+| `claude-fable-5-1` | anthropic | $0.010 | $0.050 | 1,000,000 | unchanged |
+| `claude-opus-5-5` | anthropic | $0.004 | $0.020 | 1,000,000 | unchanged |
+| `claude-opus-5` | anthropic | $0.005 | $0.025 | 1,000,000 | unchanged |
+| `claude-sonnet-5-5` | anthropic | $0.002 | $0.010 | 1,000,000 | unchanged |
+| `claude-sonnet-5` | anthropic | $0.002 | $0.010 | 1,000,000 | unchanged |
+| `claude-haiku-4-5` | anthropic | $0.001 | $0.005 | 200,000 | unchanged; see OPS-52 below |
+| `claude-opus-4-6` | anthropic | $0.015 | $0.075 | 1,000,000 | $0.005 / $0.025 |
+| `claude-sonnet-4-6` | anthropic | $0.003 | $0.015 | 1,000,000 | unchanged |
+| `claude-haiku-4-5-20251001` | anthropic | $0.001 | $0.005 | 200,000 | unchanged |
+
+**What `b702931` ships.** The commit replaces both halves with one generated
+catalog of forty-six names — fourteen Anthropic, thirty-two OpenAI — written
+identically into `configs/config.yaml` (OpenAI from `configs/config.yaml:58`,
+Anthropic from `configs/config.yaml:381`), the compiled-in defaults
+(`internal/config/config.go:467-1021`) and the event-cost table in
+`pkg/clear/cost.go`. The OpenAI block in the file is no longer commented out, so
+once deployed both vendors' names come from the file and the defaults are a
+mirror. The thirty-four names it adds, all *Source* until a build carrying it is
+served, grouped where they share a price:
+
+| Names added in `b702931` | Vendor | Input per 1k | Output per 1k |
+|---|---|---|---|
+| `claude-fable-5` | anthropic | $0.010 | $0.050 |
+| `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-5-20251101` | anthropic | $0.005 | $0.025 |
+| `claude-sonnet-4-5-20250929` | anthropic | $0.003 | $0.015 |
+| `gpt-6-astra` | openai | $0.010 | $0.050 |
+| `gpt-6.1-sol`, `gpt-6-sol` | openai | $0.002 | $0.010 |
+| `gpt-6-luna` | openai | $0.0001 | $0.0005 |
+| `gpt-5.6-sol` | openai | $0.004 | $0.020 |
+| `gpt-5.6-terra` | openai | $0.002 | $0.012 |
+| `gpt-5.6-luna` | openai | $0.0002 | $0.0012 |
+| `gpt-5.5` | openai | $0.005 | $0.030 |
+| `gpt-5.5-pro`, `gpt-5.4-pro` | openai | $0.030 | $0.180 |
+| `gpt-5.4` | openai | $0.0025 | $0.015 |
+| `gpt-5.4-mini` | openai | $0.00075 | $0.0045 |
+| `gpt-5.4-nano` | openai | $0.0002 | $0.00125 |
+| `gpt-5.3-codex`, `gpt-5.2` | openai | $0.00175 | $0.014 |
+| `gpt-5.2-pro` | openai | $0.021 | $0.168 |
+| `gpt-5.1`, `gpt-5` | openai | $0.00125 | $0.010 |
+| `gpt-5-mini` | openai | $0.00025 | $0.002 |
+| `gpt-5-nano` | openai | $0.00005 | $0.0004 |
+| `gpt-5-pro` | openai | $0.015 | $0.120 |
+| `gpt-4.1`, `o3` | openai | $0.002 | $0.008 |
+| `gpt-4.1-mini` | openai | $0.0004 | $0.0016 |
+| `gpt-4.1-nano` | openai | $0.0001 | $0.0004 |
+| `o1` | openai | $0.015 | $0.060 |
+| `o1-pro` | openai | $0.150 | $0.600 |
+| `o3-mini`, `o4-mini` | openai | $0.0011 | $0.0044 |
+
+Still no name is listed under both vendors, so the multi-vendor case below stays
+impossible as shipped. The scope is deliberate and written down in the pull
+request: of the OpenAI chat models these accounts can see, forty-two were left
+out, each for a stated reason — dated snapshots priced the same as their base
+name, legacy names with no current published rate, `codex` variants with no
+per-token rate, `-chat-latest` floating aliases (rejected for the same reason
+this organisation rejects a floating image tag: you cannot say what is running),
+and one model billed per minute. A name in that excluded set will still 503 here
+after the deploy.
+
+Until the deploy, the thirty-four new names behave exactly as `claude-opus-5-5`
+did before `3b8526e`, described next: they match no vendor and fail free. The
+pull request's own account of the old outcome for a name such as `gpt-5` — that
+it "could be handed to the wrong vendor" — has the same answer as the one below.
+
+The first six Anthropic rows of the served table arrived in `3b8526e` (#239), and with them a real
+change in where a request goes. Before it, `claude-opus-5-5` — the name Claude
+Code sends — matched no vendor, so it took the unknown-name path described below
+and failed with a free 503: one such request on `aiqg-v5.91`, 2026-10-04, is in
+Loki as `http_status: 503`, `end_to_end_ms: 3`, and no `vendor`. Now exactly one
+vendor advertises it, so the strategy is `specific` and the request goes to
+Anthropic. The commit message describes the old outcome as falling through to
+cost selection where it "could be handed to the wrong vendor"; on this gateway
+that could not complete, because cost selection drops every vendor that cannot
+price the name and neither adapter could. The event above is the evidence that it
+did not.
+
+**`claude-haiku-4-5` is a known phantom, kept on purpose.** The undated alias is
+not in Anthropic's own model list for this account, and `b702931` keeps it anyway,
+because removing an advertised name changes routing for anyone already pinning
+it. Whether Anthropic still accepts it could not be tested, because the
+account's Anthropic balance is at zero (OPS-51); the question is filed as OPS-52.
+It matters beyond your own requests: the health probe uses it (see "provider
+anthropic is not healthy" in Failure modes).
+
+**Prices: what was wrong, and what it did and did not move.** Two price tables
+matter here, and they are not the same table: the router's estimate reads the
+catalog above, while the cost on an event reads a separate table in
+`pkg/clear/cost.go`. `3b8526e` corrected Haiku 4.5 — both Haiku rows were
+$0.0008 / $0.004 per 1k until then, about 20% under the vendor's rate, so every
+pre-flight estimate for that model was low by the same fraction, and so was the
+cost on its events; the walkthrough below predates that and shows the old figure.
+The same commit added a test keeping the two tables equal for every name in
+`configs/config.yaml` (`internal/config/catalog_pricing_test.go:21`). It did not
+cover the three OpenAI names, which in the running build live only in the
+compiled-in defaults, and those two tables disagree on the deployed gateway:
+`gpt-4o` is $0.005 / $0.015 in the catalog it serves and $0.0025 / $0.010 in the
+event-cost table (`pkg/clear/cost.go:58` at `b702931`; the deployed table already
+carried that rate), and `gpt-3.5-turbo` is three times high on input. For those
+OpenAI models, the estimate header and the event's cost are computed from
+different prices today. `claude-opus-4-6` is the other wrong row, and worse: both
+tables in the running build carry $0.015 / $0.075 (the catalog's figure observed
+above, the event table's read from source), the rate of the retired
+Opus 4.1, so its estimates *and* its event costs are three times what the vendor
+charges.
+
+`b702931` fixes all three (`pkg/clear/cost.go:58`, `pkg/clear/cost.go:60`,
+`pkg/clear/cost.go:75`, and the matching catalog rows) and makes the drift that
+hid the OpenAI two a test failure: `TestDefaultCatalogMatchesYAML`
+(`internal/config/catalog_pricing_test.go:46`) now walks both vendors and
+compares rates rather than presence. It also bumps the event field
+`model_pricing_version` to `pricing-v2026-10-05` (`pkg/clear/cost.go:11`), which
+is how you will tell a corrected event from an uncorrected one.
+
+The event-cost table feeds the Cost score of the Cost, Latency, Efficacy,
+Assurance, Reliability (CLEAR) scoring framework, and the commit message
+says the wrong OpenAI prices meant cost routing "was ranking OpenAI models on
+prices CLEAR itself disagreed with". On this gateway that ranking
+never chose anything. Cost routing compares *vendors* for the one model name you
+sent, not models, and with no name listed under two vendors there is only ever
+one priced candidate (see "Why it stays put"). So no request went to a different
+vendor because of these prices; what was wrong was the number in
+`X-TAS-Router-Estimated-Cost` and, for `claude-opus-4-6`, the cost on the event.
+The commit message also says the live pods "mount no config file, so they run
+`setDefaults()`". That holds for OpenAI only: the image's start command loads
+the baked-in file, which in the running build supplies the Anthropic list and
+leaves OpenAI to the defaults, as described above. Its conclusion — that the
+OpenAI defaults were what served — is right either way.
+
+**A context window of 0 means "not advertised", not "zero".** Thirty-four of the
+forty-six entries at `b702931` carry `max_context_window: 0` and
+`max_output_tokens: 0`, because their published limits were not verified. Both
+limit checks treat a non-positive value as no cap
+(`aether-shared/go-aiqg-resilience/limits.go:147-160`,
+`aether-shared/go-aiqg-resilience/limits.go:169-175`). The pull request
+explains why it chose 0 over a guess: the output cap *lowers* your `max_tokens`
+to the advertised value (`internal/routing/limits.go:121-139`), so an understated
+figure would silently truncate your answer, which is worse than asserting
+nothing; filling them in is OPS-53. On this gateway the point is currently moot,
+since both checks run only on the unreachable branch described in "The fallback
+chain, and where it currently stops", but `/v1/capabilities` will report those
+zeros once the build is deployed, and an integrator reading them should not take
+them as limits.
+
+You do not have to take either table on trust, and you should not — every value
+in them ships inside the image, so it changes with a deployment rather than with
+a config edit you can see, and this is exactly the check that tells you whether
+the forty-six-name catalog has reached the gateway yet.
 `GET /v1/models` reports what the running gateway actually advertises, and its
 `owned_by` field is the vendor mapping this whole section is about. It needs no
-authentication, so it works before you have a token:
+authentication, so it works before you have a token. Read on 2026-10-05 at
+23:42 UTC and again on 2026-10-06 at 00:29 UTC, after `b702931` merged, with
+byte-identical output — twelve names, so the new catalog is not served:
 
 ```bash
-curl -sS https://gateway.aiqg.tas.scharber.com/v1/models
-{"object":"list","data":[{"id":"claude-haiku-4-5-20251001","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"gpt-3.5-turbo","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o-mini","object":"model","created":0,"owned_by":"openai"}]}
+curl -sS -k https://gateway.aiqg.tas.scharber.com/v1/models
+{"object":"list","data":[{"id":"claude-fable-5-1","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-haiku-4-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-haiku-4-5-20251001","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-opus-5-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-4-6","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"claude-sonnet-5-5","object":"model","created":0,"owned_by":"anthropic"},{"id":"gpt-3.5-turbo","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o","object":"model","created":0,"owned_by":"openai"},{"id":"gpt-4o-mini","object":"model","created":0,"owned_by":"openai"}]}
 ```
 
 If a name is absent from that list, sending it produces the 503 described below.
 If two entries share an `id` with different owners, you are in the multi-vendor
 case. The endpoint is built from the same capability matrix routing uses
-(`internal/server/server.go:2734`), so it cannot drift from the router's view —
+(`internal/server/server.go:2785`), so it cannot drift from the router's view —
 with one future caveat. The endpoint reads the statically configured model lists
 only; it does not read the model registry. If the registry is ever enabled, an
 alias it resolves will route successfully while remaining absent from this
 listing, and absence will stop meaning "will 503".
 
-So for these six names, `model` does pin the vendor. If that vendor is unhealthy,
+So for these twelve names — and, once `b702931` is deployed, for all forty-six —
+`model` does pin the vendor. If that vendor is unhealthy,
 `routeToSpecificProvider` returns an error rather than substituting
 (`internal/routing/router.go:638-640`) — you get a 503, never a silent swap to a
 different vendor's model.
@@ -630,10 +975,13 @@ Three cases behave differently, and they are worth knowing precisely.
 cost-optimised, and `routeByCost` (`internal/routing/router.go:664`) asks every
 candidate to price the request. Both vendor adapters refuse to price a model they
 do not know (`internal/providers/openai/provider.go:259`,
-`internal/providers/anthropic/provider.go:323`), so the candidate list empties and
+`internal/providers/anthropic/provider.go:372`), so the candidate list empties and
 routing fails with `could not estimate costs for any provider`
 (`internal/routing/router.go:703`). A typo therefore produces a loud 503 before
-any vendor is contacted — confirmed live, twice, below in Failure modes. This
+any vendor is contacted — confirmed live, twice, below in Failure modes. A real
+model the vendor sells but the served table omits, such as `gpt-5` today, takes
+the same path: the adapters price only names in their configured list, so
+"real" does not help until the name is in the table. This
 contradicts the design note that anticipated a silent fall-through to the
 cheapest vendor; the cost estimator's refusal to price unknown models closes that
 hole as a side effect.
@@ -667,7 +1015,7 @@ different reason.
 
 This is the collision the mental model warns about, and it has a definite answer.
 A rule's routing target carries a provider and, optionally, a model
-(`internal/server/server.go:1092-1097`). When the target names **both**, your
+(`internal/server/server.go:1104-1109`). When the target names **both**, your
 `model` is overwritten before routing begins and the two agree by construction —
 your response comes back with a model you did not send, which the
 `X-TAS-Router-Model` header reports.
@@ -833,14 +1181,14 @@ attempt actually failed.
 
 That walk lives in `completeWithFallback` (`internal/server/fallback.go:44`), and
 on the deployed gateway it does not execute. `handleChatCompletion` dispatches to
-`handleNonStreamingCompletionWithRetry` (`internal/server/server.go:1411`), which
+`handleNonStreamingCompletionWithRetry` (`internal/server/server.go:1428`), which
 calls `attemptCompletionWithRetryAndFallback`
-(`internal/server/server.go:2494`) — a separate, older path driven by the
+(`internal/server/server.go:2545`) — a separate, older path driven by the
 client-supplied `retry_config` and `fallback_config` body fields.
 `completeWithFallback` has exactly one caller,
-`handleNonStreamingCompletion` (`internal/server/server.go:1755`), which in turn
+`handleNonStreamingCompletion` (`internal/server/server.go:1772`), which in turn
 has one caller inside `handleStreamingCompletion`
-(`internal/server/server.go:1881`) — and `handleStreamingCompletion` has no
+(`internal/server/server.go:1922`) — and `handleStreamingCompletion` has no
 callers at all. The whole branch is unreachable.
 
 Four behaviours ride on that branch and therefore do not run today: the
@@ -853,7 +1201,7 @@ was confirmed live, not only read: a 70,000-character prompt sent to
 window, which `CheckLimits` (`internal/routing/limits.go:96`) would have flagged;
 the gateway returned HTTP 200 having sent the request to OpenAI unchanged.
 Passive outlier detection still *records* outcomes on the live path
-(`internal/server/server.go:2563`), so that data is not lost — but recording
+(`internal/server/server.go:2614`), so that data is not lost — but recording
 without ejection changes no routing decision. Do not count it as a safeguard.
 
 ### The fallback that does work
@@ -880,26 +1228,29 @@ Four properties of this path will decide whether it is any use to you.
 
 **There is no upper bound on `max_attempts`.** The type comment says 1–5
 (`internal/types/requests.go:202`), and the code clamps only the lower end
-(`internal/server/server.go:2533-2538`). A request asking for 50 attempts gets 50.
+(`internal/server/server.go:2584-2589`). A request asking for 50 attempts gets 50.
 
 **Retryability is substring matching on the error text.** With
 `retryable_errors` omitted, an error is retried when its text contains `timeout`,
 `connection`, `unavailable`, or `rate limit`
-(`internal/server/server.go:2674-2678`). Supplying your own list replaces those
+(`internal/server/server.go:2725-2729`). Supplying your own list replaces those
 four entirely. This is textual, not status-code based, so it is only as stable as
 the wording each vendor SDK produces.
 
 **The fallback ignores the three fields that shape it.**
-`getFallbackProviders` (`internal/server/server.go:2691`) returns every registered
+`getFallbackProviders` (`internal/server/server.go:2742`) returns every registered
 vendor except the one that failed. It reads none of `preferred_chain`,
 `max_cost_increase`, or `require_same_features` — its own comment calls it a
 simplified implementation that ought to use the router's chain logic.
 
 **Your model name is not rewritten for the new vendor.** The fallback re-attempts
-with the request untouched (`internal/server/server.go:2602`). With the shipped
+with the request untouched (`internal/server/server.go:2653`). With the shipped
 model table, where no name is served by both vendors, the second vendor is
 therefore always asked for a model it does not have. Cross-vendor fallback cannot
-succeed on this gateway as configured. Observed:
+succeed on this gateway as configured. Observed (the `TAS-Cache: no-store`
+request header, used in this and every later capture, tells the gateway to skip
+its response cache so the request is actually routed rather than answered from a
+stored copy):
 
 ```bash
 curl -sS -k -w '\nHTTP %{http_code}\n' https://gateway.aiqg.tas.scharber.com/v1/chat/completions \
@@ -922,7 +1273,7 @@ log lines, from Loki, show the attempt and the give-up:
 
 The `Request routed` line for that request also shows what an unbounded
 `max_tokens` does to the estimate: `"cost":1.9999980000000002`, which is
-999,999 output tokens at `gpt-3.5-turbo` prices. The estimate is used to rank
+999,999 output tokens at `gpt-3.5-turbo`'s served price of $0.002 per 1k output (at the `b702931` price, not yet deployed, it would be about $1.50). The estimate is used to rank
 candidates, and no threshold anywhere rejects it.
 
 So the usable configuration is same-vendor retry: set `retry_config`, leave
@@ -997,7 +1348,7 @@ was wrong to suggest one could.** It recommended
 `["connection", "unavailable"]` on the grounds that those match only failures
 which never reached the model. They do not. The match is
 `strings.Contains` against the error text
-(`internal/server/server.go:2671-2687`), and the text is whatever the vendor SDK
+(`internal/server/server.go:2722-2738`), and the text is whatever the vendor SDK
 and the Go runtime produced, wrapped as `<vendor> api call failed: ...`
 (`internal/providers/openai/provider.go:133`). The substring knows nothing about
 how far the request got. Three real transport error strings show why. These are
@@ -1039,7 +1390,7 @@ inference:
 set from the router's own metadata, whose retry loop runs inside selection
 (`internal/routing/router.go:334-404`) and returns on the first healthy candidate.
 The loop that makes repeat vendor calls
-(`internal/server/server.go:2543`) never updates it. A request retried three times
+(`internal/server/server.go:2594`) never updates it. A request retried three times
 against one vendor still reports `1`. Treat the header as "did selection retry",
 not "how many generations you paid for".
 
@@ -1055,13 +1406,13 @@ text to tell a throttle from a bad key.
 
 **Streaming never retries, and a truncated answer used to be invisible.** A
 streaming request is served by `handleStreamingCompletionWithRetry`
-(`internal/server/server.go:2454`) despite the name: it calls
+(`internal/server/server.go:2500`) despite the name: it calls
 `attemptStreamingWithFallback`, whose own comment says "no mid-stream retry"
-(`internal/server/server.go:2512`). Your `retry_config` is not consulted on that
+(`internal/server/server.go:2563`). Your `retry_config` is not consulted on that
 path at any point, and unlike the non-streaming path it makes no `RecordOutcome`
 call, so a streaming failure still contributes nothing to the breaker's
 bookkeeping. A streaming failure before the first byte returns a **third** error
-string, `500 Streaming failed: ...` (`internal/server/server.go:2462`); a failure
+string, `500 Streaming failed: ...` (`internal/server/server.go:2508`); a failure
 after the stream has opened cannot change the status code at all, because the 200
 was already written. If you need retry on streaming, it has to be yours.
 
@@ -1071,7 +1422,7 @@ the upstream connection breaks (`internal/providers/openai/provider.go:185`,
 `internal/providers/anthropic/provider.go:208`), and the shared pump renders it in whichever
 dialect you are reading — an OpenAI-shaped `{"error":…}` frame followed by
 `[DONE]`, Anthropic's native `error` event, or the Responses API's `error` event
-(`internal/server/server.go:1832-1836`). Before that, a stream that died halfway
+(`internal/server/server.go:1849-1853`). Before that, a stream that died halfway
 through was closed off with the same normal terminator a completed stream gets —
 `[DONE]` on the OpenAI surface, `message_stop` on the Anthropic one — because the
 handler called its encoder's `done()` whichever way the chunk channel ended. A
@@ -1083,6 +1434,51 @@ because the failed stream is stamped with a `finish_reason` of `error`, which
 scores zero rather than being read as a clean completion
 (`pkg/clear/efficacy.go:42-47`). Neither changes the status code, which is still
 the 200 that was written before the first chunk.
+
+One more streamed outcome looked like success while being something else, and it
+is worth recognising if you have logs from before `78c3cd2` (#242, 2026-10-05).
+When an Anthropic model answered a *streaming* request with a tool call, the
+adapter discarded the tool-call events, so the stream you received carried no
+tool call — on `/v1/messages` it ended `end_turn` with no content blocks at all, a
+complete-looking empty answer you were billed for, since the vendor had generated
+the call. The commit's own measurement is the same request one flag apart:
+non-streaming returned the `tool_use` block, streaming returned nothing, both for
+50 output tokens. It hit every streaming agent against an Anthropic upstream on
+both wire formats, because the conversion sits before format translation. The
+adapter now forwards the tool call's id and name from the block-opening event and
+its argument fragments after it
+(`internal/providers/anthropic/provider.go:311-339`). The same commit fixes the
+token counts a stream on `/v1/messages` *shows you*: `message_start` used to
+say `input_tokens: 0` and carried no cache counts, and now carries the real input
+and cache figures (`internal/server/anthropic_messages.go:877-885`). None of this
+touched routing or what was recorded about the request — the event's token counts
+and cost come from the closing chunk, which always carried the full figures
+(`internal/providers/anthropic/provider.go:229-238`), so the gateway's own cost
+accounting was right while your client's view was not. Retrying such a request
+was a second charge, like any other billed 200.
+
+Since `db5ae56` the shared pump does one more thing as it forwards your chunks:
+it copies their text into a per-stream buffer, capped at 256 KiB, and hands
+that to the quality judge once the stream closes
+(`internal/server/server.go:1862-1919`, `internal/server/server.go:1963`,
+`internal/server/server.go:2541`). The text is buffered before each chunk is
+written to you, and the copy changes nothing you receive — no extra frame, no
+delay you can measure, and nothing about routing. What it changes is the quality
+evidence routing later reads: a streamed answer can now be sampled for a judged
+score, and a stream that died mid-answer is deliberately left out of that
+sample, because its zero is already recorded as structural efficacy and judging
+the fragment would count the same vendor failure a second time as poor model
+quality. See the judged-efficacy definition near the top.
+
+One latent defect came with it, read from source and reproduced with a unit
+probe for this refresh: on a build where the AIQG layer is switched off
+(`AIQG_ENABLED` unset or false), the pump reads the buffer cap from AIQG
+configuration that does not exist, and every streamed request panics as soon as
+the pump starts (`internal/server/server.go:1869`). Neither deployment is
+affected today — both set `AIQG_ENABLED=true` in their shared ConfigMap (read
+2026-10-02), and the permissive `llm-router` still runs a build from before the
+change — but a local or test build with AIQG off will drop every stream after
+the 200 status has been written.
 
 **A failure response carries no timing and no routing detail, so you cannot tell
 a billed failure from a free one.** The `router_metadata` block — and with it
@@ -1111,8 +1507,8 @@ the fact.
 > [!UNVERIFIED] Whether this is a regression or a staged rollout is still not
 > recorded. The chain landed in `626060d` ("walk the fallback chain;
 > `provider_override` becomes a real pin"), and no commit message, code comment,
-> or issue found at `dc1957b` explains why the retry-variant handlers were left
-> calling the older path. Re-checked on this refresh: 89 commits after `39e8d77` the call
+> or issue found at `b702931` explains why the retry-variant handlers were left
+> calling the older path. Re-checked on this refresh: 96 commits after `39e8d77` the call
 > graph is unchanged and nothing has been written down about it. Confirm with the
 > service owner before relying on a configured chain.
 
@@ -1123,15 +1519,23 @@ One request, followed hop by hop with the values it actually produced. Sent on
 no-store` bypasses the response cache so the routing path runs rather than a
 cached answer being replayed.
 
-**These values were not re-captured for the 2026-09-23 or 2026-09-24 refreshes.** They are the
+**These values were not re-captured for the 2026-09-23, 2026-09-24, 2026-10-02 or 2026-10-05 refreshes.** They are the
 original capture, against image `aiqg-v5.86`; the Deployment now names
-`aiqg-v5.87`, whose code is byte-identical to the source cited here. Every hop
+`aiqg-v5.94`, whose routing code is byte-identical to the source cited here. One
+thing in the walkthrough *does* move, and it is the money: Haiku 4.5's price was
+corrected in `3b8526e`, so the estimate in hop 4 and the cost in the correlation
+example below are about 20% lower than the same request would show today. Hop 4
+gives both figures. The running build would also add `schema_requested: false` and `tools_declared: false` to
+this request's response event, since it sent neither a `response_format` nor any
+tools; the request did not stream, so the streaming judge change does not touch
+it either, and nothing else in the walkthrough moves. Every hop
 below was re-read against that source and none of the code it describes has
 changed, so the narrative holds — but the identifiers,
 the timestamps, and the `processing_time` belong to that one request in August
 and will not reproduce. The one number worth re-deriving yourself is the estimate
 in hop 4, because it is the only one you can compute from the price table
-without sending anything.
+without sending anything — and doing so against today's table gives a different
+answer from the header, which is the price correction showing through.
 
 **Getting a token of your own.** Every authenticated example here needs a
 `TAS-Auth` value beginning `tas_qg_live_`, and it is self-serve rather than
@@ -1178,7 +1582,7 @@ requires the header to be present but ignores its value for vendor
 authentication; the vendor key is resolved separately, and this request used the
 shared gateway credential (`credential_source: tas_shared` on the event).
 
-**Hop 1 — policy resolution** (`internal/server/server.go:1085-1148`). The tenant
+**Hop 1 — policy resolution** (`internal/server/server.go:1097-1160`). The tenant
 resolved to `a689c0b2-02ca-46d1-9916-f9a30c00222a`, the workflow classified as
 `single_turn_qa`, and a rule attached a selection block. No pin, no chain, no
 gates were visible in the outcome. Read from the event and the routing reasons;
@@ -1196,8 +1600,10 @@ selection block was present, `routeBySelection` handled the request and the
 estimated as characters over four (`internal/routing/selection.go:187`): the
 34-character prompt gives 8 tokens. No verbosity measurement cleared the
 100-sample floor, so expected output fell back to `max_tokens`, which is 8. At
-haiku's prices that is 8/1000 × $0.0008 + 8/1000 × $0.004 = **$0.0000384**, which
-is exactly the `x-tas-router-estimated-cost` header above. OpenAI was priced too
+haiku's prices as they stood in August that is 8/1000 × $0.0008 + 8/1000 × $0.004
+= **$0.0000384**, which is exactly the `x-tas-router-estimated-cost` header above.
+At the corrected price shipped in `3b8526e` the same request estimates as
+8/1000 × $0.001 + 8/1000 × $0.005 = $0.000048. OpenAI was priced too
 and returned no price for this model name, so it was skipped as unpriced
 (`internal/routing/expected_cost.go:171`).
 
@@ -1207,7 +1613,7 @@ requested model. It did not, so nothing was compared and dwell was not consulted
 
 **Hop 6 — breaker and affinity, both inert.** Neither `AIQG_BREAKER_ENABLED` nor
 `AIQG_AFFINITY_ENABLED` is set on the running pod, and both default to false
-(`internal/config/config.go:723`, `internal/config/config.go:743` read the
+(`internal/config/config.go:1228`, `internal/config/config.go:1248` read the
 environment only when non-empty). A per-tenant control can still enable either;
 this tenant did not. No affinity line appeared in the reasoning, and a two-turn
 test sharing one `TAS-Conversation-Id` moved freely between vendors.
@@ -1243,16 +1649,16 @@ Three surfaces answer this, and they disagree about how much they tell you.
 
 **The response headers** are the fastest answer and the only one a client library
 can act on. They are set before the body is written so they work for streaming
-too (`internal/server/server.go:1806`), and they are listed in
+too (`internal/server/server.go:1823`), and they are listed in
 `Access-Control-Expose-Headers` so browser clients can read them
-(`internal/server/server.go:1036`).
+(`internal/server/server.go:1048`).
 
 | Header | Meaning | Set when |
 |---|---|---|
 | `X-TAS-Router-Provider` | The vendor that served it | provider name is non-empty |
 | `X-TAS-Router-Model` | The model actually sent upstream | model is non-empty |
 | `X-TAS-Router-Request-Id` | The gateway's own request id | request id is non-empty |
-| `X-TAS-Router-Attempt-Count` | Attempts made; 1 means no retry | always |
+| `X-TAS-Router-Attempt-Count` | Attempts *selection* made to find a healthy vendor — **not** the number of vendor calls; a body-level `retry_config` retry is not counted (see "Retry safety") | always |
 | `X-TAS-Router-Fallback-Used` | Present and `true` only after a fallback | fallback occurred |
 | `X-TAS-Router-Estimated-Cost` | Pre-flight estimate in dollars, not the bill | estimate is above zero |
 
@@ -1273,7 +1679,7 @@ below is what separates them.
 One header exists in the source and never reaches you: `X-TAS-Stream-Fallback`,
 set when a streaming request has to be answered as a single JSON body because the
 vendor could not stream. It is set only on `handleStreamingCompletion`
-(`internal/server/server.go:1888`), which is on the unreachable branch described
+(`internal/server/server.go:1929`), which is on the unreachable branch described
 under "The fallback chain". It is also absent from the
 `Access-Control-Expose-Headers` list, so a browser client could not read it even
 if it were sent. Do not build on it.
@@ -1285,9 +1691,9 @@ honoured, whether the breaker moved you, whether affinity held, why a switch was
 refused. This is the surface to read when the vendor name alone does not explain
 what happened. Streaming responses do not carry it — the headers are all a
 streaming client gets, by design, because the synthetic first chunk that used to
-carry this broke strict SDK stream parsers (`internal/server/server.go:1801-1805`).
+carry this broke strict SDK stream parsers (`internal/server/server.go:1818-1822`).
 The live streaming handler sets those headers from the same helper before writing
-the status line (`internal/server/server.go:2477`), so they are as reliable there
+the status line (`internal/server/server.go:2523`), so they are as reliable there
 as on a normal response; it is only the reasoning that is lost.
 
 Three fields joined that block in 2026-09 and you will not see any of them today,
@@ -1406,6 +1812,13 @@ curl -sS -k -G 'https://loki.tas.scharber.com/loki/api/v1/query_range' \
 
 The second `|=` filter is what separates the pair: the request event's identifier
 appears in both members, so without it the query can return either one.
+
+`actual_cost_usd` is 15 prompt and 5 completion tokens at the August Haiku price
+(15 × $0.0008 + 5 × $0.004 per 1k). It is computed from the event-cost table
+(`pkg/aiqg/events/builder.go:594`), which `3b8526e` corrected, so the same
+request today records $0.00004. Events stamp the table's version as
+`model_pricing_version`, `pricing-v2026-10-04` on the deployed build and `pricing-v2026-10-05` at `b702931` (`pkg/clear/cost.go:11`); compare
+that field rather than the dollar figure when two events for one model disagree.
 
 **Whether you can run these at all is a network question, not a permissions one.**
 The Loki ingress carries no authentication of any kind — checked on the live
@@ -1553,7 +1966,7 @@ unwired — which is exactly what happened.
 
 **Configuration that looks live and is not.** Four knobs read as routing controls
 and change nothing. `router.default_strategy` is parsed and validated at startup
-(`internal/config/config.go:955`) and never consulted, because
+(`internal/config/config.go:1460`) and never consulted, because
 `determineStrategy` hard-codes cost optimisation as its default
 (`internal/routing/router.go:554`). `router.max_cost_threshold` and a request's
 `max_cost` field are parsed onto the request
@@ -1614,7 +2027,7 @@ curl -sS -k -w '\nHTTP %{http_code}\n' https://gateway.aiqg.tas.scharber.com/v1/
 HTTP 503
 ```
 
-Fix: send one of the six names in the table above, or have the model added to the
+Fix: send one of the twelve names `GET /v1/models` lists today (the forty-six at `b702931` once deployed), or have the model added to the
 gateway's table. Confirm by re-sending and reading `X-TAS-Router-Provider`.
 Nothing was billed — the event for this request shows `end_to_end_ms: 4` and no
 `vendor` field.
@@ -1635,6 +2048,33 @@ every 30 seconds (`internal/routing/router.go:162`), so recovery is visible with
 one interval at `https://gateway.aiqg.tas.scharber.com/health`, which lists each
 vendor's status and last probe latency.
 
+One property of the probe decides who this failure hits. It is a one-token
+completion sent with the gateway's own vendor credential
+(`internal/providers/anthropic/provider.go:442-460`), and health is one verdict
+per vendor for the whole gateway. So anything wrong with the *gateway's* account
+— not only an outage at the vendor — marks the vendor unhealthy for every
+tenant, including one whose own stored key would have worked, because the health
+filter runs before your credential is chosen. That is not hypothetical. On
+2026-10-05 Loki recorded Anthropic probe failures in namespace `tas-llm-router`
+(both deployments share it) at several hundred an hour from about 20:00 UTC, with `400 Bad Request … Your credit balance is too low to
+access the Anthropic API`, and response events for Claude models on `aiqg-v5.92`
+in the same window include 503s with no `vendor`. `[!UNVERIFIED]` That those
+503s carried `provider anthropic is not healthy` is inferred: the gateway does
+not log the routing error text, and `/health` read at 23:42 UTC reported
+Anthropic healthy, so the verdict was alternating rather than fixed. Since
+`3b8526e` the probe model is the undated `claude-haiku-4-5`, because the probe
+takes the first catalog name containing "haiku"
+(`internal/providers/anthropic/provider.go:470-480`) and that name now comes
+first. `b702931` keeps it ahead of the dated `claude-haiku-4-5-20251001` in the
+new catalog, so the probe will go on using it after that deploy — and the same
+commit records that this alias is absent from Anthropic's model list for the
+account (OPS-52). The probe's own comment says why that matters: a probe naming a
+model the vendor rejects marks the whole vendor unhealthy. `[!UNVERIFIED]`
+Whether Anthropic accepts the alias is not known; every Anthropic probe failure
+in Loki over the three hours to 2026-10-06T00:29Z is the credit-balance `400`,
+none a not-found, but the vendor may refuse a zero-balance account (OPS-51)
+before it looks at the model name, so the absence of a not-found proves nothing.
+
 **Routing failed: no healthy providers available.** HTTP 503. No vendor passed
 the health filter (`internal/routing/router.go:667`). With ejection off, the only
 way to reach this is for the active probe to have failed against every vendor at
@@ -1653,7 +2093,7 @@ the tools from the request and accept that the images will not arrive. This
 string is quoted from source; no live request was sent to produce it.
 
 **Completion failed: ...** HTTP 500. Selection succeeded and the vendor call did
-not (`internal/server/server.go:1930`). The vendor's own message is wrapped
+not (`internal/server/server.go:1976`). The vendor's own message is wrapped
 inside, so read past the prefix. This is the one row of the billing rule in
 "Mental model" that you cannot resolve: it covers a rejection the model produced,
 a transport failure that never reached the model, and a timeout that arrived
@@ -1673,7 +2113,7 @@ now escapes the pin before any vendor is dialled.
 
 **Streaming failed: ...** HTTP 500, and the only 500 on this gateway you can be
 sure was free. It is raised when the stream could not be opened at all
-(`internal/server/server.go:2462`) — which on the Anthropic adapter can only be a
+(`internal/server/server.go:2508`) — which on the Anthropic adapter can only be a
 malformed request and on the OpenAI adapter can only be a connect failure or the
 vendor's own rejection of the request, both before generation. Your
 `retry_config` is not consulted here, so this is a single attempt regardless of
@@ -1710,7 +2150,7 @@ source; no pinned rule was available to exercise.
 advancing a tier. Cause: the chain walk is unreachable on the deployed handler
 path, as traced above under "The fallback chain". No workaround exists from the
 client side; a client-supplied `fallback_config` in the request body reaches a
-different, older code path (`internal/server/server.go:2586`) that does not honour
+different, older code path (`internal/server/server.go:2637`) that does not honour
 the rule's tier list.
 
 **Your route rules stop applying, with no error.** No error text; the symptom is
@@ -1794,8 +2234,8 @@ content-filter block or a stream that died mid-answer 0
 (`pkg/clear/efficacy.go:38-47`). The broken-stream case was added in 2026-09; a
 truncated stream used to score as a clean completion. That is *structural*
 efficacy; *judged* efficacy, a sampled score from a second model, has its own
-floor and leaves out scores a model gave its own responses — see the definition
-near the top.
+floor, leaves out scores a model gave its own responses, and has covered streamed
+answers only since 2026-10-02 — see the definition near the top.
 
 **Hysteresis** — resistance to changing a decision that is already made. Here it
 means the extra margin an alternative vendor must beat before `expected_cost` is
