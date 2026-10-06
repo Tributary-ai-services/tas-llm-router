@@ -862,3 +862,31 @@ func TestResponseCache_ReasoningIsNotStored(t *testing.T) {
 		t.Error("stripping mutated the live response; the client would lose its thinking block")
 	}
 }
+
+// The `anthropic-beta` header may be repeated AND comma-separated in the same
+// request; Claude Code sends nine values at once.
+func TestParseBetaHeader(t *testing.T) {
+	got := parseBetaHeader([]string{
+		"claude-code-20250219,oauth-2025-04-20",
+		" context-1m-2025-08-07 , interleaved-thinking-2025-05-14 ",
+		"context-1m-2025-08-07", // duplicate across headers
+		"",
+	})
+	want := []string{
+		"claude-code-20250219",
+		"oauth-2025-04-20",
+		"context-1m-2025-08-07",
+		"interleaved-thinking-2025-05-14",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("beta %d = %q, want %q (order is preserved so the vendor sees them as sent)", i, got[i], want[i])
+		}
+	}
+	if parseBetaHeader(nil) != nil {
+		t.Error("no header must produce no betas, not an empty slice that serialises")
+	}
+}

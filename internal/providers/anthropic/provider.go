@@ -77,6 +77,73 @@ func (p *AnthropicProvider) GetProviderName() string {
 }
 
 // GetCapabilities returns the capabilities of the Anthropic provider
+// forwardableBetas is the DECLARED set of `anthropic-beta` values this gateway
+// will pass upstream, with the reason each one is safe recorded beside it.
+//
+// An allowlist rather than passthrough, because a beta can change the RESPONSE
+// wire shape and this gateway parses every response rather than proxying it.
+// An unparseable response is a 500 for the caller, which is a worse outcome
+// than not having the feature -- so an unrecognised beta is dropped and
+// counted, never forwarded hopefully.
+//
+// Measured 2026-10-06 from a captured Claude Code request: it sends NINE of
+// these at once. Six are deliberately not forwarded.
+var forwardableBetas = map[string]string{
+	// The headline: without it a request over 200k tokens is rejected outright,
+	// and it changes nothing about the response shape.
+	"context-1m-2025-08-07": "larger context window; no wire-format change",
+
+	// Changes where thinking blocks appear relative to tool calls. Safe only
+	// since RT-6/RT-7 taught both directions to carry them -- it would have
+	// produced blocks this gateway silently dropped before today.
+	"interleaved-thinking-2025-05-14": "thinking interleaved with tool use; blocks are handled since RT-7",
+
+	// Opt-in for a 1h cache TTL. Currently INERT and recorded as such rather
+	// than advertised: types.CacheControl carries TTL, but the pinned SDK
+	// v1.7.0 has no field to send it, so the vendor behaves identically with
+	// or without this header. Forwarded anyway so that the SDK upgrade is the
+	// only change needed later, not two.
+	"extended-cache-ttl-2025-04-11": "1h cache TTL; inert until the SDK carries ttl",
+}
+
+// The six NOT forwarded, and why -- recorded because "we dropped it" is only
+// useful with a reason: `oauth-2025-04-20` (the client's own auth path with the
+// vendor; we authenticate with our key or the tenant's), `claude-code-20250219`
+// and `advisor-tool-2026-03-01` (introduce server-side behaviour and tools this
+// gateway does not translate), `context-management-2025-06-27` (server-side
+// context edits change the response shape), `prompt-caching-scope-2026-01-05`
+// (unverified interaction with our own cache_control handling) and
+// `thinking-token-count-2026-05-13` (plausibly useful, semantics unverified).
+// Each is a candidate to add once someone measures what it does to a response.
+
+// betaOptions renders the forwardable betas as a per-request header option.
+// Returns nothing when the caller sent none that survive the allowlist, so an
+// ordinary request is byte-identical to what it was before this existed.
+func betaOptions(req *types.ChatRequest) []option.RequestOption {
+	if req == nil || len(req.Betas) == 0 {
+		return nil
+	}
+	h := betaHeaderFor(req.Betas)
+	if h == "" {
+		return nil
+	}
+	return []option.RequestOption{option.WithHeader("anthropic-beta", h)}
+}
+
+// betaHeaderFor returns the comma-joined subset of req.Betas this gateway is
+// willing to forward, and counts every value it drops.
+func betaHeaderFor(betas []string) string {
+	var keep []string
+	for _, b := range betas {
+		if _, ok := forwardableBetas[b]; ok {
+			keep = append(keep, b)
+			continue
+		}
+		metrics.ParamDroppedTotal.WithLabelValues("anthropic", "anthropic_beta").Inc()
+	}
+	return strings.Join(keep, ",")
+}
+
 // minThinkingBudget is the vendor's floor for an explicit thinking budget
 // (1024 tokens). Below it the request is rejected, so a smaller ask cannot be
 // honoured and is recorded as a drop instead.
@@ -148,7 +215,7 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *types.ChatR
 	ctx = instrumentation.Attach(ctx)
 
 	// Make the API call
-	resp, err := p.clientFor(ctx).Messages.New(ctx, *anthropicReq)
+	resp, err := p.clientFor(ctx).Messages.New(ctx, *anthropicReq, betaOptions(req)...)
 	if err != nil {
 		p.logger.WithError(err).Error("Anthropic API call failed")
 		return nil, fmt.Errorf("anthropic api call failed: %w", err)
@@ -173,7 +240,7 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 	ctx = instrumentation.Attach(ctx)
 
 	// Create the streaming request
-	stream := p.clientFor(ctx).Messages.NewStreaming(ctx, *anthropicReq)
+	stream := p.clientFor(ctx).Messages.NewStreaming(ctx, *anthropicReq, betaOptions(req)...)
 
 	// Create our response channel
 	chunks := make(chan *types.ChatChunk, 100)

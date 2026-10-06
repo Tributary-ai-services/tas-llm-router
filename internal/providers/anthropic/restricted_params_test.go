@@ -1,9 +1,14 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 )
@@ -257,5 +262,88 @@ func TestThinking_SignedBlockIsReplayed(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("replayed thinking lost %q:\n%s", want, b)
 		}
+	}
+}
+
+// Beta forwarding (AIQG-43 item 1). The gateway re-serialises every request
+// rather than proxying it, so a header the caller set reaches the vendor only
+// if something puts it back — and nothing did, so `context-1m` never arrived
+// and a request over 200k tokens was rejected outright.
+func TestBetaHeader_ForwardsOnlyTheAllowlist(t *testing.T) {
+	// Exactly what a captured Claude Code request carries, all nine.
+	got := betaHeaderFor([]string{
+		"claude-code-20250219",
+		"oauth-2025-04-20",
+		"interleaved-thinking-2025-05-14",
+		"context-management-2025-06-27",
+		"context-1m-2025-08-07",
+		"extended-cache-ttl-2025-04-11",
+		"prompt-caching-scope-2026-01-05",
+		"thinking-token-count-2026-05-13",
+		"advisor-tool-2026-03-01",
+	})
+	for _, want := range []string{"context-1m-2025-08-07", "interleaved-thinking-2025-05-14", "extended-cache-ttl-2025-04-11"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("allowlisted beta %q was not forwarded: %q", want, got)
+		}
+	}
+	// An unrecognised beta can change the RESPONSE shape, and this gateway
+	// parses every response — an unparseable one is a 500 for the caller.
+	for _, never := range []string{"oauth-2025-04-20", "claude-code-20250219", "context-management-2025-06-27", "advisor-tool-2026-03-01"} {
+		if strings.Contains(got, never) {
+			t.Errorf("forwarded %q, which is not on the allowlist: %q", never, got)
+		}
+	}
+}
+
+func TestBetaHeader_NoneSurvivingMeansNoHeader(t *testing.T) {
+	if h := betaHeaderFor([]string{"oauth-2025-04-20"}); h != "" {
+		t.Errorf("want no header when nothing survives, got %q", h)
+	}
+	if opts := betaOptions(&types.ChatRequest{Betas: []string{"oauth-2025-04-20"}}); opts != nil {
+		t.Error("an unforwardable beta must add no request option at all")
+	}
+	// The ordinary case: a caller who sent no betas must produce a request
+	// byte-identical to what it was before this feature existed.
+	if opts := betaOptions(&types.ChatRequest{}); opts != nil {
+		t.Error("no betas must mean no options")
+	}
+}
+
+// The header has to survive the SDK, not just our own function, so this asserts
+// what actually lands on the wire.
+func TestBetaHeader_ReachesTheWire(t *testing.T) {
+	var seen string
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		seen = r.Header.Get("anthropic-beta")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001",
+			"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+			"usage":{"input_tokens":5,"output_tokens":2}}`))
+	}))
+	defer srv.Close()
+
+	p := NewAnthropicProvider(&AnthropicConfig{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+		Models:  []types.ModelInfo{{Name: "claude-haiku-4-5-20251001", ProviderModelID: "claude-haiku-4-5-20251001"}},
+	}, logrus.New())
+
+	_, err := p.ChatCompletion(context.Background(), &types.ChatRequest{
+		Model:     "claude-haiku-4-5-20251001",
+		MaxTokens: ip(16),
+		Messages:  []types.Message{{Role: "user", Content: "hi"}},
+		Betas:     []string{"context-1m-2025-08-07", "oauth-2025-04-20"},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one upstream call, got %d", calls)
+	}
+	if seen != "context-1m-2025-08-07" {
+		t.Errorf("wire header = %q, want only the allowlisted beta", seen)
 	}
 }

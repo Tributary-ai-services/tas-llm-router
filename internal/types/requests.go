@@ -28,6 +28,13 @@ type ChatRequest struct {
 	RequiredFeatures []string         `json:"required_features,omitempty"`
 	MaxCost          *float64         `json:"max_cost,omitempty"`
 
+	// Betas is the client's `anthropic-beta` header, split on commas. Carried
+	// because the gateway re-serialises every request rather than proxying it,
+	// so a header the caller set reaches the vendor only if something puts it
+	// back. Which of these are actually forwarded is the provider's decision,
+	// not the caller's -- see the allowlist in the Anthropic provider.
+	Betas []string `json:"betas,omitempty"`
+
 	// Thinking is the client's extended-thinking request. Carried as our own
 	// type rather than the vendor's because the two generations disagree about
 	// how to express it: pre-4.7 models take {type:"enabled", budget_tokens:N},
