@@ -23,15 +23,36 @@ type ProviderCapabilities struct {
 }
 
 type ModelInfo struct {
-	Name               string  `json:"name" yaml:"name"`
-	DisplayName        string  `json:"display_name" yaml:"display_name"`
-	MaxContextWindow   int     `json:"max_context_window" yaml:"max_context_window"`
-	MaxOutputTokens    int     `json:"max_output_tokens" yaml:"max_output_tokens"`
-	SupportsFunctions  bool    `json:"supports_functions" yaml:"supports_functions"`
-	SupportsVision     bool    `json:"supports_vision" yaml:"supports_vision"`
-	SupportsStructured bool    `json:"supports_structured_output" yaml:"supports_structured_output"`
-	InputCostPer1K     float64 `json:"input_cost_per_1k" yaml:"input_cost_per_1k"`
-	OutputCostPer1K    float64 `json:"output_cost_per_1k" yaml:"output_cost_per_1k"`
+	Name               string `json:"name" yaml:"name"`
+	DisplayName        string `json:"display_name" yaml:"display_name"`
+	MaxContextWindow   int    `json:"max_context_window" yaml:"max_context_window"`
+	MaxOutputTokens    int    `json:"max_output_tokens" yaml:"max_output_tokens"`
+	SupportsFunctions  bool   `json:"supports_functions" yaml:"supports_functions"`
+	SupportsVision     bool   `json:"supports_vision" yaml:"supports_vision"`
+	SupportsStructured bool   `json:"supports_structured_output" yaml:"supports_structured_output"`
+
+	// RestrictedParams marks models whose vendor refuses the classic sampling
+	// parameters. BOTH vendors have such a generation, and the restricted set
+	// differs, so each provider applies its own rules off this one flag.
+	// Measured 2026-10-06, one parameter at a time against each vendor:
+	//
+	//	OpenAI (gpt-5/5.x/6, o1, o3, o3-mini, o4-mini):
+	//	  max_tokens -> 400, use max_completion_tokens
+	//	  top_p, frequency_penalty, presence_penalty, stop -> 400 unsupported
+	//	  temperature -> only the default 1; seed is fine
+	//
+	//	Anthropic (opus-4-7/4-8/5/5-5, sonnet-5/5-5, fable-5/5-1):
+	//	  temperature, top_p, top_k -> 400 "deprecated for this model"
+	//	  stop_sequences and max_tokens -> fine (unlike OpenAI)
+	//
+	// DECLARED here rather than inferred from the model name: a prefix rule is
+	// a guess that silently mis-handles the next family either vendor ships,
+	// and this catalog is generated from one table so declaring it is free. An
+	// unknown model falls back to the classic set, which is the pre-RT-5
+	// behaviour and so cannot regress a model that works today. See RT-5.
+	RestrictedParams bool    `json:"restricted_params,omitempty" yaml:"restricted_params"`
+	InputCostPer1K   float64 `json:"input_cost_per_1k" yaml:"input_cost_per_1k"`
+	OutputCostPer1K  float64 `json:"output_cost_per_1k" yaml:"output_cost_per_1k"`
 
 	// Provider-specific model info
 	ProviderModelID string   `json:"provider_model_id,omitempty" yaml:"provider_model_id"`

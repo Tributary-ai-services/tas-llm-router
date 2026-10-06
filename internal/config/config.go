@@ -479,6 +479,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -491,6 +492,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -503,6 +505,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -515,6 +518,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -527,6 +531,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -539,6 +544,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -551,6 +557,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -563,18 +570,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-				},
-				// added 2026-10-05
-				{
-					Name:               "gpt-5.5-pro",
-					ProviderModelID:    "gpt-5.5-pro",
-					InputCostPer1K:     0.03000,
-					OutputCostPer1K:    0.18000,
-					MaxContextWindow:   0,
-					MaxOutputTokens:    0,
-					SupportsFunctions:  true,
-					SupportsVision:     true,
-					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -587,6 +583,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -599,6 +596,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -611,30 +609,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-				},
-				// added 2026-10-05
-				{
-					Name:               "gpt-5.4-pro",
-					ProviderModelID:    "gpt-5.4-pro",
-					InputCostPer1K:     0.03000,
-					OutputCostPer1K:    0.18000,
-					MaxContextWindow:   0,
-					MaxOutputTokens:    0,
-					SupportsFunctions:  true,
-					SupportsVision:     true,
-					SupportsStructured: true,
-				},
-				// added 2026-10-05
-				{
-					Name:               "gpt-5.3-codex",
-					ProviderModelID:    "gpt-5.3-codex",
-					InputCostPer1K:     0.00175,
-					OutputCostPer1K:    0.01400,
-					MaxContextWindow:   0,
-					MaxOutputTokens:    0,
-					SupportsFunctions:  true,
-					SupportsVision:     true,
-					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -647,18 +622,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-				},
-				// added 2026-10-05
-				{
-					Name:               "gpt-5.2-pro",
-					ProviderModelID:    "gpt-5.2-pro",
-					InputCostPer1K:     0.02100,
-					OutputCostPer1K:    0.16800,
-					MaxContextWindow:   0,
-					MaxOutputTokens:    0,
-					SupportsFunctions:  true,
-					SupportsVision:     true,
-					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -671,6 +635,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -683,6 +648,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -695,6 +661,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -707,18 +674,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-				},
-				// added 2026-10-05
-				{
-					Name:               "gpt-5-pro",
-					ProviderModelID:    "gpt-5-pro",
-					InputCostPer1K:     0.01500,
-					OutputCostPer1K:    0.12000,
-					MaxContextWindow:   0,
-					MaxOutputTokens:    0,
-					SupportsFunctions:  true,
-					SupportsVision:     true,
-					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -800,18 +756,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
-				},
-				// added 2026-10-05
-				{
-					Name:               "o1-pro",
-					ProviderModelID:    "o1-pro",
-					InputCostPer1K:     0.15000,
-					OutputCostPer1K:    0.60000,
-					MaxContextWindow:   0,
-					MaxOutputTokens:    0,
-					SupportsFunctions:  true,
-					SupportsVision:     true,
-					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -824,6 +769,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -836,6 +782,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -848,6 +795,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 			},
 			Timeout: 120 * time.Second,
@@ -864,6 +812,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -876,6 +825,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-opus-5-5",
@@ -887,6 +837,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-opus-5",
@@ -898,6 +849,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -910,6 +862,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// added 2026-10-05
 				{
@@ -922,6 +875,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				// rate CORRECTED 2026-10-05: was 0.015/0.075
 				{
@@ -957,6 +911,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-sonnet-5",
@@ -968,6 +923,7 @@ func (c *Config) setDefaults() {
 					SupportsFunctions:  true,
 					SupportsVision:     true,
 					SupportsStructured: true,
+					RestrictedParams:   true,
 				},
 				{
 					Name:               "claude-sonnet-4-6",
@@ -992,7 +948,7 @@ func (c *Config) setDefaults() {
 					SupportsVision:     true,
 					SupportsStructured: true,
 				},
-				// NOT in the account model list - see OPS-52
+				// unlisted alias, probed and valid 2026-10-05 (OPS-52)
 				{
 					Name:               "claude-haiku-4-5",
 					ProviderModelID:    "claude-haiku-4-5",

@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -12,6 +13,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 )
 
 // OpenAIProvider implements the LLMProvider interface for OpenAI
@@ -74,6 +76,22 @@ func (p *OpenAIProvider) GetProviderName() string {
 }
 
 // GetCapabilities returns the capabilities of the OpenAI provider
+// hasRestrictedParams reports whether a model takes OpenAI's restricted
+// restricted-era parameter set. It reads the DECLARED catalog flag rather than
+// pattern-matching the name: a prefix rule is a guess that silently
+// mis-handles the next family OpenAI ships, and this catalog is generated from
+// one table so declaring it costs nothing. An unknown model falls back to the
+// classic parameter set, which is the pre-RT-5 behaviour and therefore cannot
+// regress a model that works today.
+func (p *OpenAIProvider) hasRestrictedParams(model string) bool {
+	for _, m := range p.config.Models {
+		if strings.EqualFold(m.Name, model) || strings.EqualFold(m.ProviderModelID, model) {
+			return m.RestrictedParams
+		}
+	}
+	return false
+}
+
 func (p *OpenAIProvider) GetCapabilities() types.ProviderCapabilities {
 	return types.ProviderCapabilities{
 		ProviderName:              "openai",
@@ -543,21 +561,63 @@ func (p *OpenAIProvider) convertToOpenAIRequest(req *types.ChatRequest) (*openai
 		Stream:   req.Stream,
 	}
 
-	// Set optional fields
+	// Set optional fields.
+	//
+	// The restricted-era models (gpt-5/5.x/6, o1, o3, o4) take a RESTRICTED
+	// parameter set, measured against the vendor 2026-10-06 one parameter at a
+	// time: max_tokens is rejected in favour of max_completion_tokens, and
+	// top_p / frequency_penalty / presence_penalty / stop are rejected
+	// outright, while temperature accepts only its default of 1. Sending any of
+	// them is a hard 400 from OpenAI that surfaces to the caller as a 500, so
+	// the request must be shaped rather than passed through.
+	//
+	// Dropping is the only way to serve these at all -- the vendor will not
+	// accept the value -- but a silently dropped temperature changes the answer
+	// the caller gets, so each drop is COUNTED. A rising
+	// aiqg_openai_param_dropped_total is callers asking for determinism or
+	// penalties and not getting them, which is otherwise invisible.
+	restricted := p.hasRestrictedParams(req.Model)
+
 	if req.Temperature != nil {
-		openaiReq.Temperature = *req.Temperature
+		// Only the default is accepted, and the SDK omits the zero value, so an
+		// explicit 1 and an absent field are the same request on the wire.
+		if !restricted || *req.Temperature == 1 {
+			openaiReq.Temperature = *req.Temperature
+		} else {
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "temperature").Inc()
+		}
 	}
 	if req.MaxTokens != nil {
-		openaiReq.MaxTokens = *req.MaxTokens
+		if restricted {
+			openaiReq.MaxCompletionTokens = *req.MaxTokens
+		} else {
+			openaiReq.MaxTokens = *req.MaxTokens
+		}
 	}
 	if req.TopP != nil {
-		openaiReq.TopP = *req.TopP
+		if !restricted {
+			openaiReq.TopP = *req.TopP
+		} else {
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "top_p").Inc()
+		}
 	}
 	if req.FrequencyPenalty != nil {
-		openaiReq.FrequencyPenalty = *req.FrequencyPenalty
+		if !restricted {
+			openaiReq.FrequencyPenalty = *req.FrequencyPenalty
+		} else {
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "frequency_penalty").Inc()
+		}
 	}
 	if req.PresencePenalty != nil {
-		openaiReq.PresencePenalty = *req.PresencePenalty
+		if !restricted {
+			openaiReq.PresencePenalty = *req.PresencePenalty
+		} else {
+			metrics.ParamDroppedTotal.WithLabelValues("openai", "presence_penalty").Inc()
+		}
+	}
+	if restricted && len(openaiReq.Stop) > 0 {
+		openaiReq.Stop = nil
+		metrics.ParamDroppedTotal.WithLabelValues("openai", "stop").Inc()
 	}
 	if req.Seed != nil {
 		openaiReq.Seed = req.Seed

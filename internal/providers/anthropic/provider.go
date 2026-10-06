@@ -17,6 +17,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/metrics"
 )
 
 // AnthropicProvider implements the LLMProvider interface for Anthropic Claude
@@ -76,6 +77,21 @@ func (p *AnthropicProvider) GetProviderName() string {
 }
 
 // GetCapabilities returns the capabilities of the Anthropic provider
+// hasRestrictedParams reports whether a model is in Anthropic's 4.7+
+// generation, which refuses temperature, top_p and top_k. It reads the
+// DECLARED catalog flag rather than pattern-matching the name, for the same
+// reason the OpenAI side does: a prefix rule mis-handles the next family
+// silently. An unknown model falls back to sending the parameters, which is
+// the pre-RT-5 behaviour and so cannot regress a model that works today.
+func (p *AnthropicProvider) hasRestrictedParams(model string) bool {
+	for _, m := range p.config.Models {
+		if strings.EqualFold(m.Name, model) || strings.EqualFold(m.ProviderModelID, model) {
+			return m.RestrictedParams
+		}
+	}
+	return false
+}
+
 func (p *AnthropicProvider) GetCapabilities() types.ProviderCapabilities {
 	return types.ProviderCapabilities{
 		ProviderName:              "anthropic",
@@ -641,12 +657,47 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 		anthropicReq.MaxTokens = 1024 // Anthropic requires max_tokens
 	}
 
+	// The 4.7+ generation (opus-4-7/4-8/5/5-5, sonnet-5/5-5, fable-5/5-1)
+	// rejects temperature, top_p and top_k as "deprecated for this model" --
+	// a hard 400 that reaches the caller as a 500. Measured 2026-10-06 one
+	// parameter at a time; stop_sequences and max_tokens are still fine here,
+	// which is where this differs from OpenAI's restricted set. Temperature 1
+	// is accepted and so is preserved rather than dropped.
+	//
+	// Dropping is the only way to serve the request, but a caller that asked
+	// for temperature 0 and silently got the default gets a different answer
+	// -- and on this platform that also changes cache behaviour and what the
+	// judge scores -- so each drop is counted. See RT-5.
+	restricted := p.hasRestrictedParams(req.Model)
+
 	if req.Temperature != nil {
-		anthropicReq.Temperature = anthropic.Float(float64(*req.Temperature))
+		if !restricted || *req.Temperature == 1 {
+			anthropicReq.Temperature = anthropic.Float(float64(*req.Temperature))
+		} else {
+			metrics.ParamDroppedTotal.WithLabelValues("anthropic", "temperature").Inc()
+		}
 	}
 
+	// Anthropic refuses temperature and top_p TOGETHER on every model -- 400
+	// "`temperature` and `top_p` cannot both be specified for this model.
+	// Please use only one." Either alone is fine. Measured 2026-10-06 on
+	// claude-haiku-4-5, i.e. on an UNrestricted model, so this is independent
+	// of the 4.7+ restriction above and breaks the older models too.
+	//
+	// OpenAI accepts both, so an OpenAI-shaped client that sets both is a
+	// perfectly ordinary request here and must not 500. temperature wins
+	// because it is the knob nearly every client sets and the one callers
+	// reason about; top_p is the specialist alternative. The drop is counted,
+	// so "we ignored your top_p" is visible rather than silent.
 	if req.TopP != nil {
-		anthropicReq.TopP = anthropic.Float(float64(*req.TopP))
+		switch {
+		case restricted:
+			metrics.ParamDroppedTotal.WithLabelValues("anthropic", "top_p").Inc()
+		case anthropicReq.Temperature.Valid():
+			metrics.ParamDroppedTotal.WithLabelValues("anthropic", "top_p_with_temperature").Inc()
+		default:
+			anthropicReq.TopP = anthropic.Float(float64(*req.TopP))
+		}
 	}
 
 	if len(req.Stop) > 0 {
