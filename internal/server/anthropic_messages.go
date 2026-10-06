@@ -643,6 +643,25 @@ func (s *Server) writeAnthropicError(w http.ResponseWriter, status int, errType,
 	})
 }
 
+// parseBetaHeader splits one or more `anthropic-beta` header values into
+// individual beta names. The header may be repeated AND comma-separated in the
+// same request, and Claude Code sends nine of them at once.
+func parseBetaHeader(values []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, v := range values {
+		for _, raw := range strings.Split(v, ",") {
+			b := strings.TrimSpace(raw)
+			if b == "" || seen[b] {
+				continue
+			}
+			seen[b] = true
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 // handleMessages implements POST /v1/messages: parse the native Anthropic body,
 // translate to the internal ChatRequest, mark the context so the shared
 // completion handlers render Anthropic-shaped output, and hand off to the full
@@ -658,6 +677,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		s.writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	// The `anthropic-beta` header is request metadata, not body content, so it
+	// is read here rather than in the body parser. It survives the hand-off
+	// because the internal request is re-marshaled below.
+	chatReq.Betas = parseBetaHeader(r.Header.Values("anthropic-beta"))
+
 	buf, err := json.Marshal(chatReq)
 	if err != nil {
 		s.writeAnthropicError(w, http.StatusInternalServerError, "api_error", "internal translation error")
