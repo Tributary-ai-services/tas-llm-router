@@ -28,6 +28,14 @@ type ChatRequest struct {
 	RequiredFeatures []string         `json:"required_features,omitempty"`
 	MaxCost          *float64         `json:"max_cost,omitempty"`
 
+	// Thinking is the client's extended-thinking request. Carried as our own
+	// type rather than the vendor's because the two generations disagree about
+	// how to express it: pre-4.7 models take {type:"enabled", budget_tokens:N},
+	// while the 4.7+ generation REJECTS budget_tokens outright and runs
+	// adaptive thinking when the parameter is simply absent. The provider
+	// decides which shape to send; this records only what the caller asked for.
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+
 	// Retry and fallback controls
 	RetryConfig    *RetryConfig    `json:"retry_config,omitempty"`
 	FallbackConfig *FallbackConfig `json:"fallback_config,omitempty"`
@@ -46,16 +54,33 @@ type Message struct {
 	// message level as well as block level because the common case — "cache
 	// everything through the end of my system prompt" — is awkward to express
 	// when Content is a plain string, which is how most callers send it.
-	CacheControl *CacheControl          `json:"cache_control,omitempty"`
-	ToolCalls    []ToolCall             `json:"tool_calls,omitempty"`
-	ToolCallID   string                 `json:"tool_call_id,omitempty"` // For tool result messages (role=tool)
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`     // Per-message metadata (e.g. trust: "pre_scanned")
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+	// Reasoning holds extended-thinking blocks for this turn, kept OUT of
+	// Content on purpose: Content is what the OpenAI-shaped surface renders as
+	// a string, and folding reasoning into it would change that wire format for
+	// every existing client. The Anthropic renderer emits these; the OpenAI one
+	// ignores them, which is the correct behaviour for a format that has no
+	// equivalent.
+	Reasoning  []ContentPart          `json:"reasoning,omitempty"`
+	ToolCalls  []ToolCall             `json:"tool_calls,omitempty"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"` // For tool result messages (role=tool)
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`     // Per-message metadata (e.g. trust: "pre_scanned")
 }
 
 type ContentPart struct {
-	Type     string    `json:"type"` // "text" or "image_url"
+	Type     string    `json:"type"` // "text" | "image_url" | "thinking" | "redacted_thinking"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
+	// Thinking and Signature carry an extended-thinking block through the
+	// gateway. The signature is what makes the block REPLAYABLE: the vendor
+	// verifies it when the block is sent back in a later turn, so a block
+	// forwarded without its signature is worse than one dropped — it looks
+	// like reasoning the model can trust and is rejected.
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	// Data is a redacted_thinking block's opaque payload. It is not readable
+	// and must be round-tripped verbatim.
+	Data string `json:"data,omitempty"`
 	// CacheControl marks this block as a vendor prompt-cache breakpoint.
 	//
 	// Until this field existed the gateway DROPPED a client's cache_control
@@ -64,6 +89,29 @@ type ContentPart struct {
 	// (tas-llm-router#100). We even read cache-token usage back, reporting a
 	// saving we could never request.
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// ThinkingConfig is a client's extended-thinking request.
+//
+// Why this is not a passthrough of the vendor's own type: the pinned SDK can
+// express only {type:"enabled", budget_tokens:N} and {type:"disabled"}, and
+// `adaptive` — the only form the 4.7+ generation accepts — has no
+// representation in it at all. That turns out not to matter, because on those
+// models thinking is ON by default and omitting the parameter runs it
+// adaptively. So the translation is: pass a budget to the models that take
+// one, and send nothing to the models that do not. Carrying the caller's
+// intent in our own type is what lets the provider make that decision per
+// model instead of at the boundary.
+type ThinkingConfig struct {
+	// Type is "enabled", "disabled" or "adaptive" (what a modern client sends).
+	Type string `json:"type"`
+	// BudgetTokens is meaningful only for "enabled", and only on models that
+	// still accept it. Must be below max_tokens and at least 1024.
+	BudgetTokens int `json:"budget_tokens,omitempty"`
+	// Display is the client's visibility preference ("omitted" | "summarized" |
+	// "updates"). Carried so it is not silently lost; the pinned SDK cannot
+	// send it, which is recorded as a drop rather than ignored.
+	Display string `json:"display,omitempty"`
 }
 
 // CacheControl is a vendor prompt-cache breakpoint: "cache everything up to and

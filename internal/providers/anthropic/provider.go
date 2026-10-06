@@ -77,6 +77,11 @@ func (p *AnthropicProvider) GetProviderName() string {
 }
 
 // GetCapabilities returns the capabilities of the Anthropic provider
+// minThinkingBudget is the vendor's floor for an explicit thinking budget
+// (1024 tokens). Below it the request is rejected, so a smaller ask cannot be
+// honoured and is recorded as a drop instead.
+const minThinkingBudget = 1024
+
 // hasRestrictedParams reports whether a model is in Anthropic's 4.7+
 // generation, which refuses temperature, top_p and top_k. It reads the
 // DECLARED catalog flag rather than pattern-matching the name, for the same
@@ -700,6 +705,66 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 		}
 	}
 
+	// Extended thinking (RT-6, built on RT-5's declared-restriction flag).
+	//
+	// The two generations disagree about how to ask for it, and the pinned SDK
+	// can express only one of the two forms:
+	//   pre-4.7  : {type:"enabled", budget_tokens:N} — accepted, so passed on.
+	//   4.7+     : budget_tokens is REJECTED (400) and {type:"disabled"} is too;
+	//              thinking is on by default and omitting the parameter runs it
+	//              ADAPTIVELY, which is what a modern client wants anyway.
+	// So the restricted branch sends nothing — and that is the fix, not a
+	// concession: the caller asked for extended thinking and gets it, chosen by
+	// the model instead of by a budget the model would refuse. `adaptive` has no
+	// representation in SDK v1.7.0 at all, so this is also the only form
+	// available without an SDK upgrade.
+	//
+	// Every divergence from what was asked is counted, because thinking changes
+	// the answer, the latency and the bill, and a silent substitution here would
+	// be indistinguishable from the pre-RT-6 behaviour of dropping it entirely.
+	if t := req.Thinking; t != nil {
+		switch {
+		case restricted:
+			// Omit: the vendor runs adaptive thinking. Record what was elided.
+			if t.BudgetTokens > 0 {
+				metrics.ParamDroppedTotal.WithLabelValues("anthropic", "thinking_budget").Inc()
+			}
+			if strings.EqualFold(t.Type, "disabled") {
+				// Refusing to disable is the vendor's rule, not ours; counted so
+				// a caller who asked for no thinking can see they got some.
+				metrics.ParamDroppedTotal.WithLabelValues("anthropic", "thinking_disabled").Inc()
+			}
+		case strings.EqualFold(t.Type, "disabled"):
+			anthropicReq.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
+			}
+		case t.BudgetTokens >= minThinkingBudget:
+			budget := int64(t.BudgetTokens)
+			// The budget must stay below max_tokens or the vendor 400s. Clamping
+			// serves the request; dropping to the floor would silently change
+			// the depth asked for, so the clamp is counted either way.
+			if anthropicReq.MaxTokens > 0 && budget >= anthropicReq.MaxTokens {
+				budget = anthropicReq.MaxTokens - 1
+				metrics.ParamDroppedTotal.WithLabelValues("anthropic", "thinking_budget_clamped").Inc()
+			}
+			if budget >= minThinkingBudget {
+				anthropicReq.Thinking = anthropic.ThinkingConfigParamOfEnabled(budget)
+			} else {
+				// max_tokens is too small to leave room for the minimum budget.
+				metrics.ParamDroppedTotal.WithLabelValues("anthropic", "thinking_budget").Inc()
+			}
+		default:
+			// An "enabled"/"adaptive" request with no usable budget on a model
+			// that requires one. Omitting is the only legal shape.
+			metrics.ParamDroppedTotal.WithLabelValues("anthropic", "thinking_budget").Inc()
+		}
+		if t.Display != "" {
+			// The pinned SDK has no field for it; say so rather than imply the
+			// client's visibility choice was honoured.
+			metrics.ParamDroppedTotal.WithLabelValues("anthropic", "thinking_display").Inc()
+		}
+	}
+
 	if len(req.Stop) > 0 {
 		stopSeqs := make([]string, len(req.Stop))
 		copy(stopSeqs, req.Stop)
@@ -816,6 +881,30 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 		// Multimodal message - only handle text parts for now
 		var blocks []anthropic.ContentBlockParamUnion
 		for _, part := range content {
+			// Reasoning blocks first: they must keep their position and their
+			// signature, which is what the vendor verifies on replay.
+			switch part.Type {
+			case "thinking":
+				if part.Signature != "" {
+					blocks = append(blocks, anthropic.ContentBlockParamUnion{
+						OfThinking: &anthropic.ThinkingBlockParam{
+							Thinking: part.Thinking, Signature: part.Signature,
+						},
+					})
+				} else {
+					// Unsigned: the vendor would reject it. Dropping is the only
+					// safe option, and it is counted so the loss is visible.
+					metrics.ParamDroppedTotal.WithLabelValues("anthropic", "thinking_block_unsigned").Inc()
+				}
+				continue
+			case "redacted_thinking":
+				if part.Data != "" {
+					blocks = append(blocks, anthropic.ContentBlockParamUnion{
+						OfRedactedThinking: &anthropic.RedactedThinkingBlockParam{Data: part.Data},
+					})
+				}
+				continue
+			}
 			if part.Type == "text" {
 				blk := anthropic.NewTextBlock(part.Text)
 				// Per-block breakpoint (#100 passthrough): a cache_control on
@@ -970,8 +1059,26 @@ func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message
 	// arguments string verbatim.
 	var textContent strings.Builder
 	var toolCalls []types.ToolCall
+	var reasoning []types.ContentPart
 
 	for _, block := range resp.Content {
+		switch block.Type {
+		case "thinking":
+			// Carried with its signature so the caller can replay the turn. The
+			// text may be empty (display:"omitted" is the vendor default on the
+			// 4.7+ generation) — the signature is the part that matters.
+			tb := block.AsThinking()
+			reasoning = append(reasoning, types.ContentPart{
+				Type: "thinking", Thinking: tb.Thinking, Signature: tb.Signature,
+			})
+			continue
+		case "redacted_thinking":
+			rb := block.AsRedactedThinking()
+			reasoning = append(reasoning, types.ContentPart{
+				Type: "redacted_thinking", Data: rb.Data,
+			})
+			continue
+		}
 		switch block.Type {
 		case "text":
 			textContent.WriteString(block.Text)
@@ -995,6 +1102,7 @@ func (p *AnthropicProvider) convertFromAnthropicResponse(resp *anthropic.Message
 
 	choice.Message.Content = textContent.String()
 	choice.Message.ToolCalls = toolCalls
+	choice.Message.Reasoning = reasoning
 	choices = append(choices, choice)
 
 	// Build usage information

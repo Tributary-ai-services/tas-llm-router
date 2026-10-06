@@ -514,3 +514,99 @@ func TestAnthropicStream_CacheFieldsPresentWhenZero(t *testing.T) {
 		t.Errorf("zero cache fields must still be emitted in message_start:\n%s", out)
 	}
 }
+
+// Extended thinking (RT-6). Claude Code asks for it on every request with a
+// 31,999-token budget; before this the field was discarded by JSON decoding, so
+// the gateway served a measurably weaker model than the caller configured and
+// said nothing. These assert the boundary: the ask survives, and a replayed
+// thinking block keeps the signature that makes it replayable.
+func TestParseAnthropic_ThinkingRequestSurvives(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64000,
+		"thinking":{"type":"enabled","budget_tokens":31999,"display":"omitted"},
+		"messages":[{"role":"user","content":"hi"}]}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.Thinking == nil {
+		t.Fatal("thinking was dropped at the boundary — the caller's ask is invisible from here on")
+	}
+	if req.Thinking.Type != "enabled" || req.Thinking.BudgetTokens != 31999 {
+		t.Errorf("thinking not carried faithfully: %+v", req.Thinking)
+	}
+	if req.Thinking.Display != "omitted" {
+		t.Errorf("display lost: %+v", req.Thinking)
+	}
+}
+
+func TestParseAnthropic_ReplayedThinkingKeepsSignature(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":64,"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":[
+			{"type":"thinking","thinking":"step one","signature":"sig-abc"},
+			{"type":"redacted_thinking","data":"opaque-xyz"},
+			{"type":"text","text":"answer"}
+		]},
+		{"role":"user","content":"and then?"}
+	]}`)
+	req, err := parseAnthropicToChatRequest(body, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	parts, ok := req.Messages[1].Content.([]types.ContentPart)
+	if !ok {
+		t.Fatalf("a turn carrying reasoning must keep its blocks, got %T", req.Messages[1].Content)
+	}
+	var think, redacted *types.ContentPart
+	for i := range parts {
+		switch parts[i].Type {
+		case "thinking":
+			think = &parts[i]
+		case "redacted_thinking":
+			redacted = &parts[i]
+		}
+	}
+	if think == nil {
+		t.Fatal("thinking block dropped on replay")
+	}
+	// The signature is the whole point: the vendor rejects an unsigned block, so
+	// forwarding one without it would be worse than dropping it.
+	if think.Signature != "sig-abc" || think.Thinking != "step one" {
+		t.Errorf("thinking block not preserved verbatim: %+v", think)
+	}
+	if redacted == nil || redacted.Data != "opaque-xyz" {
+		t.Errorf("redacted_thinking payload not round-tripped: %+v", redacted)
+	}
+}
+
+func TestChatResponseToAnthropic_EmitsReasoningBeforeText(t *testing.T) {
+	resp := &types.ChatResponse{
+		ID: "chatcmpl-1", Model: "claude-sonnet-5-5",
+		Choices: []types.Choice{{
+			FinishReason: "stop",
+			Message: types.Message{
+				Role:    "assistant",
+				Content: "the answer",
+				Reasoning: []types.ContentPart{
+					{Type: "thinking", Thinking: "", Signature: "sig-1"},
+				},
+			},
+		}},
+	}
+	msg := chatResponseToAnthropic(resp)
+	if len(msg.Content) != 2 {
+		t.Fatalf("want reasoning + text, got %d blocks: %+v", len(msg.Content), msg.Content)
+	}
+	if msg.Content[0].Type != "thinking" {
+		t.Errorf("reasoning must come first, got %q", msg.Content[0].Type)
+	}
+	// Empty thinking text with a signature is the NORMAL case on 4.7+ models
+	// (display defaults to "omitted"), so the block must survive on the strength
+	// of its signature alone.
+	if msg.Content[0].Signature != "sig-1" {
+		t.Errorf("signature lost in the response: %+v", msg.Content[0])
+	}
+	if msg.Content[1].Type != "text" || msg.Content[1].Text != "the answer" {
+		t.Errorf("answer block wrong: %+v", msg.Content[1])
+	}
+}
