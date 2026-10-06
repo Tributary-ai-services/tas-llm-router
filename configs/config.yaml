@@ -70,6 +70,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-6.1-sol"
         provider_model_id: "gpt-6.1-sol"
@@ -80,6 +81,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-6-sol"
         provider_model_id: "gpt-6-sol"
@@ -90,6 +92,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-6-luna"
         provider_model_id: "gpt-6-luna"
@@ -100,6 +103,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.6-sol"
         provider_model_id: "gpt-5.6-sol"
@@ -110,6 +114,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.6-terra"
         provider_model_id: "gpt-5.6-terra"
@@ -120,6 +125,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.6-luna"
         provider_model_id: "gpt-5.6-luna"
@@ -130,6 +136,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.5"
         provider_model_id: "gpt-5.5"
@@ -140,16 +147,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
-      # added 2026-10-05
-      - name: "gpt-5.5-pro"
-        provider_model_id: "gpt-5.5-pro"
-        input_cost_per_1k: 0.03000
-        output_cost_per_1k: 0.18000
-        max_context_window: 0
-        max_output_tokens: 0
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.4"
         provider_model_id: "gpt-5.4"
@@ -160,6 +158,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.4-mini"
         provider_model_id: "gpt-5.4-mini"
@@ -170,6 +169,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.4-nano"
         provider_model_id: "gpt-5.4-nano"
@@ -180,26 +180,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
-      # added 2026-10-05
-      - name: "gpt-5.4-pro"
-        provider_model_id: "gpt-5.4-pro"
-        input_cost_per_1k: 0.03000
-        output_cost_per_1k: 0.18000
-        max_context_window: 0
-        max_output_tokens: 0
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
-      # added 2026-10-05
-      - name: "gpt-5.3-codex"
-        provider_model_id: "gpt-5.3-codex"
-        input_cost_per_1k: 0.00175
-        output_cost_per_1k: 0.01400
-        max_context_window: 0
-        max_output_tokens: 0
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.2"
         provider_model_id: "gpt-5.2"
@@ -210,16 +191,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
-      # added 2026-10-05
-      - name: "gpt-5.2-pro"
-        provider_model_id: "gpt-5.2-pro"
-        input_cost_per_1k: 0.02100
-        output_cost_per_1k: 0.16800
-        max_context_window: 0
-        max_output_tokens: 0
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5.1"
         provider_model_id: "gpt-5.1"
@@ -230,6 +202,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5"
         provider_model_id: "gpt-5"
@@ -240,6 +213,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5-mini"
         provider_model_id: "gpt-5-mini"
@@ -250,6 +224,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-5-nano"
         provider_model_id: "gpt-5-nano"
@@ -260,16 +235,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
-      # added 2026-10-05
-      - name: "gpt-5-pro"
-        provider_model_id: "gpt-5-pro"
-        input_cost_per_1k: 0.01500
-        output_cost_per_1k: 0.12000
-        max_context_window: 0
-        max_output_tokens: 0
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "gpt-4.1"
         provider_model_id: "gpt-4.1"
@@ -337,16 +303,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
-      # added 2026-10-05
-      - name: "o1-pro"
-        provider_model_id: "o1-pro"
-        input_cost_per_1k: 0.15000
-        output_cost_per_1k: 0.60000
-        max_context_window: 0
-        max_output_tokens: 0
-        supports_functions: true
-        supports_vision: true
-        supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "o3"
         provider_model_id: "o3"
@@ -357,6 +314,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "o3-mini"
         provider_model_id: "o3-mini"
@@ -367,6 +325,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
+        reasoning_model: true
       # added 2026-10-05
       - name: "o4-mini"
         provider_model_id: "o4-mini"
@@ -377,7 +336,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
-
+        reasoning_model: true
   anthropic:
     api_key: "${ANTHROPIC_API_KEY}"
     base_url: "https://api.anthropic.com"
@@ -497,7 +456,7 @@ providers:
         supports_functions: true
         supports_vision: true
         supports_structured_output: true
-      # NOT in the account model list - see OPS-52
+      # unlisted alias, probed and valid 2026-10-05 (OPS-52)
       - name: "claude-haiku-4-5"
         provider_model_id: "claude-haiku-4-5"
         input_cost_per_1k: 0.00100

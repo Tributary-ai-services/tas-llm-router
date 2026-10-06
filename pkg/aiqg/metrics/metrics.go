@@ -299,6 +299,29 @@ var StreamBufferTruncatedTotal = prometheus.NewCounter(
 	},
 )
 
+// OpenAIParamDroppedTotal counts sampling parameters the OpenAI translation
+// layer had to drop because the target model refuses them.
+//
+// The reasoning-era models (gpt-5/5.x/6, o1, o3, o4) reject top_p,
+// frequency_penalty, presence_penalty and stop outright, and accept only
+// temperature's default of 1 -- measured against the vendor 2026-10-06, one
+// parameter at a time. Sending any of them is a hard 400 that reaches the
+// caller as a 500, so the request is shaped instead.
+//
+// Dropping is the only way to serve the request, but it is NOT free: a caller
+// that asked for temperature 0 and silently got 1 receives a different answer,
+// and on this platform that also changes cache behaviour and what the judge
+// scores. Counting it is what keeps "we quietly changed your request" from
+// being invisible -- the same reason JudgeExcludedTotal exists. A rising count
+// on the temperature label is the one to care about.
+var OpenAIParamDroppedTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_openai_param_dropped_total",
+		Help: "Sampling parameters dropped because the target OpenAI model rejects them (reasoning-era models).",
+	},
+	[]string{"param"},
+)
+
 // EvalCredentialSourceTotal records which key an evaluation call billed, by
 // path and source (tenant_stored / tas_shared / resolver_error).
 //
@@ -430,6 +453,7 @@ func init() {
 		UnpricedCallsTotal,
 		JudgeExcludedTotal,
 		StreamBufferTruncatedTotal,
+		OpenAIParamDroppedTotal,
 		EvalEventsTotal,
 		EvalEventsFailedTotal,
 		EvalCredentialSourceTotal,

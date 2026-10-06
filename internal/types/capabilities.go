@@ -23,15 +23,26 @@ type ProviderCapabilities struct {
 }
 
 type ModelInfo struct {
-	Name               string  `json:"name" yaml:"name"`
-	DisplayName        string  `json:"display_name" yaml:"display_name"`
-	MaxContextWindow   int     `json:"max_context_window" yaml:"max_context_window"`
-	MaxOutputTokens    int     `json:"max_output_tokens" yaml:"max_output_tokens"`
-	SupportsFunctions  bool    `json:"supports_functions" yaml:"supports_functions"`
-	SupportsVision     bool    `json:"supports_vision" yaml:"supports_vision"`
-	SupportsStructured bool    `json:"supports_structured_output" yaml:"supports_structured_output"`
-	InputCostPer1K     float64 `json:"input_cost_per_1k" yaml:"input_cost_per_1k"`
-	OutputCostPer1K    float64 `json:"output_cost_per_1k" yaml:"output_cost_per_1k"`
+	Name               string `json:"name" yaml:"name"`
+	DisplayName        string `json:"display_name" yaml:"display_name"`
+	MaxContextWindow   int    `json:"max_context_window" yaml:"max_context_window"`
+	MaxOutputTokens    int    `json:"max_output_tokens" yaml:"max_output_tokens"`
+	SupportsFunctions  bool   `json:"supports_functions" yaml:"supports_functions"`
+	SupportsVision     bool   `json:"supports_vision" yaml:"supports_vision"`
+	SupportsStructured bool   `json:"supports_structured_output" yaml:"supports_structured_output"`
+
+	// ReasoningModel marks OpenAI's reasoning-era models (gpt-5/5.x/6, o1, o3,
+	// o4). Measured against the vendor 2026-10-06, one parameter at a time:
+	// they reject max_tokens in favour of max_completion_tokens, reject top_p,
+	// frequency_penalty, presence_penalty and stop outright, and accept only
+	// temperature's default of 1. seed is fine. The flag is DECLARED here
+	// rather than inferred from the model name, because a name prefix is a
+	// guess that silently mis-handles the next family OpenAI ships, and this
+	// catalog is generated from one table anyway. Anthropic has no equivalent
+	// split, so it is false throughout there. See RT-5.
+	ReasoningModel  bool    `json:"reasoning_model,omitempty" yaml:"reasoning_model"`
+	InputCostPer1K  float64 `json:"input_cost_per_1k" yaml:"input_cost_per_1k"`
+	OutputCostPer1K float64 `json:"output_cost_per_1k" yaml:"output_cost_per_1k"`
 
 	// Provider-specific model info
 	ProviderModelID string   `json:"provider_model_id,omitempty" yaml:"provider_model_id"`
