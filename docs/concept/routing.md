@@ -14,8 +14,8 @@ answers:
   - "How do I retry a failed request without paying for the generation twice?"
   - "Can this gateway substitute a different model for the one I named?"
 depth: deep
-verified_against: "tas-llm-router@3b8526e (code), 2026-10-05"
-captures: "MOSTLY INHERITED. No completion request was sent for the 2026-10-05 refresh. Every completion capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). Read-only observations taken 2026-10-05: GET /v1/models on the strict gateway (twelve names, including the Claude 5 family), the Deployment and ReplicaSets (strict gateway on aiqg-v5.92 since 2026-10-05T16:00Z, permissive still aiqg-v5.75), the ConfigMap flags (unchanged), and Loki response events (which now stamp gateway_version with the image tag, aiqg-v5.92, not a commit). 3b8526e changes no file under internal/routing, internal/middleware or internal/server/server.go; it changes routing outcomes only through the model catalog it extends, and the live /v1/models shows that catalog is served."
+verified_against: "tas-llm-router@78c3cd2 (code), 2026-10-05"
+captures: "MOSTLY INHERITED. No completion request was sent for the 2026-10-05 refresh. Every completion capture below dates from 2026-08-27 against build 39e8d77 (image aiqg-v5.86). Read-only observations taken 2026-10-05: GET /v1/models on the strict gateway (twelve names, including the Claude 5 family), the Deployment and ReplicaSets (strict gateway on aiqg-v5.92 since 2026-10-05T16:00Z, permissive still aiqg-v5.75), the ConfigMap flags (unchanged), and Loki response events (which now stamp gateway_version with the image tag, aiqg-v5.92, not a commit). 3b8526e changes no file under internal/routing, internal/middleware or internal/server/server.go; it changes routing outcomes only through the model catalog it extends, and the live /v1/models shows that catalog is served. 78c3cd2 (#242) changes only the Anthropic adapter's streaming conversion and the /v1/messages stream encoder; it moves no routing decision, and whether any deployed image carries it was not checked."
 ---
 
 # Routing in the TAS LLM Router
@@ -44,9 +44,9 @@ captures: "MOSTLY INHERITED. No completion request was sent for the 2026-10-05 r
 > and whether you can reach it is a question the forensics section settles.
 >
 > **Two commits, and how far apart they now are.** Every line citation in this
-> document is against `tas-llm-router@3b8526e` (verified 2026-10-05). The only
-> code change since the previous refresh at `db5ae56` is `3b8526e` itself (#239),
-> and it touches routing in one way only: it adds the Claude 5 family and an
+> document is against `tas-llm-router@78c3cd2` (verified 2026-10-05). Two code
+> changes have landed since the previous refresh at `db5ae56`. The first,
+> `3b8526e` (#239), touches routing in one way only: it adds the Claude 5 family and an
 > undated `claude-haiku-4-5` to the model catalog, and corrects Haiku 4.5's price.
 > Because the `model` field resolves a vendor only for names the catalog lists,
 > that changes where a request naming `claude-opus-5-5` goes — see "What the
@@ -56,7 +56,20 @@ captures: "MOSTLY INHERITED. No completion request was sent for the 2026-10-05 r
 > works end to end"). It added lines to `internal/config/config.go`,
 > `configs/config.yaml` and `internal/server/anthropic_messages.go`, so every
 > citation into those files past an insertion point moved and was re-pointed; the
-> code at each cited line is unchanged. Every live *completion* capture was taken
+> code at each cited line is unchanged.
+>
+> The second, `78c3cd2` (#242), moves no routing decision either. It repairs how
+> the Anthropic adapter converts a *streamed* response: a tool call streamed by an
+> Anthropic model used to be dropped, so the client saw a `200` ending in
+> `end_turn` with no content, and a streamed response told the client
+> `input_tokens: 0` and no cache counts — see "Retry safety" for what that meant
+> to a caller. It changes only `internal/providers/anthropic/provider.go`,
+> `internal/server/anthropic_messages.go` and their tests; `internal/routing`,
+> `internal/middleware`, `internal/server/server.go` and `pkg` are byte-identical
+> to `3b8526e`. Citations into `provider.go` past line 267 moved by 49 lines and
+> were re-pointed; no citation into `anthropic_messages.go` sits past its first
+> insertion. `[!UNVERIFIED]` Whether any deployed image carries `78c3cd2` was not
+> checked for this refresh. Every live *completion* capture was taken
 > on 2026-08-27 from the deployed strict gateway `gateway.aiqg.tas.scharber.com`
 > (deployment `llm-router-aiqg` in namespace `tas-llm-router`, image tag
 > `aiqg-v5.86`), whose events stamp `gateway_version: 39e8d77`. **No completion
@@ -64,8 +77,8 @@ captures: "MOSTLY INHERITED. No completion request was sent for the 2026-10-05 r
 > are named where they are used.
 >
 > The gap between those two has widened, so it was measured rather than assumed.
-> `39e8d77` is an ancestor of `3b8526e`, the commit cited here, with 94 commits
-> between them (`git rev-list --count 39e8d77..3b8526e`). Across
+> `39e8d77` is an ancestor of `78c3cd2`, the commit cited here, with 95 commits
+> between them (`git rev-list --count 39e8d77..78c3cd2`). Across
 > that range `internal/routing/router.go` gained 143 lines and **lost none**:
 > every line the captures exercised is still there, unmodified. The additions are
 > three — a model-registry hook at the top of `Route()`, a check that a pinned
@@ -372,7 +385,7 @@ through `gateway.aiqg.tas.scharber.com` on 2026-08-27 and the outcome was read
 from the response, the log, or the event — or, for the gateway-configuration
 rows, that the running Deployment and ConfigMap were read directly rather than
 inferred from a manifest in the repository. *Source* means it was read from the
-code at `3b8526e` and no live traffic exercised it. That distinction earns its
+code at `78c3cd2` and no live traffic exercised it. That distinction earns its
 place here: this same document found four configuration knobs (the four rows
 marked "None" in the gateway-configuration table below — a different count from
 the five impossible causes above) that parse cleanly,
@@ -567,11 +580,11 @@ gains a breaker or affinity line only when one of them actually moved a decision
 
 **Facts about the code that no configuration can change**
 
-Rows marked *Source* here are current as of `3b8526e`, which for the code paths
+Rows marked *Source* here are current as of `78c3cd2`, which for the code paths
 these rows describe is the same code the gateway is running. Rows marked
 *Observed* are from the 2026-08-27 captures against image `aiqg-v5.86`.
 
-| Fact | Consequence | Evidence (Source = `3b8526e`; Observed = 2026-08-27, `v5.86`, unless dated) |
+| Fact | Consequence | Evidence (Source = `78c3cd2`; Observed = 2026-08-27, `v5.86`, unless dated) |
 |---|---|---|
 | `completeWithFallback` has no reachable caller | The rule chain, pre-flight context check, tenant output cap, and served-affinity recording all never run | Source (call graph) confirmed by Observed: an over-window prompt that the pre-flight check would have caught was forwarded to the vendor and returned 200 |
 | `round_robin` is unreachable | Nothing can select it; it is not an option | Source. `determineStrategy` returns only the other three and no other caller sets it; no configuration path reaches the constant |
@@ -615,7 +628,7 @@ whose `model` belongs to OpenAI receives the blocks as ordinary text parts and
 loses the breakpoints, since that adapter has nowhere to put them. And a
 breakpoint's `ttl` is carried but not honoured: the pinned Anthropic SDK
 (`v1.7.0`) has no TTL field, so a `1h` request is sent as the vendor's 5-minute
-default (`internal/providers/anthropic/provider.go:802-806`). That matters to
+default (`internal/providers/anthropic/provider.go:851-855`). That matters to
 the cache economics in "Why it stays put" below — a warm prefix this gateway
 creates stays warm for five minutes, whatever you asked for.
 
@@ -798,7 +811,7 @@ Three cases behave differently, and they are worth knowing precisely.
 cost-optimised, and `routeByCost` (`internal/routing/router.go:664`) asks every
 candidate to price the request. Both vendor adapters refuse to price a model they
 do not know (`internal/providers/openai/provider.go:259`,
-`internal/providers/anthropic/provider.go:323`), so the candidate list empties and
+`internal/providers/anthropic/provider.go:372`), so the candidate list empties and
 routing fails with `could not estimate costs for any provider`
 (`internal/routing/router.go:703`). A typo therefore produces a loud 503 before
 any vendor is contacted — confirmed live, twice, below in Failure modes. This
@@ -1255,6 +1268,28 @@ scores zero rather than being read as a clean completion
 (`pkg/clear/efficacy.go:42-47`). Neither changes the status code, which is still
 the 200 that was written before the first chunk.
 
+One more streamed outcome looked like success while being something else, and it
+is worth recognising if you have logs from before `78c3cd2` (#242, 2026-10-05).
+When an Anthropic model answered a *streaming* request with a tool call, the
+adapter discarded the tool-call events, so the stream you received carried no
+tool call — on `/v1/messages` it ended `end_turn` with no content blocks at all, a
+complete-looking empty answer you were billed for, since the vendor had generated
+the call. The commit's own measurement is the same request one flag apart:
+non-streaming returned the `tool_use` block, streaming returned nothing, both for
+50 output tokens. It hit every streaming agent against an Anthropic upstream on
+both wire formats, because the conversion sits before format translation. The
+adapter now forwards the tool call's id and name from the block-opening event and
+its argument fragments after it
+(`internal/providers/anthropic/provider.go:311-339`). The same commit fixes the
+token counts a stream on `/v1/messages` *shows you*: `message_start` used to
+say `input_tokens: 0` and carried no cache counts, and now carries the real input
+and cache figures (`internal/server/anthropic_messages.go:877-885`). None of this
+touched routing or what was recorded about the request — the event's token counts
+and cost come from the closing chunk, which always carried the full figures
+(`internal/providers/anthropic/provider.go:229-238`), so the gateway's own cost
+accounting was right while your client's view was not. Retrying such a request
+was a second charge, like any other billed 200.
+
 Since `db5ae56` the shared pump does one more thing as it forwards your chunks:
 it copies their text into a per-stream buffer, capped at 256 KiB, and hands
 that to the quality judge once the stream closes
@@ -1305,8 +1340,8 @@ the fact.
 > [!UNVERIFIED] Whether this is a regression or a staged rollout is still not
 > recorded. The chain landed in `626060d` ("walk the fallback chain;
 > `provider_override` becomes a real pin"), and no commit message, code comment,
-> or issue found at `3b8526e` explains why the retry-variant handlers were left
-> calling the older path. Re-checked on this refresh: 94 commits after `39e8d77` the call
+> or issue found at `78c3cd2` explains why the retry-variant handlers were left
+> calling the older path. Re-checked on this refresh: 95 commits after `39e8d77` the call
 > graph is unchanged and nothing has been written down about it. Confirm with the
 > service owner before relying on a configured chain.
 
@@ -1848,7 +1883,7 @@ vendor's status and last probe latency.
 
 One property of the probe decides who this failure hits. It is a one-token
 completion sent with the gateway's own vendor credential
-(`internal/providers/anthropic/provider.go:393-411`), and health is one verdict
+(`internal/providers/anthropic/provider.go:442-460`), and health is one verdict
 per vendor for the whole gateway. So anything wrong with the *gateway's* account
 — not only an outage at the vendor — marks the vendor unhealthy for every
 tenant, including one whose own stored key would have worked, because the health
@@ -1862,7 +1897,7 @@ not log the routing error text, and `/health` read at 23:42 UTC reported
 Anthropic healthy, so the verdict was alternating rather than fixed. Since
 `3b8526e` the probe model is the undated `claude-haiku-4-5`, because the probe
 takes the first catalog name containing "haiku"
-(`internal/providers/anthropic/provider.go:421-431`) and that name now comes
+(`internal/providers/anthropic/provider.go:470-480`) and that name now comes
 first.
 
 **Routing failed: no healthy providers available.** HTTP 503. No vendor passed

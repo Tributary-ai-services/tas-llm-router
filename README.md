@@ -13,7 +13,7 @@ answers:
   - "Which settings change behaviour, and where do the secrets live?"
   - "How much of what is merged on main is actually running in production?"
   - "What is the model registry, and is it switched on?"
-verified_against: "tas-llm-router@3b8526e, 2026-10-05"
+verified_against: "tas-llm-router@78c3cd2, 2026-10-05"
 depth: standard
 ---
 
@@ -29,7 +29,8 @@ attribution, event emission — happens on the way through it.
 > **Verified 2026-09-23 against `tas-llm-router@06038b9`, re-checked
 > 2026-09-24 against `tas-llm-router@dc1957b`, and re-checked 2026-10-02
 > against `tas-llm-router@43fc830` and then `tas-llm-router@db5ae56`, and
-> re-checked in code only on 2026-10-05 against `tas-llm-router@3b8526e`** (code
+> re-checked in code only on 2026-10-05 against `tas-llm-router@3b8526e` and then
+> `tas-llm-router@78c3cd2`** (code
 > diff, both deployments' live image tags and pod placement, the no-token 401
 > probe, `/v1/providers`, `/v1/registry/status`, the strict gateway's
 > `/aiqg/metrics`, and the `aiqg` database's migration level; the other
@@ -43,9 +44,12 @@ attribution, event emission — happens on the way through it.
 > before trusting a version number. Throughout, `#n` is a pull request in this
 > repository and `SEC-n` / `OPS-n` are security and operations items in the
 > TAS backlog; they are cited so a claim can be traced, not because the reader
-> needs them. The 2026-10-05 pass read the #239 diff and ran the tests of the
-> four packages it touched; it queried no cluster, so every live observation
-> below keeps the date it was made.
+> needs them. The first 2026-10-05 pass read the #239 diff and ran the tests of
+> the four packages it touched; the second read the #242 diff, ran the tests of
+> the two packages it touched, and listed both deployments' image tags and
+> ReplicaSets read-only (00:01 UTC on 2026-10-06). Neither pass sent a request
+> to either gateway, so every other live observation below keeps the date it was
+> made.
 
 ## What this is
 
@@ -67,15 +71,28 @@ a firewall does.
 
 ## Status & scope
 
-**As of 2026-10-05** for image tags (a read-only cluster check that day) and
-2026-10-02 for everything else, two deployments run in namespace `tas-llm-router`, on
+**As of 2026-10-05** for image tags (a read-only cluster check at 00:01 UTC on
+2026-10-06, the evening of 2026-10-05 Pacific) and 2026-10-02 for everything
+else, two deployments run in namespace `tas-llm-router`, on
 independent image tags that routinely skew. "Permissive" means a request with
 no gateway token is served anyway; "strict" means it is refused with 401:
 
 | Deployment | Image tag today | Reached at | Auth |
 |---|---|---|---|
-| `llm-router` | `aiqg-v5.75` | `llm-router.tas.scharber.com` (all routes), in-cluster `llm-router.tas-llm-router:8086`, publicly `llm.air-ops.net` (completion paths only, behind Cloudflare Access) | permissive — serves completions with no credential |
-| `llm-router-aiqg` | `aiqg-v5.92` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
+| `llm-router` | `aiqg-v5.75` | `llm-router.tas.scharber.com` (all routes), in-cluster `llm-router.tas-llm-router:8086`, publicly `llm.air-ops.net` (completion paths only, behind Cloudflare Access, Cloudflare's sign-in gate in front of a hostname) | permissive — serves completions with no credential |
+| `llm-router-aiqg` | `aiqg-v5.94` | `gateway.aiqg.tas.scharber.com` (all routes, internal), publicly `gateway.air-ops.net` (completion paths only) | strict — `AIQG_STRICT=true`, no token means 401 |
+
+**What on `main` is running where**, in one place. Each row is detailed in the
+paragraphs that follow; "unknown" means nobody has checked, not that the
+change is absent.
+
+| | `llm-router` (permissive) | `llm-router-aiqg` (strict) |
+|---|---|---|
+| Live tag, 00:01 UTC 2026-10-06 | `aiqg-v5.75` | `aiqg-v5.94` |
+| Newest `main` change known to be in it | none identified; the image predates `b6070a0` (the `/metrics` rebuild, August 2026) and its commit is not recorded | #238 (`db5ae56`), observed in the earlier `aiqg-v5.90`; the price-table half of #239, observed in `aiqg-v5.92` from branch code. `aiqg-v5.94` itself was not probed |
+| Known not live | every Go change from `b6070a0` onward, including #191, #233, #236, #238, #239 and #242 | none known |
+| Unknown | — | the system-block and `cache_control` half of #239; all of #242 (streamed tool calls, streamed usage counts) |
+| Reached both by manifest alone | SEC-1, SEC-23 path allowlists; Redis passwords (SEC-24, SEC-26); #177; the replica spread | same |
 
 Both were `2/2` ready and both answered live probes on 2026-10-02.
 Since 2026-09-21 the cluster has two nodes, `um773dev` and `pinova01`, and
@@ -92,28 +109,32 @@ anonymous request gets Cloudflare's 403 page — so the unauthenticated path is
 not reachable from the open internet. It is reachable from anywhere inside the
 cluster or on the cluster's network.
 
-**The two deployments run very different code.** A read-only cluster check on
-2026-10-05 found the strict gateway on `aiqg-v5.92` (deployment revision 126,
-rolled out 16:00 UTC on 2026-10-05), after `aiqg-v5.91` (revision 125,
-2026-10-04); the permissive deployment was still on `aiqg-v5.75`. Before those,
+**The two deployments run very different code.** A read-only cluster check at
+00:01 UTC on 2026-10-06 found the strict gateway on `aiqg-v5.94` (deployment
+revision 128, rolled out 23:54 UTC on 2026-10-05), ten minutes after
+`aiqg-v5.93` (revision 127, 23:44 UTC); before them came `aiqg-v5.92`
+(revision 126, 16:00 UTC that day) and `aiqg-v5.91` (revision 125,
+2026-10-04). The permissive deployment was still on `aiqg-v5.75`. Before those,
 the strict gateway ran `aiqg-v5.90` from about 19:05 UTC on 2026-10-02,
 `aiqg-v5.89` for roughly three and a half hours that day, and `aiqg-v5.88` from
 2026-09-26 (#235), which that release commit records as stamped with gateway
 version `dc2fe59`. None of the newer tags has a release commit on `main`: at
-`3b8526e`, `k8s/deployment-aiqg-strict.yaml:71` still pins `aiqg-v5.88`, so
+`78c3cd2`, `k8s/deployment-aiqg-strict.yaml:71` still pins `aiqg-v5.88`, so
 the manifest and the live deployment disagree, and a `kubectl apply -k k8s/`
-from `main` would roll the strict gateway back by four releases. The
+from `main` would roll the strict gateway back by six releases. The
 `aiqg-v5.90` image exported `aiqg_stream_buffer_truncated_total` on
 `/aiqg/metrics` (checked 2026-10-02), a series that exists only from #238
 (`db5ae56`), so it carries that change.
 
-The Go changes on `main` since `dc2fe59` are #236, #238 and #239; the first
-two were in the strict gateway's `aiqg-v5.90` image, and #239 (2026-10-05) is
-described after them. #236 adds two
+The Go changes on `main` since `dc2fe59` are #236, #238, #239 and #242; the
+first two were in the strict gateway's `aiqg-v5.90` image, and #239 and #242
+(both 2026-10-05) are described after them. #236 adds two
 flags to each priced response event, `schema_requested` and `tools_declared`,
 recording whether the caller set `response_format` or declared any tools
 (`internal/server/server.go:1198`). They measure how much real traffic a
-planned structural-validity score could ever apply to; nothing is scored yet,
+planned structural-validity score — an Efficacy sub-metric in `pkg/clear` for
+whether a response is well-formed against what was asked, where Efficacy today
+scores the finish reason only (`pkg/clear/efficacy.go:5`) — could ever apply to; nothing is scored yet,
 and a request that was never stamped omits both keys rather than publishing a
 `false` nobody observed (`pkg/aiqg/events/event.go:279`). #238 lets the judge
 (a second model that grades a sample of responses; more below) grade streamed responses. Before it, the judge saw only non-streamed
@@ -130,7 +151,7 @@ only the first 6,000 characters of any response.
 First, the `system` field is no longer flattened into one string: a block array
 stays a block array through to Anthropic, each block keeping its own
 `cache_control` (`internal/server/anthropic_messages.go:353`,
-`internal/providers/anthropic/provider.go:516`), and only a single block with no
+`internal/providers/anthropic/provider.go:565`), and only a single block with no
 breakpoint collapses to the plain string form. Flattening was silently
 destroying Claude Code's system prompt: its first block is an
 `x-anthropic-billing-header:` marker that Anthropic consumes on its own, and
@@ -142,7 +163,7 @@ content blocks inside a turn (`internal/server/anthropic_messages.go:82`,
 it and an agent paid full price for its tool list on every turn. The requested
 time-to-live is still not honoured: the pinned `anthropic-sdk-go` v1.7.0 has no
 TTL field, so a breakpoint asking for `1h` is sent as the 5-minute default
-(`internal/providers/anthropic/provider.go:751`). The same PR adds the Claude 5
+(`internal/providers/anthropic/provider.go:800`). The same PR adds the Claude 5
 family — `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`,
 `claude-sonnet-5-5`, `claude-sonnet-5` — and the undated `claude-haiku-4-5` to
 the model catalog (`configs/config.yaml:86`). Before it, a request naming
@@ -163,15 +184,51 @@ UTC, before #239 was merged at 18:49 UTC, so it was built from branch code; the
 commit it was built from is not recorded. The permissive deployment, on
 `aiqg-v5.75`, has none of #239.
 
-> [!UNVERIFIED] Whether `aiqg-v5.92` carries the system-block and
-> `cache_control` half of #239 was not checked; confirming it needs a paid
-> `/v1/messages` request with a multi-block `system` field. Until someone makes
-> one, do not assume Claude Code traffic through the strict gateway keeps its
-> system prompt or its cache breakpoints.
+> [!UNVERIFIED] Whether `aiqg-v5.92` or the later `aiqg-v5.94` carries the
+> system-block and `cache_control` half of #239 was not checked; confirming it
+> needs a paid `/v1/messages` request with a multi-block `system` field. Until
+> someone makes one, do not assume Claude Code traffic through the strict
+> gateway keeps its system prompt or its cache breakpoints.
+
+#242 makes tool calls survive streaming from an Anthropic model. Before it,
+the Anthropic provider turned only two stream events into chunks — a text
+delta and `message_start` — so the event that opens a `tool_use` block (its
+id and name) and the fragments of its arguments were discarded. A streamed
+request that made a tool call came back with no content blocks and
+`stop_reason` `end_turn`, though the vendor had generated the call and billed
+its output tokens; the PR records that measurement on 2026-10-05, the same
+request returning `tool_use` with `stream: false`. Claude Code, which always
+streams and depends on tool calls, reported such a turn as a success with an
+empty result. The loss sat upstream of wire-format translation, so streaming
+tool calls through `/v1/chat/completions` to an Anthropic model were lost as
+well, not only through `/v1/messages`. The provider now emits the block's
+opening (`internal/providers/anthropic/provider.go:311`) and each argument
+fragment (`internal/providers/anthropic/provider.go:329`) as tool-call
+chunks. The same PR fixes two usage figures a streaming `/v1/messages` client
+reads. The input-token count, which Anthropic reports only in `message_start`,
+was dropped, so every streamed response told the client `input_tokens: 0`
+while the priced event stayed correct; it is now carried
+(`internal/providers/anthropic/provider.go:348`) and absorbed before the
+encoder writes `message_start` (`internal/server/anthropic_messages.go:927`).
+And `message_start` now always includes `cache_creation_input_tokens` and
+`cache_read_input_tokens`, as `0` when there were none
+(`internal/server/anthropic_messages.go:884`), with the closing
+`message_delta` repeating any non-zero cache counts known only at the end
+(`internal/server/anthropic_messages.go:1008`); before, a client could not see
+the vendor's caching at all. Non-streaming responses were not affected by
+either bug.
+
+> [!UNVERIFIED] #242 was merged at 23:59 UTC on 2026-10-05, after
+> `aiqg-v5.94` rolled out at 23:54 UTC, so if that image carries the fix it
+> was built from branch code; which commit it was built from is not recorded,
+> and no streamed tool call was sent through either gateway to check. The
+> permissive deployment, on `aiqg-v5.75`, has neither fix: assume a streaming
+> tool-using client against an Anthropic model loses its tool calls there.
 
 What #233 brought to the strict gateway concerns the judge, a second model
 that grades a sample of responses and posts each grade to
-`aiqg-dashboard-be`. Those grades now carry which vendor and model were
+`aiqg-dashboard-be`, the AIQG dashboard's backend service, which also issues
+and validates gateway tokens. Those grades now carry which vendor and model were
 graded, which model graded them, and a `self_judged` flag set when the two
 models are the same (`internal/server/judge.go:204`). Self-judged grades are
 still recorded, but the dashboard leaves them out of judged efficacy, its
@@ -182,7 +239,9 @@ with no model or no flag as unattributable and skips it
 2026-09-26 rollout carry none of these fields, so judged efficacy counts only
 grades from that date onward. What is in the image but
 not active there is switched off by configuration, not absent: the model
-registry, and the serving of semantic-cache hits (shadow mode: near-miss hits are recorded
+registry, and the serving of semantic-cache hits — the semantic cache answers a
+prompt with the stored response to an earlier prompt whose embedding is
+similar enough rather than identical — (shadow mode: near-miss hits are recorded
 but not served), both below. The permissive deployment is still
 on `aiqg-v5.75`, which predates `b6070a0`, the `/metrics` rebuild that landed
 shortly before `eee4b24` (2026-08-26). The difference is observable from
@@ -274,7 +333,9 @@ Genuinely unfinished or in flight, stated plainly:
 - **Other merged behaviour, live on the strict gateway and absent from the
   permissive deployment**, that a reader of the code will meet:
   Kafka loss at startup now degrades to log-only events instead of exiting
-  (#191); the prompt-cache `auto` mode now places `cache_control` breakpoints
+  (#191); the prompt-cache `auto` mode — one of three modes, beside the
+  default `passthrough` and `off`, chosen per request by the `TAS-Prompt-Cache`
+  header (`pkg/aiqg/promptcache/mode.go:37`) — now places `cache_control` breakpoints
   itself instead of passing requests through (#197–#201); the calls the
   gateway makes on its own behalf to evaluate quality — a judge model scoring a
   sample of responses, and shadow replays that re-send a request to a
@@ -317,6 +378,10 @@ registration endpoint answered HTTP 400 "Registration not allowed", and the
 dashboard's `/signup` page is a placeholder. A newcomer therefore needs an
 account created for them in that realm before they can issue a token.
 
+**Step one is therefore blocked until you have an account.** Ask the service
+owner, @jscharber, to create one in the `aether` realm and tie it to a tenant;
+everything below assumes you have signed in and issued a token.
+
 > [!UNVERIFIED] Who creates `aether` realm accounts for AIQG users, and how a
 > new account is tied to a tenant, is not recorded in this repository or in the
 > dashboard code checked on 2026-09-23. Ask the service owner named under
@@ -340,7 +405,9 @@ deployment with its whole route table. A TAS service inside the cluster calls
 `http://llm-router.tas-llm-router:8086`, the permissive deployment.
 
 Call it without a token and you get the failure you are most likely to hit
-first (re-run 2026-09-23 and 2026-10-02, identical output):
+first; the error code's `path_a` prefix names "Path A", the internal name for
+this token-authenticated ingress path. Re-run 2026-09-23 and 2026-10-02, with
+identical output:
 
 ```bash
 curl -sS -w '\nHTTP %{http_code}\n' https://gateway.air-ops.net/v1/chat/completions \
@@ -350,8 +417,7 @@ curl -sS -w '\nHTTP %{http_code}\n' https://gateway.air-ops.net/v1/chat/completi
 HTTP 401
 ```
 
-"Path A" in the error code is the internal name for this token-authenticated
-ingress path. The message's "requires both … headers" is stale wording: one
+The message's "requires both … headers" is stale wording: one
 header carrying a `tas_qg_live_` token is enough, because a token found in
 `Authorization: Bearer` or `x-api-key` is copied into `TAS-Auth` before the
 check, and a vendor key in `Authorization` has been optional since tenants
@@ -403,7 +469,13 @@ account-wide "BYOK-only" box on that page unticked (only a dashboard admin
 sees it — a user holding the `aiqg-admin` realm role, which existing admins
 grant from Settings ▸ Admin), which lets the gateway fall back to the shared TAS key; with no
 stored key and BYOK-only ticked, the completion is refused with the 402
-described above. With that in place, a completion in the
+described above. The dashboard backend enforces the admin-only rule, not only
+the page: its `PUT /account/credential-policy` route refuses anyone without the
+role named by `PROVIDER_CREDENTIAL_ADMIN_ROLE`, `aiqg-admin` when unset
+(`aiqg-dashboard-be/internal/handlers/provider_credentials.go:51`). Storing your
+own key needs no admin. An account nobody has set a policy for allows the
+fallback (`aiqg-dashboard-be/internal/store/migrations/018_provider_credentials.sql:39`),
+so a new account is not blocked on an admin unless one has ticked the box. With that in place, a completion in the
 OpenAI dialect (executed 2026-08-26):
 
 ```bash
@@ -608,8 +680,8 @@ Deploying from this repository means `kubectl apply -k k8s/`, never `-f` on a
 single file: the live Deployment selectors carry the kustomization's common
 labels, so a bare `-f` is rejected on the immutable selector (#220). Each
 deployment file is meant to pin the image tag it actually runs, but at
-`3b8526e` `k8s/deployment-aiqg-strict.yaml:71` still says `aiqg-v5.88`, while a
-read-only cluster check on 2026-10-05 found `aiqg-v5.92` live (see [Status & scope](#status--scope)); compare the file
+`78c3cd2` `k8s/deployment-aiqg-strict.yaml:71` still says `aiqg-v5.88`, while a
+read-only cluster check at 00:01 UTC on 2026-10-06 found `aiqg-v5.94` live (see [Status & scope](#status--scope)); compare the file
 with `kubectl get deploy` before applying.
 
 ## Where to go next

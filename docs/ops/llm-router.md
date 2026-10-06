@@ -14,12 +14,30 @@ answers:
   - "Which hostnames reach this service, and why does /health return 404 or 403 on some of them?"
   - "Which behaviours described here change when the next image is deployed, and how do I tell which code a pod is running?"
 depth: standard
-verified_against: "tas-llm-router@3b8526e, 2026-10-05"
+verified_against: "tas-llm-router@78c3cd2, 2026-10-05"
 ---
 
 # LLM Router — Operations
 
-> **Verified 2026-10-05 against `tas-llm-router@3b8526e`**, a refresh for #239,
+> **Verified 2026-10-05 against `tas-llm-router@78c3cd2`**, a code-only refresh
+> for #242, which fixes three things in streamed responses served by Anthropic.
+> A streamed tool call is now passed to the caller; before, it was dropped and
+> the caller saw an empty, successful answer. The client's `usage` now reports
+> the real input-token count instead of `0`. And it now reports the prompt-cache
+> read and write counts instead of `0`. The same change also makes the AIQG event
+> for a streamed Anthropic response record `0` output tokens, read from the
+> code and not yet observed. See "Streamed responses from Anthropic: tool calls
+> and usage" under "How it works end to end". The only cluster check in this
+> pass was a read-only look at the deployments and ReplicaSets at 00:04 UTC on
+> 2026-10-06; no logs were read and no requests sent. It found `llm-router-aiqg`
+> on `aiqg-v5.94` (revision 128, rolled out 2026-10-05 23:54 UTC), after
+> `aiqg-v5.93` (revision 127, 23:44 UTC). Both rolled out minutes before #242
+> merged at 23:59 UTC, and no commit records either tag, so whether either
+> carries #242 is not known. `llm-router` is still on `aiqg-v5.75`. Other
+> 2026-10-05 cluster observations below come from the earlier pass that day,
+> on `aiqg-v5.92`.
+>
+> **Previously verified 2026-10-05 against `tas-llm-router@3b8526e`**, a refresh for #239,
 > which changes two things. First, a native Anthropic request (`/v1/messages`)
 > keeps its system prompt as separate blocks, each with its own prompt-cache
 > breakpoint, instead of merging them into one string, and tool definitions keep
@@ -76,8 +94,9 @@ verified_against: "tas-llm-router@3b8526e, 2026-10-05"
 > so carrying judge-score provenance (#233). On 2026-10-02 it moved twice more,
 > to `aiqg-v5.89` (revision 123) and then `aiqg-v5.90` (revision 124), which runs
 > #238. No commit records those two images. On 2026-10-04 and 2026-10-05 it
-> moved to `aiqg-v5.91` (revision 125) and `aiqg-v5.92` (revision 126); no
-> commit records those either. The internal `llm-router` still
+> moved to `aiqg-v5.91` (revision 125) and `aiqg-v5.92` (revision 126), and late
+> on 2026-10-05 to `aiqg-v5.93` (revision 127) and `aiqg-v5.94` (revision 128),
+> which it runs as of 2026-10-06 00:04 UTC; no commit records any of those. The internal `llm-router` still
 > runs `aiqg-v5.75`, the image it ran in August, and has none of it — not the
 > metrics rewrite, a Kafka outage no longer being fatal, the wired
 > error/auth/rate-limit counters, the model registry and its admin API, nor the
@@ -172,10 +191,10 @@ nothing), is new on 2026-09-21 and is explained under "How it works end to end".
 gateway customers. They are separate deployments, separate services, separate
 ingress hosts, and they **run different image versions**:
 
-| Deployment | Serves | Ingress host | Image tag (observed 2026-10-05) | Replicas |
+| Deployment | Serves | Ingress host | Image tag (observed 2026-10-06 00:04 UTC) | Replicas |
 |---|---|---|---|---|
 | `llm-router` | Internal TAS traffic | `llm-router.tas.scharber.com` | `aiqg-v5.75`, unchanged since August | 2, fixed, one per node |
-| `llm-router-aiqg` | External AIQG customers | `gateway.aiqg.tas.scharber.com` | `aiqg-v5.92`, since 2026-10-05 16:00 UTC (was `aiqg-v5.91` from 2026-10-04 19:44 UTC, `aiqg-v5.90` from 2026-10-02 19:05 UTC, `aiqg-v5.89` from 15:36 UTC that day, `aiqg-v5.88` from 2026-09-26, `aiqg-v5.87` from 2026-09-21, and `aiqg-v5.86` before that) | 2, fixed, one per node |
+| `llm-router-aiqg` | External AIQG customers | `gateway.aiqg.tas.scharber.com` | `aiqg-v5.94`, since 2026-10-05 23:54 UTC (was `aiqg-v5.93` from 23:44 UTC that day, `aiqg-v5.92` from 16:00 UTC that day, `aiqg-v5.91` from 2026-10-04 19:44 UTC, `aiqg-v5.90` from 2026-10-02 19:05 UTC, `aiqg-v5.89` from 15:36 UTC that day, `aiqg-v5.88` from 2026-09-26, `aiqg-v5.87` from 2026-09-21, and `aiqg-v5.86` before that) | 2, fixed, one per node |
 
 The live check, which prints the full image reference:
 
@@ -183,10 +202,10 @@ The live check, which prints the full image reference:
 kubectl get deploy -n tas-llm-router -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
 NAME              IMAGE
 llm-router        registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.75
-llm-router-aiqg   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.92
+llm-router-aiqg   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.94
 ```
 
-That output is from 2026-10-05.
+That output is from 2026-10-06 at 00:04 UTC.
 
 **Five ingress hosts front these two deployments, and only two of them answer
 `/health`.** The two public `air-ops.net` hosts are path-allowlisted: nginx
@@ -222,7 +241,7 @@ non-streaming completions from public clients can hit that first.
 
 Both tags carry the `aiqg-` prefix regardless of which deployment they run on —
 that prefix is the image release line, not an indicator of which deployment it
-belongs to. The tags are ordered, so `aiqg-v5.92` on `llm-router-aiqg` is
+belongs to. The tags are ordered, so `aiqg-v5.94` on `llm-router-aiqg` is
 **ahead** of `aiqg-v5.75` on `llm-router`: the AIQG deployment receives releases
 first and the internal deployment lags it. A fix present in one deployment is not necessarily present in the
 other. There is no HorizontalPodAutoscaler; replica counts are fixed in the
@@ -308,7 +327,7 @@ measurement, taken before this flag existed: 179 of 464 judged scores were
 self-graded (`internal/server/judge.go:197`).
 
 > [!UNVERIFIED] `llm-router-aiqg` has carried `dc1957b` since 2026-09-26, when it
-> moved to `aiqg-v5.88`; since 2026-10-05 16:00 UTC it runs `aiqg-v5.92`, which
+> moved to `aiqg-v5.88`; since 2026-10-05 23:54 UTC it runs `aiqg-v5.94`, which
 > is later. `llm-router` (`aiqg-v5.75`) does not have it, but it runs no judge,
 > so that gap does not matter here. The release commit (#235) reports the change
 > verified live on 2026-09-26 on `aiqg-v5.88`: judge rows carried all four
@@ -408,9 +427,9 @@ handles. Tool definitions and message blocks keep their `cache_control`
 of a turn keeps that turn as separate blocks, because the breakpoint's position
 is what it means (`internal/server/anthropic_messages.go:246`). The Anthropic
 provider sends the blocks to the vendor as separate text blocks, each keeping
-its breakpoint (`internal/providers/anthropic/provider.go:573`). A non-text block
+its breakpoint (`internal/providers/anthropic/provider.go:622`). A non-text block
 in a system message is refused, not dropped
-(`internal/providers/anthropic/provider.go:524`). The native parser skips
+(`internal/providers/anthropic/provider.go:573`). The native parser skips
 non-text system blocks before that point. So the refusal can be reached only
 from an OpenAI-shaped `/v1/chat/completions` request whose system message
 contains an image. See "Failure modes".
@@ -420,16 +439,17 @@ contains an image. See "Failure modes".
 (`internal/types/requests.go:80`). But the Anthropic library this code is built
 with, `anthropic-sdk-go v1.7.0` (`go.mod:10`), has no field for it, so every
 breakpoint goes out as a plain 5-minute one
-(`internal/providers/anthropic/provider.go:802`). Claude Code asks for `1h`. A
+(`internal/providers/anthropic/provider.go:851`). Claude Code asks for `1h`. A
 session that pauses for more than five minutes therefore writes its cache
 again at the cache-write rate, 1.25 times the input price
 (`pkg/clear/cost.go:141`), where a 1-hour cache would still have been read at a
 tenth of the input price (`pkg/clear/cost.go:140`). The #239 commit message names upgrading the
 library to `v1.66.0` as the fix, as a separate change, which has not been made
-at `3b8526e`.
+at `78c3cd2`.
 
-> [!UNVERIFIED] Whether `aiqg-v5.92`, the image `llm-router-aiqg` runs since
-> 2026-10-05 16:00 UTC, has the system-block fix was not checked. The image
+> [!UNVERIFIED] Whether `aiqg-v5.92`, the image `llm-router-aiqg` ran from
+> 2026-10-05 16:00 UTC, had the system-block fix was not checked, and neither
+> was `aiqg-v5.94`, which it runs as of 2026-10-06 00:04 UTC. `aiqg-v5.92`
 > rolled out about three hours before `3b8526e` was merged, at 18:49 UTC. It
 > does have #239's price-table change (see the next paragraph), so it was
 > probably built from the pull request's branch, but which commit of that branch
@@ -437,6 +457,85 @@ at `3b8526e`.
 > through the gateway and compare the response's `usage.input_tokens` with the
 > size of the prompt. That costs money and needs a customer token, so it was not
 > run here. `llm-router` (`aiqg-v5.75`) does not have the fix.
+
+**Streamed responses from Anthropic: tool calls and usage.** When Anthropic
+serves a streamed request, the provider turns each vendor stream event into an
+internal chunk, and the wire encoders turn those chunks into the caller's
+format (`internal/providers/anthropic/provider.go:299`). This sits before the
+translation to the caller's format, so what it drops is lost for every caller:
+native `/v1/messages`, OpenAI-shaped `/v1/chat/completions`, and `/v1/responses`.
+Up to `3b8526e` it passed on only text and the opening `message_start` event,
+which had three effects.
+
+- **A streamed tool call vanished.** Anthropic streams a tool call as a block
+  opening that carries the call's id and name, then fragments of its JSON
+  arguments. Both were discarded. The caller got no tool call and
+  `stop_reason: end_turn`, with HTTP `200`. The #242 commit message records the
+  measurement on 2026-10-05: the same request returned the `tool_use` block
+  with `stream: false`, and no content blocks at all with `stream: true`, and
+  both spent the same 50 output tokens. Claude Code always streams and works by
+  tool calls, so it reported `success` with an empty result and made no edit.
+  Any streaming agent calling tools on an Anthropic model was affected.
+- **The client saw `input_tokens: 0`.** Anthropic reports input tokens only in
+  `message_start`, and that count was discarded. The router's own token and
+  cost metrics and the AIQG event were correct; only the `usage` the caller
+  received was wrong. A client that sizes its context from that number, as
+  Claude Code does when deciding to compact, read zero.
+- **The client saw no prompt caching.** The native encoder wrote only input and
+  output tokens. The #242 commit message records a Claude Code session on
+  2026-10-05 whose events showed 37,341 tokens written to the cache, then
+  25,894 read on each later turn, while Claude Code reported
+  `cache_creation_input_tokens: 0` and `cache_read_input_tokens: 0`.
+
+From `78c3cd2` (#242) the block opening becomes a chunk with the call's id and
+name (`internal/providers/anthropic/provider.go:311`). Each argument fragment
+becomes a chunk with an empty id, which the encoders read as "continue the
+current call" (`internal/providers/anthropic/provider.go:329`,
+`internal/server/anthropic_messages.go:904`). On `/v1/messages` the call is
+buffered and sent whole, as one `tool_use` block, when the stream ends, with
+`stop_reason: tool_use` (`internal/server/anthropic_messages.go:969`). So a
+caller sees the tool call arrive at the end rather than token by token. The
+`message_start` chunk now carries input and cache token counts
+(`internal/providers/anthropic/provider.go:341`). The native encoder reads them
+before it writes `message_start` (`internal/server/anthropic_messages.go:927`).
+It always writes both cache fields there, as `0` when there was no caching
+(`internal/server/anthropic_messages.go:880`). The final `message_delta` repeats
+the input and cache counts when they are non-zero
+(`internal/server/anthropic_messages.go:1008`). Tests build the events from
+Anthropic's real JSON (`internal/providers/anthropic/provider_cache_control_test.go:245`,
+`internal/server/anthropic_messages_test.go:450`).
+
+> [!UNVERIFIED] Whether an OpenAI-shaped streaming client reassembles the tool
+> call was not tested. The OpenAI encoder writes each chunk as it comes
+> (`internal/server/anthropic_messages.go:724`). The router's tool-call type
+> has no `index` field (`internal/types/requests.go:107`), and OpenAI's
+> streaming format uses one to join argument fragments to their call. The #242
+> tests cover the provider and the native encoder, not this path.
+
+> [!WARNING] **From `78c3cd2`, the AIQG event for a streamed Anthropic response
+> records `0` output tokens.** This is read from the code and has not been
+> observed in an event. The streaming handler records the first chunk that
+> carries usage (`internal/server/server.go:1888`), and the record keeps the
+> first value it is given (`internal/middleware/aiqg_routing.go:701`). That
+> chunk is now `message_start`, which knows the input tokens but not yet the
+> output. So the event's `completion_tokens` and its output cost are `0`
+> (`pkg/aiqg/events/builder.go:591`). Input and cache counts on the event stay
+> correct. The `llm_router_*` token and cost metrics use the last chunk instead
+> (`internal/server/server.go:1912`) and are not affected. If AIQG cost or
+> output-token figures for Anthropic streaming traffic drop to near zero after
+> a deploy with #242, this is the cause, not a change in traffic. Report it to
+> the owner; there is no configuration switch.
+
+> [!UNVERIFIED] Whether any running image has #242 is not known. It merged at
+> 23:59 UTC on 2026-10-05. `llm-router-aiqg` rolled out `aiqg-v5.93` at 23:44
+> UTC and `aiqg-v5.94` at 23:54 UTC, minutes before, observed read-only on
+> 2026-10-06 at 00:04 UTC. Images rolled out before a merge have carried the
+> pull request's unmerged code before (`aiqg-v5.92` and #239), so `aiqg-v5.94`
+> may have #242, but no commit records what either tag was built from.
+> `llm-router` (`aiqg-v5.75`) does not have it. On a pod without it, a
+> streaming tool call against an Anthropic model returns no call. Every direct
+> test needs a streaming request, which costs money and needs a customer token,
+> so none was run here.
 
 **The model catalog and the price table.** The router keeps two lists of models
 and prices. The provider catalog in `configs/config.yaml`, the file the image
@@ -510,7 +609,9 @@ two lines at startup; this pair is from 2026-09-21:
 {"level":"info","msg":"AIQG semantic cache: using TEI embedder","tei_url":"http://tei.tas-shared:8080","time":"2026-09-21T21:47:49Z"}
 ```
 
-`embed_model` echoes `AIQG_SEMCACHE_EMBED_MODEL`, which only the Ollama path
+`C4` in the first line is the design document's name for the semantic-cache
+stage (`docs/AIQG-SEMANTIC-CACHING.md:3`, `internal/config/config.go:134`); the
+words after the dash say what it does. `embed_model` echoes `AIQG_SEMCACHE_EMBED_MODEL`, which only the Ollama path
 uses; TEI serves exactly one model, fixed by its own `--model-id`, and the
 router never sends it a model name. The second line is the one that tells you
 which embedder is live. If it is missing, and in its place you see
@@ -1353,7 +1454,9 @@ authentication path for **every** request. Read the status code:
 **Which deployment this hits.** Both deployments load the dashboard address from
 the shared `llm-router-config`, and both build the same resolver. That is why
 the August probe, running the *internal* image, printed that startup line. The
-difference is in who sends a token. `llm-router-aiqg` is strict and looks up
+difference is in who sends a token. *Strict* means a request with no
+`TAS-Auth` gateway token is refused with `401`; *permissive* means it is passed
+through unauthenticated (`internal/middleware/aiqg.go:172`). `llm-router-aiqg` is strict and looks up
 every request, so a dashboard outage takes out all customer traffic. The internal
 `llm-router` is permissive and looks up only requests that carry `TAS-Auth`, so
 internal callers that do not send one — the normal case — keep working. On
@@ -1382,6 +1485,9 @@ Redis address produces a reassuring startup line at `info`, not an error:
 {"level":"info","msg":"AIQG prompt-cache probe enabled (P0 measure-only: reports prefix reuse, changes no requests)","redis_addr":"redis-shared.tas-shared:6399","ttl":300000000000}
 ```
 
+`P0` is the first, measure-only phase of the prompt-cache plan: it records
+whether prompt prefixes repeat and changes no request
+(`docs/AIQG-PROMPT-CACHE-CONTROL.md:405`, `pkg/aiqg/promptcache/probe.go:2`).
 The `6399` there is the dead port the experiment set — the router reported the
 cache "enabled" against an address nothing was listening on, because the client
 connects lazily. Postgres was quieter still: `DATABASE_URL` was then configured in
@@ -1598,23 +1704,23 @@ sets each deployment to the tag in its file (`k8s/kustomization.yaml:44`). The
 tag applied to the AIQG deployment is the one in
 `k8s/deployment-aiqg-strict.yaml:71`. That matched the live `aiqg-v5.88` until
 15:36 UTC on 2026-10-02, and **no longer matches**; it still pins `aiqg-v5.88`
-at `3b8526e`.
+at `78c3cd2`.
 
 > [!CAUTION] **The checked-in manifest lags the cluster: `kubectl apply -k k8s/`
-> from `main` would roll `llm-router-aiqg` back four releases.** At `3b8526e` the
+> from `main` would roll `llm-router-aiqg` back six releases.** At `78c3cd2` the
 > manifest pins `aiqg-v5.88` (`k8s/deployment-aiqg-strict.yaml:71`), but on
-> 2026-10-05 the cluster runs `aiqg-v5.92` (revision 126, preceded by
-> `aiqg-v5.91`, `aiqg-v5.90` and `aiqg-v5.89`, revisions 125 to 123). No commit
-> records any of the four newer tags. An apply from the repository would quietly
+> 2026-10-06 at 00:04 UTC the cluster runs `aiqg-v5.94` (revision 128, preceded
+> by `aiqg-v5.93` through `aiqg-v5.89`, revisions 127 to 123). No commit
+> records any of the six newer tags. An apply from the repository would quietly
 > undo #238's streaming judge, #236's event flags, and #239's Claude 5 catalog
 > and corrected prices, and it would look like a routine no-op apply.
-> `llm-router` (`aiqg-v5.75`) matched its manifest on 2026-10-05. Before any apply, compare
+> `llm-router` (`aiqg-v5.75`) matched its manifest on 2026-10-06. Before any apply, compare
 > the two and stop if they differ (commands below). If the deployment shows a
 > newer tag than the file, ask the owner to commit the live tag first. Do not
 > apply over it.
 
-Run from a checkout of the repository. On 2026-10-05 the first command printed
-`aiqg-v5.75` and `aiqg-v5.92`; the second printed:
+Run from a checkout of the repository. On 2026-10-06 at 00:04 UTC the first
+command printed `aiqg-v5.75` and `aiqg-v5.94`; the second printed, at `78c3cd2`:
 
 ```bash
 kubectl get deploy -n tas-llm-router -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
@@ -1640,6 +1746,11 @@ including the image line.
 > Claude 5 catalog and price-table version, observed 2026-10-05. So it was
 > built from unmerged code, and what else it carries is unknown. Neither image
 > was inspected for its build time in this pass.
+>
+> The same is true again of `aiqg-v5.93` and `aiqg-v5.94`, rolled out at 23:44
+> and 23:54 UTC on 2026-10-05, minutes before #242 merged at 23:59 UTC. Their
+> source commits are not recorded, and whether either carries #242 has not been
+> checked. Their registry build times were not inspected.
 
 **If you `set image` instead, name the container.** `kubectl set image
 deploy/llm-router-aiqg llm-router=<image>` changes only the router; the wildcard
@@ -1821,8 +1932,10 @@ through 121 were all created on 2026-09-21; and 122 is `aiqg-v5.88` from
 2026-09-26. Later on 2026-10-02, 123 (`aiqg-v5.89`, 15:36 UTC) and 124
 (`aiqg-v5.90`, 19:05 UTC, now current) were created, and 112 and 113 aged out.
 Then 125 (`aiqg-v5.91`, 2026-10-04 19:44 UTC) and 126 (`aiqg-v5.92`,
-2026-10-05 16:00 UTC, current on 2026-10-05) were created, and 114 and 115 aged
-out. The retained range on 2026-10-05 was 116 through 126, so the
+2026-10-05 16:00 UTC) were created, and 114 and 115 aged out. Late on
+2026-10-05 came 127 (`aiqg-v5.93`, 23:44 UTC) and 128 (`aiqg-v5.94`, 23:54 UTC,
+current on 2026-10-06 at 00:04 UTC), and 116 and 117 aged out. The retained
+range on 2026-10-06 was 118 through 128, so the
 `--revision=112` example below shows the shape of the output but no longer works. What is missing is `CHANGE-CAUSE`: every row reads `<none>`, so the
 list tells you revisions exist but not what any of them contained. Do not read
 the empty column as an empty history.
@@ -1861,10 +1974,13 @@ template lists `REDIS_PASSWORD` among its environment variables before you pick
 it.
 
 **Rolling `llm-router-aiqg` back past revision 120 also changes the embedder.**
-On 2026-10-05 revisions 126 (`aiqg-v5.92`, current) and 125 (`aiqg-v5.91`) both
-used TEI, as did 124 (`aiqg-v5.90`) and 123 (`aiqg-v5.89`) on 2026-10-02. Rolling
-back to 124 or earlier gives up #239's Claude 5 catalog and corrected prices,
-which are observed on 126. Whether 125 has them was not checked. Rolling back
+On 2026-10-06 revisions 128 (`aiqg-v5.94`, current) and 127 (`aiqg-v5.93`)
+used TEI, as did 126 (`aiqg-v5.92`) and 125 (`aiqg-v5.91`) on 2026-10-05, and
+124 (`aiqg-v5.90`) and 123 (`aiqg-v5.89`) on 2026-10-02. Whether 127 and 128
+carry #242 is not known, so rolling back from 128 may or may not give it up.
+Rolling back to 124 or earlier gives up #239's Claude 5 catalog and corrected
+prices, which are observed on 126. Whether 125, 127 and 128 have them was not
+checked. Rolling back
 from 124 to 123 most probably gives up #238's streaming judge (see the
 build-commit caveat under "Restart a deployment"); revision 122,
 earlier that day the current one, was `aiqg-v5.88` with TEI, 121 was
@@ -1885,20 +2001,21 @@ without the owner. Map a revision to its image and embedder with:
 ```bash
 kubectl get rs -n tas-llm-router -l app=llm-router-aiqg -o 'custom-columns=NAME:.metadata.name,REV:.metadata.annotations.deployment\.kubernetes\.io/revision,IMAGE:.spec.template.spec.containers[0].image'
 NAME                         REV   IMAGE
-...
 llm-router-aiqg-549cc85f4    119   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.86
 llm-router-aiqg-55549bc5dc   121   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.87
 llm-router-aiqg-65fcc4cbb8   122   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.88
 llm-router-aiqg-69cb64fd97   126   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.92
 llm-router-aiqg-6dbd9cc95f   124   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.90
+llm-router-aiqg-6dbdfdc497   118   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.86
+llm-router-aiqg-7594d69f9    128   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.94
 llm-router-aiqg-768b4b5458   120   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.86
+llm-router-aiqg-854b7cf444   127   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.93
 llm-router-aiqg-9cd647b7c    123   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.89
 llm-router-aiqg-b89f54574    125   registry-api.tas.scharber.com/tas-llm-router:aiqg-v5.91
-...
 ```
 
-Assembled from two captures: the rows through revision 124 are from 2026-10-02
-after the 19:05 UTC rollout, and the rows for 125 and 126 are from 2026-10-05.
+Captured 2026-10-06 at 00:04 UTC; all eleven retained revisions, 118 through
+128, are shown.
 `kubectl get rs` sorts by name, not revision.
 
 Then `kubectl get rs <name> -n tas-llm-router -o yaml | grep -A1 EMBED_PROVIDER`
@@ -2032,10 +2149,39 @@ allowlists them, so they are reachable only on the two internal hosts.
 
 ### What the next deploy changes
 
-Everything in this list except its last four rows is merged at `552d869`. Since
+**The short answer to "which code is this pod running": you cannot read it
+from the pod.** No image carries a source-commit label (no
+`org.opencontainers.image.revision`), and no commit records what `aiqg-v5.89`
+through `aiqg-v5.94` were built from. The best available method has two steps.
+First, the bracket test in the table below: two metric series place a pod's code
+before `eee4b24`, at `eee4b24` or later, or at `8e641ca` or later. Second, one
+probe per later change. These probes cost nothing:
+
+- #236 (event flags): an AIQG event in Loki carrying `schema_requested` or
+  `tools_declared`. Absent unless some caller set a schema or declared tools.
+- #238 (streaming judge): `aiqg_stream_buffer_truncated_total` on the pod's
+  `/aiqg/metrics`.
+- #239, price half: `claude-opus-5-5` in the pod's `/v1/models`, or
+  `model_pricing_version` `pricing-v2026-10-04` on its AIQG events.
+- #242: AIQG events for streamed Anthropic requests showing `completion_tokens`
+  `0`. This is indirect. It needs such traffic to exist, and it rests on the
+  code-read warning under "Streamed responses from Anthropic: tool calls and
+  usage", not on an observation.
+
+These need a paid request with a customer token:
+
+- #239, system-block half: a multi-block system prompt, compared with the
+  `usage.input_tokens` it is billed.
+- #242, directly: a streamed `/v1/messages` request, whose `message_start`
+  carries both cache fields only on a pod with #242, or a streamed tool call.
+
+#233 (judge provenance) has no pod-level probe at all; see below.
+
+Everything in this list except its last five rows is merged at `552d869`. Since
 2026-09-21 it runs on `llm-router-aiqg` (`aiqg-v5.87`, built from `e6c24c0`,
 which contains all of it; `aiqg-v5.88` since 2026-09-26; `aiqg-v5.90` since
-2026-10-02 19:05 UTC; `aiqg-v5.92` since 2026-10-05 16:00 UTC) and is **still absent
+2026-10-02 19:05 UTC; `aiqg-v5.92` since 2026-10-05 16:00 UTC; `aiqg-v5.94`
+since 2026-10-05 23:54 UTC) and is **still absent
 from `llm-router`** (`aiqg-v5.75`). "The next
 deploy" therefore now means the next deploy of `llm-router`. No image carries a
 commit label, so the image tag and the series a pod exports are the only ways to
@@ -2045,7 +2191,7 @@ tell which code it runs. Two series bracket the range:
 |---|---|---|
 | Neither series below | older than `eee4b24` | None of this list. `llm-router`, 2026-09-23 and 2026-10-02 |
 | `llm_router_request_duration_seconds` | `eee4b24`, the exporter rewrite | The real exporter; not necessarily anything else here |
-| `llm_router_semcache_lookups_total` | `8e641ca`, the last code change before `552d869` | **Everything in this list except the last four rows**, which this test cannot see (the note after the table gives separate checks for the last two). Both `llm-router-aiqg` pods, 2026-09-23 and 2026-10-02 |
+| `llm_router_semcache_lookups_total` | `8e641ca`, the last code change before `552d869` | **Everything in this list except the last five rows**, which this test cannot see (the short answer above gives a probe for each). Both `llm-router-aiqg` pods, 2026-09-23 and 2026-10-02 |
 
 `llm_router_semcache_lookups_total` is pre-seeded at zero, so it is present from
 the moment a new pod starts, before any traffic. Run the Prometheus query from
@@ -2072,9 +2218,10 @@ not. See also "How it works end to end".
 | Judge-score provenance (#233, `dc1957b`) — **on `llm-router-aiqg` since `aiqg-v5.88`, 2026-09-26** | Judge scores start carrying `vendor`, `model`, `judge_model`, `self_judged`, and `efficacy_judged` can begin to fill for models other than the judge model | "Judge scores and the dashboard's judged-efficacy figure" under "How it works end to end" |
 | Efficacy-applicability flags (#236, `43fc830`) — **on `llm-router-aiqg` since `aiqg-v5.89` or `aiqg-v5.90`, 2026-10-02 (inferred from build times, not observed); not on `llm-router`** | AIQG events from `/v1/chat/completions` — and from `/v1/messages`, `/v1/responses`, and `/v1/completions`, which hand off to the same handler — gain `schema_requested` (the caller set `response_format`) and `tools_declared` (the caller declared tools). Measurement only: no body is read, nothing is scored, no request behaves differently | AIQG event fields only; no section of this document depends on it |
 | Streamed responses buffered and judged (#238, `db5ae56`) — **on `llm-router-aiqg` since `aiqg-v5.90`, 2026-10-02 19:05 UTC (observed); not on `llm-router`** | On `llm-router-aiqg`, streamed responses join the judged sample; `aiqg_judge_excluded_total` gains `stream_error` and `stream_buffer_disabled`; `aiqg_stream_buffer_truncated_total` is exported at `0` by `llm-router-aiqg` now, and by `llm-router` only once it is deployed from `db5ae56` or later. Each in-flight stream holds up to 256 KiB of its text in memory until it ends | "Streamed responses and the judge" under "How it works end to end" |
-| System blocks, prompt-cache breakpoints, Claude 5 catalog and corrected prices (#239, `3b8526e`) — **the catalog and prices on `llm-router-aiqg` since `aiqg-v5.92`, 2026-10-05 16:00 UTC (observed); the system-block fix not checked there; neither on `llm-router`** | Native `/v1/messages` requests keep a multi-block system prompt and their `cache_control` breakpoints, so a Claude Code caller's instructions reach the model and its cached prefix is read cheaply instead of re-paid. A 1-hour cache request still gets 5 minutes. Requests naming a Claude 5 model are routed to Anthropic, not chosen by cost. Haiku cost and judge spend step up 25%, and Claude 5 traffic gains dollar figures | "Native Anthropic requests: system blocks and prompt caching" and "The model catalog and the price table" under "How it works end to end" |
+| System blocks, prompt-cache breakpoints, Claude 5 catalog and corrected prices (#239, `3b8526e`) — **the catalog and prices on `llm-router-aiqg` since `aiqg-v5.92`, 2026-10-05 16:00 UTC (observed on `aiqg-v5.92`; `aiqg-v5.93` and `aiqg-v5.94` not checked); the system-block fix not checked there; neither on `llm-router`** | Native `/v1/messages` requests keep a multi-block system prompt and their `cache_control` breakpoints, so a Claude Code caller's instructions reach the model and its cached prefix is read cheaply instead of re-paid. A 1-hour cache request still gets 5 minutes. Requests naming a Claude 5 model are routed to Anthropic, not chosen by cost. Haiku cost and judge spend step up 25%, and Claude 5 traffic gains dollar figures | "Native Anthropic requests: system blocks and prompt caching" and "The model catalog and the price table" under "How it works end to end" |
+| Streamed tool calls and streamed usage from Anthropic (#242, `78c3cd2`) — **not known to be on either deployment. `llm-router-aiqg` runs `aiqg-v5.94`, rolled out five minutes before #242 merged; its source commit is not recorded. Not on `llm-router`** | A streaming caller calling tools on an Anthropic model receives the tool call instead of an empty `end_turn` answer. The client's `usage` shows real `input_tokens` and cache counts instead of `0`. AIQG events for streamed Anthropic responses record `0` output tokens and `0` output cost (read from the code, not observed) | "Streamed responses from Anthropic: tool calls and usage" under "How it works end to end" |
 
-The last four rows are the exceptions to "merged at `552d869`"; all four
+The last five rows are the exceptions to "merged at `552d869`"; all five
 landed after `e6c24c0`. The first two add no metric series, so the two-series
 test above cannot detect them. The flags are stamped in the chat-completion
 handler (`internal/server/server.go:1198`) and serialised only when set
@@ -2096,6 +2243,14 @@ it. Both passed on `llm-router-aiqg` on 2026-10-05. No check against the pod
 finds the system-block half without sending a paid request; see the caveat in
 that subsection.
 
+#242, the newest row, adds no metric and no log line either. Two indirect checks
+find it. A streamed `/v1/messages` response from a pod with #242 has
+`cache_creation_input_tokens` and `cache_read_input_tokens` in its
+`message_start` event, even when both are `0`; a pod without it omits them.
+That check is a paid request. The free one is in Loki: AIQG events for streamed Anthropic requests showing
+`completion_tokens` of `0` where earlier ones did not mean the pod has #242
+(see the warning in that subsection). Neither check was run for this pass.
+
 Judge-score provenance is not logged at startup, and no image carries a commit
 label. There is no check you can run against the pod itself, only two indirect
 ones. The first is the image tag: a tag built from `dc1957b` or later has it —
@@ -2107,12 +2262,12 @@ them has the change (`aiqg-dashboard-be/internal/handlers/internal_judge.go:135`
 Those rows are not labelled by pod, so this shows only that some pod has it.
 
 **Deploy one deployment at a time and re-run triage steps 1 and 2 after each.**
-The two running tags are now seventeen version numbers apart. `llm-router-aiqg`
+The two running tags are now nineteen version numbers apart. `llm-router-aiqg`
 made its big jump on 2026-09-21 — 33 commits, regression-tested by the owner with
 10 cases and no status changes, per the release commit (#223) — and its step to
 `aiqg-v5.88` on 2026-09-26 was checked with 24 live requests, all `200`, per its
 release commit (#235). Its steps to `aiqg-v5.89` and `aiqg-v5.90` on 2026-10-02,
-and to `aiqg-v5.91` and `aiqg-v5.92` on 2026-10-04 and 2026-10-05, have no release
+and to `aiqg-v5.91`, `aiqg-v5.92`, `aiqg-v5.93` and `aiqg-v5.94` on 2026-10-04 and 2026-10-05, have no release
 commit, so no recorded check exists for them. `llm-router`
 still predates every change above, so its next deploy is the larger jump. The
 owner decides when it happens.
@@ -2150,8 +2305,18 @@ quoted from the code and has not been observed.
 
 | Symptom | Literal error text | Cause | Fix | Confirm |
 |---|---|---|---|---|
-| A native `/v1/messages` caller, typically Claude Code, gets HTTP `200` and plausible answers but behaves as if it had no instructions; or it reports full-price input on every turn despite sending `cache_control` | None. The request succeeds. The tell is in the response's `usage`: `input_tokens` far below the size of the system prompt sent (6,318 tokens sent, 14 billed, on 2026-10-03), or `cache_read_input_tokens` staying at `0` turn after turn on a prompt long enough for Anthropic to cache | A pod older than `3b8526e` merged the system blocks into one string. The vendor then consumed the merged block behind Claude Code's `x-anthropic-billing-header:` marker, and the breakpoints were dropped. See "Native Anthropic requests: system blocks and prompt caching" | Deploy an image with #239 to the deployment that served the caller. There is no configuration switch | The same request's `usage.input_tokens` matches the size of its system prompt, and a second identical request within five minutes reports non-zero `cache_read_input_tokens` |
-| A request fails with HTTP `500` when Anthropic serves it and no fallback provider rescues it | `Completion failed: ... failed to convert request: system messages must be text only for Anthropic`; logged as `Failed to convert request to Anthropic format` at `error` | A `/v1/chat/completions` caller put a non-text part, such as an image, in a system message. Anthropic's system field holds text only, so the router refuses rather than drop the part (`internal/providers/anthropic/provider.go:524`). Before `3b8526e`, any system message sent as a list of parts, even text-only, failed this way on Anthropic | The caller's fix: move the image into a user message | The caller's retry returns `200` |
+| A native `/v1/messages` caller, typically Claude Code, gets HTTP `200` and plausible answers but behaves as if it had no instructions; or it reports full-price input on every turn despite sending `cache_control` | None. The request succeeds. The tell is in the response's `usage`: `input_tokens` far below the size of the system prompt sent (6,318 tokens sent, 14 billed, on 2026-10-03), or `cache_read_input_tokens` staying at `0` turn after turn on a prompt long enough for Anthropic to cache | A pod older than `3b8526e` merged the system blocks into one string. The vendor then consumed the merged block behind Claude Code's `x-anthropic-billing-header:` marker, and the breakpoints were dropped. See "Native Anthropic requests: system blocks and prompt caching" | Deploy an image with #239 to the deployment that served the caller. There is no configuration switch | The same request's `usage.input_tokens` matches the size of its system prompt, and a second identical request within five minutes reports non-zero `cache_read_input_tokens`. Run this check with `stream: false`, or on a pod with #242: before `78c3cd2` a streamed response reported `0` for both cache fields and for `input_tokens`, whatever the vendor did |
+| A request fails with HTTP `500` when Anthropic serves it and no fallback provider rescues it | `Completion failed: ... failed to convert request: system messages must be text only for Anthropic`; logged as `Failed to convert request to Anthropic format` at `error` | A `/v1/chat/completions` caller put a non-text part, such as an image, in a system message. Anthropic's system field holds text only, so the router refuses rather than drop the part (`internal/providers/anthropic/provider.go:573`). Before `3b8526e`, any system message sent as a list of parts, even text-only, failed this way on Anthropic | The caller's fix: move the image into a user message | The caller's retry returns `200` |
+
+The rows below were added on 2026-10-05 for #242. None has a log line. The first
+two were measured by the owner on 2026-10-05, as recorded in the #242 commit
+message. The third is read from the code at `78c3cd2` and has not been observed.
+
+| Symptom | Literal error text | Cause | Fix | Confirm |
+|---|---|---|---|---|
+| A streaming agent, typically Claude Code, reports success with an empty result and takes no action; the same request with `stream: false` works | None. HTTP `200`, `stop_reason: end_turn`, no content blocks, but non-zero `output_tokens` | A pod older than `78c3cd2` discarded the tool-call events of a streamed Anthropic response. Affects every caller format. See "Streamed responses from Anthropic: tool calls and usage" | Deploy an image with #242 to the deployment that served the caller. Until then the caller can turn streaming off | The streamed response ends with a `tool_use` block and `stop_reason: tool_use` |
+| A streaming client shows `input_tokens: 0`, or `0` cache reads and writes, while the AIQG events for the same requests show real figures | None. The client's `usage` reads `"input_tokens":0`, and on `/v1/messages` the cache fields are absent from `message_start` | A pod older than `78c3cd2` discarded the input and cache counts from Anthropic's `message_start` event before they reached the client | Deploy an image with #242. Not a billing fault: the router's metrics and events were correct | `message_start` carries a non-zero `input_tokens` and both cache fields |
+| AIQG cost or output-token figures for Anthropic streaming traffic drop to near zero after a deploy, with no change in traffic | None. Events show `completion_tokens` `0` and `0` output cost for streamed Anthropic requests | From `78c3cd2` the event keeps the first usage it is given, which is now the input-only count from `message_start` (`internal/middleware/aiqg_routing.go:701`). See the warning in "Streamed responses from Anthropic: tool calls and usage" | A code fix; escalate to the owner. The `llm_router_*` cost metrics are unaffected and can stand in meanwhile | To tell it from a real drop: non-streaming events for the same model still show real `completion_tokens`. After a fix, streamed events do too |
 
 **Standing issue as of 2026-08-24:** 51 occurrences of `invalid x-api-key`
 against Anthropic in the preceding 48 hours. This was an active credential
@@ -2474,7 +2639,7 @@ responses being judged; it is counted as `stream_buffer_disabled`.
 `3b8526e` (#239) the router forwards a caller's `cache_control` breakpoints, but
 not the 1-hour lifetime a caller can ask for. The Anthropic library it is built
 with, `v1.7.0`, cannot express one (`go.mod:10`,
-`internal/providers/anthropic/provider.go:802`). A caller that pauses for more
+`internal/providers/anthropic/provider.go:851`). A caller that pauses for more
 than five minutes therefore pays to write its prompt cache again, at 1.25 times
 the input price. A direct connection to Anthropic would have kept the 1-hour
 cache. The fix is upgrading the library, which #239 deferred to a separate
