@@ -684,13 +684,25 @@ func StampStreaming(ctx context.Context, streaming bool) {
 	}
 }
 
-// StampTokenUsage records the vendor-reported token counts. Same
-// first-write-wins semantic as the other stampers — for streaming
-// responses, the final chunk's usage is the authoritative value,
-// and subsequent fallback paths must not overwrite it. Calling with
-// both counts zero is still treated as a valid stamp (UsageSet flips
-// true) so the event distinguishes "vendor returned 0 tokens" from
-// "vendor never returned a usage block".
+// StampTokenUsage records the vendor-reported token counts.
+//
+// The first call establishes the usage block, including an all-zero one, so the
+// event distinguishes "vendor returned 0 tokens" from "vendor never returned a
+// usage block" (that is what usageSet is for, and why zero is a valid stamp).
+// Every later call may only RAISE an individual field.
+//
+// Per-field rather than first-write-wins, because no single chunk of an
+// Anthropic stream carries the whole truth: the first usage-bearing chunk is
+// message_start, which reports the input and cache counts with output_tokens: 0,
+// and the authoritative output count arrives on the closing chunk. Latching the
+// whole block on the first stamp therefore discarded every streamed output count
+// (AIQG-47); replacing the whole block on the last would have been just as wrong
+// had the closing chunk omitted a field, and on this traffic the cache counts it
+// would have dropped are ~95% of the bill.
+//
+// Raising rather than overwriting-if-non-zero makes this order-independent: a
+// count can only grow within one request, so max() is both safe against a chunk
+// that under-reports and incapable of under-reporting cost itself.
 func StampTokenUsage(ctx context.Context, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int) {
 	r := RoutingFromContext(ctx)
 	if r == nil {
@@ -704,14 +716,14 @@ func StampTokenUsage(ctx context.Context, promptTokens, completionTokens, cacheC
 		r.cacheCreationTokens = cacheCreationTokens
 		r.cacheReadTokens = cacheReadTokens
 		r.usageSet = true
+		return
 	}
+	r.promptTokens = max(r.promptTokens, promptTokens)
+	r.completionTokens = max(r.completionTokens, completionTokens)
+	r.cacheCreationTokens = max(r.cacheCreationTokens, cacheCreationTokens)
+	r.cacheReadTokens = max(r.cacheReadTokens, cacheReadTokens)
 }
 
-// StampFinishReason records the vendor-reported finish_reason on the
-// routing sidecar. First-write-wins: the streaming path may stamp
-// from each chunk's choice.FinishReason (only the last chunk
-// typically populates it), but if a later fallback path tries to
-// stamp again the first authoritative value wins.
 // StampEnforcement records what policy decided and in which mode.
 //
 // Mode travels with the outcome because "blocked" and "would have blocked" are
@@ -861,6 +873,17 @@ func StampPromptCache(ctx context.Context, mode string, breakpoints int) {
 	r.promptCacheBreakpoints = breakpoints
 }
 
+// StampFinishReason records the vendor-reported finish_reason on the routing
+// sidecar. First-NON-EMPTY-wins: an empty reason is not a stamp at all, so the
+// streaming path can call this for every chunk and only the one that actually
+// carries a reason lands.
+//
+// Deliberately NOT the same shape as StampTokenUsage. A finish reason has no
+// partial form to merge — one chunk carries it and the rest carry "" — so there
+// is nothing to raise. This comment lived 150 lines up, above StampEnforcement,
+// for long enough that reading it there produced two wrong diagnoses of AIQG-47
+// (both concluding this stamper lost stop_reason the way StampTokenUsage lost
+// output tokens, which it never did).
 func StampFinishReason(ctx context.Context, reason string) {
 	if reason == "" {
 		return

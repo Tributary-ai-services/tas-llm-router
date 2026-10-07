@@ -111,12 +111,16 @@ func TestRouting_StampTokenUsage(t *testing.T) {
 		t.Errorf("cache counts: creation=%d read=%d", s.CacheCreationTokens, s.CacheReadTokens)
 	}
 
-	// First-write-wins: a later fallback path must not overwrite (cache too).
+	// EXPECTATION CHANGED by AIQG-47. This block asserted first-write-wins —
+	// that a later stamp could never move a count. That is what discarded the
+	// output token count of every streamed response: on an Anthropic stream the
+	// first usage-bearing chunk is message_start, carrying output_tokens: 0.
+	// A later stamp now RAISES a field (and only raises it).
 	StampTokenUsage(ctx, 9999, 9999, 9999, 9999)
 	s2 := r.Snapshot()
-	if s2.PromptTokens != 1000 || s2.CompletionTokens != 500 ||
-		s2.CacheCreationTokens != 200 || s2.CacheReadTokens != 800 {
-		t.Errorf("StampTokenUsage not idempotent: %#v", s2)
+	if s2.PromptTokens != 9999 || s2.CompletionTokens != 9999 ||
+		s2.CacheCreationTokens != 9999 || s2.CacheReadTokens != 9999 {
+		t.Errorf("later stamp did not raise counts: %#v", s2)
 	}
 }
 
