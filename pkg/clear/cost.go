@@ -1,6 +1,9 @@
 package clear
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 // PricingVersion is the identifier of the per-model pricing table baked
 // into this binary. Bump when any rate changes so Spark re-score jobs
@@ -8,7 +11,11 @@ import "math"
 //
 // Format: `pricing-vYYYY-MM-DD` reflecting the publication date of the
 // rates encoded in modelPricing.
-const PricingVersion = "pricing-v2026-10-06"
+// Revision suffix because TWO rate changes landed on 2026-10-06: the catalog
+// correction (OPS-54/#241) and AIQG-41's per-model cache-read multipliers.
+// A date alone cannot distinguish them, and the whole point of the stamp is to
+// identify which rows were scored under which rates.
+const PricingVersion = "pricing-v2026-10-06.1"
 
 // modelPricingEntry is the input/output rate pair for one vendor:model.
 // Rates are USD per 1,000 tokens (matches source-spec §2.1.3's CNA/CPS
@@ -161,9 +168,48 @@ type Cost struct {
 // The 1-hour-TTL write premium (2×) is not modeled — the gateway does not
 // request 1-hour caching. Sources + cross-provider variation: AIQG_CACHING_PRIMER.md §4.
 const (
+	// CacheReadMultiplier is the DEFAULT cache-hit multiplier. Several models
+	// are cheaper than this -- see cacheReadMultiplierOverrides, and prefer
+	// CacheReadMultiplierFor over this constant.
 	CacheReadMultiplier  = 0.10
 	CacheWriteMultiplier = 1.25
 )
+
+// cacheReadMultiplierOverrides holds the models whose cache-hit price is NOT
+// the standard 0.1x of base input.
+//
+// Source: Anthropic's published pricing page, read 2026-10-06 --
+// "Cache read (hit): 0.1x base input price (0.025x on Claude Fable 5.1 and
+// Claude Mythos 5.1; 0.05x on Claude Opus 5.5)". Both exception families are
+// in our own pricing table and catalog, so this was not hypothetical: a flat
+// 0.1x OVERSTATED Opus 5.5 cache reads by 2x and Fable 5.1 by 4x, and cache
+// reads are most of the input bill on agent traffic, which is exactly the
+// traffic Plan #17's model comparison reasons about.
+//
+// Cross-check against the page's absolute figures, which is why the
+// multiplier form is safe to store: Opus 5.5 $4/MTok x 0.05 = $0.20/MTok as
+// published; Fable 5.1 $10/MTok x 0.025 = $0.25/MTok as published; Haiku 4.5
+// $1/MTok x 0.10 = $0.10/MTok as published.
+//
+// Mythos 5.1 is listed although it is not in our catalog today, because the
+// cost of carrying one unused row is nothing and the cost of adding the model
+// later without its rate is a silently wrong number.
+var cacheReadMultiplierOverrides = map[string]float64{
+	"anthropic:claude-opus-5-5":   0.05,
+	"anthropic:claude-fable-5-1":  0.025,
+	"anthropic:claude-mythos-5-1": 0.025,
+}
+
+// CacheReadMultiplierFor returns the cache-hit multiplier for a vendor:model,
+// falling back to the standard 0.1x. The fallback is deliberate: an unknown
+// model keeps today's behaviour rather than guessing a discount it may not get,
+// so a missing row can only ever over-state a saving, never invent one.
+func CacheReadMultiplierFor(vendor, model string) float64 {
+	if m, ok := cacheReadMultiplierOverrides[strings.ToLower(vendor+":"+model)]; ok {
+		return m
+	}
+	return CacheReadMultiplier
+}
 
 // ActualCost computes the billed dollar cost of a request from token
 // counts + the model's rates. In Contract v1 this equals the existing
@@ -206,7 +252,7 @@ func CacheAwareCost(vendor, model string, uncachedInput, cacheCreation, cacheRea
 	}
 	in := (float64(uncachedInput) / 1000.0) * inputRate
 	cw := (float64(cacheCreation) / 1000.0) * inputRate * CacheWriteMultiplier
-	cr := (float64(cacheRead) / 1000.0) * inputRate * CacheReadMultiplier
+	cr := (float64(cacheRead) / 1000.0) * inputRate * CacheReadMultiplierFor(vendor, model)
 	out := (float64(completion) / 1000.0) * outputRate
 	src := "computed"
 	if usageFromVendor {
