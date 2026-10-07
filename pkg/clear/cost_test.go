@@ -1,6 +1,9 @@
 package clear
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func intP(v int) *int { return &v }
 
@@ -161,5 +164,52 @@ func TestCompute_PopulatesCostAndComposite(t *testing.T) {
 	// dimension shifts.
 	if *s.Composite < 85 || *s.Composite > 95 {
 		t.Errorf("Composite=%d want ~91 (Healthy band)", *s.Composite)
+	}
+}
+
+// AIQG-41: the cache-read multiplier is per model, not a constant.
+//
+// Source: Anthropic's pricing page, read 2026-10-06 — cache hits are 0.1x base
+// input, EXCEPT 0.05x on Opus 5.5 and 0.025x on Fable 5.1 / Mythos 5.1. Both
+// exception families are in our own table, so the old flat 0.1x overstated
+// Opus 5.5 reads by 2x and Fable 5.1 by 4x — on agent traffic, where cache
+// reads are most of the input bill.
+//
+// Asserted against the page's ABSOLUTE published figures rather than against
+// the multiplier, so this test fails if either the multiplier or the base rate
+// drifts. A test that re-derives the number from the same constant it is
+// checking proves only that arithmetic works.
+func TestCacheReadPricing_PerModelAgainstPublishedRates(t *testing.T) {
+	cases := []struct {
+		vendor, model string
+		readPerMTok   float64 // what the vendor publishes
+	}{
+		{"anthropic", "claude-opus-5-5", 0.20},
+		{"anthropic", "claude-fable-5-1", 0.25},
+		{"anthropic", "claude-haiku-4-5-20251001", 0.10},
+		{"anthropic", "claude-sonnet-5-5", 0.20}, // $2/MTok x 0.10
+	}
+	for _, c := range cases {
+		// One million cache-read tokens, nothing else.
+		got := CacheAwareCost(c.vendor, c.model, 0, 0, 1_000_000, 0, true)
+		if !got.Priced {
+			t.Errorf("%s: not priced — the model is missing from the table", c.model)
+			continue
+		}
+		if math.Abs(got.CacheReadUSD-c.readPerMTok) > 1e-9 {
+			t.Errorf("%s: cache read for 1M tokens = $%.4f, vendor publishes $%.2f",
+				c.model, got.CacheReadUSD, c.readPerMTok)
+		}
+	}
+}
+
+// An unknown model keeps the standard multiplier: a missing row may overstate a
+// saving, never invent one.
+func TestCacheReadMultiplier_UnknownModelFallsBackToStandard(t *testing.T) {
+	if m := CacheReadMultiplierFor("anthropic", "claude-not-in-our-catalog"); m != CacheReadMultiplier {
+		t.Errorf("unknown model multiplier = %v, want the standard %v", m, CacheReadMultiplier)
+	}
+	if m := CacheReadMultiplierFor("anthropic", "claude-opus-5-5"); m != 0.05 {
+		t.Errorf("opus-5-5 multiplier = %v, want 0.05", m)
 	}
 }

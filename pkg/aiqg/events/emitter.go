@@ -185,6 +185,24 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 		respFields["completion_tokens"] = ta.CompletionTokens
 		respFields["total_tokens"] = ta.TotalTokens
 		respFields["total_cost_usd"] = ta.TotalCostUSD
+		// Cache accounting (AIQG-41). Computed correctly for a long time and
+		// promoted nowhere, so every Loki query saw a cached turn as a
+		// full-price one -- measured on two identical Claude Code sessions
+		// where the second was 4.6x cheaper purely from cache reads, and the
+		// promoted figures were indistinguishable.
+		//
+		// total_cost_usd KEEPS its legacy meaning (uncached input + output) on
+		// purpose: dashboards and saved queries read it, and silently changing
+		// what a published number means is worse than adding a second one.
+		// cache_aware_total_cost_usd is the one to use for a cost question --
+		// it is what the vendor actually bills.
+		if ta.CacheReadTokens > 0 || ta.CacheCreationTokens > 0 || ta.CacheAwareTotalCostUSD > 0 {
+			respFields["cache_read_tokens"] = ta.CacheReadTokens
+			respFields["cache_creation_tokens"] = ta.CacheCreationTokens
+			respFields["cache_read_cost_usd"] = ta.CacheReadCostUSD
+			respFields["cache_creation_cost_usd"] = ta.CacheCreationCostUSD
+			respFields["cache_aware_total_cost_usd"] = ta.CacheAwareTotalCostUSD
+		}
 		// Cost decomposition (CLEAR v0.2) — promote as FIELDS (never
 		// stream labels: these are high-cardinality numerics). The
 		// Loki-fallback backend unwraps these; only present on priced
