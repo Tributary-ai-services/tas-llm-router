@@ -179,12 +179,35 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 	if resp.Data.OTelMapVersion != "" {
 		respFields["otel_map_version"] = resp.Data.OTelMapVersion
 	}
+	// source_app on the RESPONSE stream (Phase 3 / AIQG-41's shape again).
+	// The field has been populated for a long time and promoted nowhere, so a
+	// cost question could not be asked per application: source_app landed on
+	// the REQUEST event and cost on the RESPONSE event, and joining them needs
+	// request_event_id, which no dashboard query does. Measured 2026-10-06 over
+	// 96h of code_generation traffic: 88 priced events, 0 attributable to an
+	// app without the join, 88 attributable with it.
+	//
+	// The field's own comment in event.go says it is denormalized "so the
+	// response stream carries the source dimension" -- which is exactly what
+	// this makes true.
+	if resp.Data.SourceApp != "" {
+		respFields["source_app"] = resp.Data.SourceApp
+	}
+
 	// Token accounting — nil-safe; either fully populated or omitted.
 	if ta := resp.Data.TokenAccounting; ta != nil {
 		respFields["prompt_tokens"] = ta.PromptTokens
 		respFields["completion_tokens"] = ta.CompletionTokens
 		respFields["total_tokens"] = ta.TotalTokens
 		respFields["total_cost_usd"] = ta.TotalCostUSD
+		// Which rate table priced this row. Promoted because two pricing
+		// tables existed on 2026-10-06 alone (the catalog correction in #241
+		// and AIQG-41's per-model cache multipliers), so "what rates was this
+		// scored under" stopped being rhetorical. Carried since v0.2 and
+		// promoted nowhere, so no row could answer it.
+		if ta.ModelPricingVersion != "" {
+			respFields["model_pricing_version"] = ta.ModelPricingVersion
+		}
 		// Cache accounting (AIQG-41). Computed correctly for a long time and
 		// promoted nowhere, so every Loki query saw a cached turn as a
 		// full-price one -- measured on two identical Claude Code sessions
