@@ -68,7 +68,17 @@ spec:
 
       containers:
       - name: llm-router
-        image: llm-router:aiqg-v5.88
+        # Pinned to what is DEPLOYED. The pin is part of the fix: on 2026-10-07
+        # this file still said aiqg-v5.88 while live ran aiqg-v5.106, so
+        # `kubectl apply -k` -- run for any unrelated reason -- would have
+        # rolled the gateway back 18 versions and silently undone extended
+        # thinking (RT-6/#246), streamed thinking (RT-7/#247), anthropic-beta
+        # forwarding (#248), image support (#249), the block-content round-trip
+        # fix (#250), cache-aware cost (AIQG-41/#251) and source_app +
+        # flow_id attribution (#252). That is TEST-3's lesson and OPS-14's
+        # hazard: a merged PR pinning the previous image is a loaded gun
+        # pointed at the one that replaced it.
+        image: llm-router:aiqg-v5.106
         imagePullPolicy: Always
         ports:
         - containerPort: 8086
