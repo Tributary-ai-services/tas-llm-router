@@ -129,12 +129,32 @@ spec:
               name: llm-router-secret
               key: ANTHROPIC_API_KEY
 
-        # Gatekeeper inbound redaction. "replace" is a DETERMINISTIC
-        # strategy, which is what makes the redacted prompt byte-stable
-        # and therefore cache-safe — the C1 key is hashed over
-        # post-redaction messages.
+        # Gatekeeper inbound redaction — NOW OFF (log-only).
+        #
+        # The STRATEGY below is kept even though it is inert while disabled:
+        # "replace" is DETERMINISTIC, which is what made the redacted prompt
+        # byte-stable and therefore cache-safe (the C1 key is hashed over
+        # post-redaction messages). If redaction is ever re-enabled it must
+        # stay deterministic for that reason. One consequence of disabling it:
+        # keys now hash raw text, so pre-existing C1 entries no longer match
+        # and simply age out -- harmless, but it is why the hit rate drops to
+        # zero for a while.
+        #
+        # Log-only, by John's instruction 2026-10-07: detect and record, never
+        # rewrite. Redaction is LOSSY and the package default is OFF for that
+        # reason -- `internal/gatekeeper/gatekeeper.go` says so in as many
+        # words: "masking customer@acme.com to [EMAIL] degrades what the model
+        # can answer". On coding traffic that is not a nuance. Code is full of
+        # strings that read as PII, and a rewritten prompt makes the MODEL look
+        # wrong: measured 2026-10-07, `deploy-bot@example.com` reached the model
+        # as `[EMAIL_REDACTED]`, which would have confounded Plan #18's
+        # Opus-vs-Sonnet comparison with redaction damage.
+        #
+        # Scanning is UNAFFECTED. Findings are still produced and still logged;
+        # only the mutation stops. The AIQG policy rules on the dogfood tenant
+        # were set to log-only in the same pass (33 rules, 24 changed).
         - name: GATEKEEPER_REDACT_ENABLED
-          value: "true"
+          value: "false"
         - name: GATEKEEPER_REDACT_STRATEGY
           value: replace
 
