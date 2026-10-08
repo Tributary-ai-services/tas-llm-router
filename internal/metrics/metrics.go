@@ -282,6 +282,53 @@ func (c *healthCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+// reasonCollector publishes llm_router_provider_unhealthy_reason, read at
+// scrape time from the same source as the health gauge.
+type reasonCollector struct {
+	desc    *prometheus.Desc
+	reasons func() map[string]string
+}
+
+func (c *reasonCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *reasonCollector) Collect(ch chan<- prometheus.Metric) {
+	if c.reasons == nil {
+		return
+	}
+	for provider, reason := range c.reasons() {
+		if reason == "" {
+			continue // healthy: no series rather than a series meaning nothing
+		}
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, 1, provider, reason)
+	}
+}
+
+// RegisterProviderUnhealthyReason wires llm_router_provider_unhealthy_reason to
+// a live source. Call once during server construction.
+//
+// Exists because llm_router_provider_health is a bare 1/0, so an alert built on
+// it can fire but cannot say WHY. On 2026-10-05 every Claude path in TAS went
+// down because our own prepaid account ran out of credit, and the only signal
+// available said "anthropic unhealthy" -- which reads as the vendor being down
+// (OPS-55).
+//
+// The reason comes from a CLOSED set, because vendor error text is unbounded
+// and this would otherwise be a cardinality bomb in the one metric an operator
+// reaches for mid-incident. A healthy provider emits NO series, so the metric
+// is absent rather than zero -- which means an alert on it needs no equality
+// test, and `absent()` still distinguishes "nothing wrong" from "nothing
+// scraping".
+func RegisterProviderUnhealthyReason(reasons func() map[string]string) error {
+	return Registry.Register(&reasonCollector{
+		desc: prometheus.NewDesc(
+			"llm_router_provider_unhealthy_reason",
+			"Classified cause of a provider being unhealthy (1 for the active reason; absent when healthy).",
+			[]string{"provider", "reason"}, nil,
+		),
+		reasons: reasons,
+	})
+}
+
 // RegisterProviderHealth wires llm_router_provider_health to a live source.
 // Call once during server construction. The supplied function is invoked on
 // every scrape, so it must be cheap and safe for concurrent use.

@@ -378,7 +378,7 @@ func (r *Router) routeWithRetry(ctx context.Context, req *types.ChatRequest, dec
 
 		// Check provider health before retry
 		if !r.isProviderHealthy(ctx, decision.SelectedProvider) {
-			lastError = fmt.Errorf("provider %s is not healthy", decision.SelectedProvider)
+			lastError = r.unhealthyError(decision.SelectedProvider)
 			r.logger.WithField("provider", decision.SelectedProvider).Warn("Provider unhealthy during retry")
 			continue
 		}
@@ -637,7 +637,7 @@ func (r *Router) routeToSpecificProvider(ctx context.Context, req *types.ChatReq
 
 	// Check if provider is healthy
 	if !r.isProviderHealthy(ctx, providerName) {
-		return nil, nil, fmt.Errorf("provider %s is not healthy", providerName)
+		return nil, nil, r.unhealthyError(providerName)
 	}
 
 	// Get cost estimate
@@ -841,6 +841,31 @@ func (r *Router) getHealthyProviders(ctx context.Context) []string {
 		}
 	}
 	return healthy
+}
+
+// unhealthyError is the error a caller sees when a provider is not healthy.
+//
+// It names the CLASSIFIED reason. The old message was `provider anthropic is
+// not healthy`, which reads as "Anthropic is down" -- and on 2026-10-05 the
+// truth was that our own prepaid account had no credit, while the upstream body
+// saying so exactly was captured on HealthStatus and used nowhere. The first
+// ten minutes of that incident were spent looking at the wrong system.
+//
+// The classified reason only, never the vendor's raw text: this message can
+// reach the public edge, and the raw text carries request ids, workspace ids
+// and our billing state.
+func (r *Router) unhealthyError(providerName string) error {
+	r.healthMu.RLock()
+	var reason string
+	if st, ok := r.healthStatus[providerName]; ok && st != nil {
+		reason = st.Reason
+	}
+	r.healthMu.RUnlock()
+	if reason == "" {
+		return fmt.Errorf("provider %s is not healthy", providerName)
+	}
+	return fmt.Errorf("provider %s is not healthy (%s): %s",
+		providerName, reason, humanHealthReason(reason))
 }
 
 // isProviderHealthy reports whether a provider may be considered as a
@@ -1137,7 +1162,16 @@ func (r *Router) updateHealthStatus(ctx context.Context) {
 		if err != nil {
 			status.Status = "unhealthy"
 			status.ErrorMessage = err.Error()
-			r.logger.WithError(err).Warnf("Health check failed for %s", name)
+			status.Reason = classifyHealthFailure(err)
+			// Error, not Warn. A failed provider health check takes every model
+			// that provider serves offline across both routers -- on
+			// 2026-10-05 that was every Claude path in TAS, including the
+			// production judge, and it logged below error level the whole time
+			// (OPS-55).
+			r.logger.WithError(err).
+				WithField("provider", name).
+				WithField("reason", status.Reason).
+				Errorf("Health check failed for %s", name)
 		} else {
 			status.Status = "healthy"
 			r.logger.WithField("provider", name).Debug("Health check passed")
