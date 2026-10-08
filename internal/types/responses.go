@@ -66,6 +66,14 @@ type StreamError struct {
 	Message string `json:"message"`
 	Type    string `json:"type,omitempty"`
 	Code    string `json:"code,omitempty"`
+	// UpstreamStatus is the HTTP status the VENDOR returned, when it returned
+	// one. Zero for a failure with no vendor verdict -- a dropped connection,
+	// a decode error, a cancellation.
+	//
+	// Added because a mid-stream failure used to flatten the vendor's status
+	// and type into Message via err.Error(), so the one event that could have
+	// explained a broken stream carried a sentence and nothing queryable.
+	UpstreamStatus int `json:"upstream_status,omitempty"`
 }
 
 // UpstreamError is a failure the VENDOR reported, carrying the three things

@@ -290,6 +290,26 @@ func requiresStreaming(model string, maxTokens int64) bool {
 	return hasLimit && maxTokens > int64(limit)
 }
 
+// streamError builds the terminal error frame for a mid-stream failure,
+// keeping the vendor's status and type instead of flattening both into a
+// sentence.
+//
+// Messages.NewStreaming returns NO error -- the SDK defers to stream.Err() --
+// so a vendor refusal on a streamed request never reaches the handler's error
+// path at all. It arrives here, as a chunk, which is why translating it here is
+// the only place it can be translated.
+func streamError(err error) *types.StreamError {
+	se := &types.StreamError{Message: err.Error(), Type: "upstream_stream_error"}
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		se.UpstreamStatus = apiErr.StatusCode
+		if t := string(apiErr.Type()); t != "" {
+			se.Type = t
+		}
+	}
+	return se
+}
+
 // upstreamError translates an Anthropic SDK error into the transport-neutral
 // form the rest of the gateway can classify, so the vendor's own status, type
 // and message survive to the response event instead of being flattened into a
@@ -343,8 +363,7 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 			if err != nil {
 				p.logger.WithError(err).Error("Failed to accumulate streaming event")
 				select {
-				case chunks <- &types.ChatChunk{Error: &types.StreamError{
-					Message: err.Error(), Type: "upstream_stream_error"}}:
+				case chunks <- &types.ChatChunk{Error: streamError(err)}:
 				case <-ctx.Done():
 				}
 				return
@@ -378,8 +397,7 @@ func (p *AnthropicProvider) StreamCompletion(ctx context.Context, req *types.Cha
 		if stream.Err() != nil {
 			p.logger.WithError(stream.Err()).Error("Anthropic streaming error")
 			select {
-			case chunks <- &types.ChatChunk{Error: &types.StreamError{
-				Message: stream.Err().Error(), Type: "upstream_stream_error"}}:
+			case chunks <- &types.ChatChunk{Error: streamError(stream.Err())}:
 			case <-ctx.Done():
 			}
 			return
