@@ -2,6 +2,7 @@ package routing
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -129,5 +130,50 @@ func TestUnhealthyError_FallsBackCleanly(t *testing.T) {
 	r := NewRouter(logrus.New())
 	if msg := r.unhealthyError("nosuch").Error(); msg != "provider nosuch is not healthy" {
 		t.Errorf("unexpected fallback message: %s", msg)
+	}
+}
+
+// GetHealthStatus copies HealthStatus field by field, so a field added to the
+// type and not to the copy reads as its zero value to every caller. That is
+// exactly how OPS-55 shipped broken: the prober logged reason="auth" while
+// llm_router_provider_unhealthy_reason published reason="other", because the
+// metric reads this copy.
+//
+// Reflection rather than a hand-written assertion per field: the point is to
+// fail when SOMEONE ELSE adds a field, which a hand-written list cannot do.
+func TestGetHealthStatus_CopiesEveryField(t *testing.T) {
+	r := NewRouter(logrus.New())
+
+	// Fill every field with a distinctive non-zero value.
+	src := &types.HealthStatus{}
+	v := reflect.ValueOf(src).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString("probe-" + v.Type().Field(i).Name)
+		case reflect.Int64, reflect.Int:
+			f.SetInt(int64(100 + i))
+		default:
+			t.Fatalf("HealthStatus.%s has unhandled kind %s; extend this test",
+				v.Type().Field(i).Name, f.Kind())
+		}
+	}
+	r.healthMu.Lock()
+	r.healthStatus["probe"] = src
+	r.healthMu.Unlock()
+
+	got := r.GetHealthStatus()["probe"]
+	if got == nil {
+		t.Fatal("GetHealthStatus dropped the entry entirely")
+	}
+	gv := reflect.ValueOf(got).Elem()
+	for i := 0; i < gv.NumField(); i++ {
+		name := gv.Type().Field(i).Name
+		if !reflect.DeepEqual(gv.Field(i).Interface(), v.Field(i).Interface()) {
+			t.Errorf("HealthStatus.%s was not copied: got %v, want %v — add it to "+
+				"GetHealthStatus, or every caller reads its zero value",
+				name, gv.Field(i).Interface(), v.Field(i).Interface())
+		}
 	}
 }

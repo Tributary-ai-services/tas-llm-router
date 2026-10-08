@@ -1191,12 +1191,20 @@ func (r *Router) GetHealthStatus() map[string]*types.HealthStatus {
 	defer r.healthMu.RUnlock()
 	status := make(map[string]*types.HealthStatus)
 	for name, health := range r.healthStatus {
-		// Create a copy to avoid external modification
+		// Create a copy to avoid external modification.
+		//
+		// Field-by-field, so EVERY field of types.HealthStatus must be listed
+		// here or it silently reads as its zero value to every caller. Reason
+		// was added for OPS-55 and missed exactly that way: the prober logged
+		// reason="auth" while the metric published reason="other", because the
+		// metric reads this copy. TestGetHealthStatus_CopiesEveryField guards
+		// it by reflection rather than by review.
 		status[name] = &types.HealthStatus{
 			Status:       health.Status,
 			ResponseTime: health.ResponseTime,
 			LastChecked:  health.LastChecked,
 			ErrorMessage: health.ErrorMessage,
+			Reason:       health.Reason,
 		}
 	}
 	return status
