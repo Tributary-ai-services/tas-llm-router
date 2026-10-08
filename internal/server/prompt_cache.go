@@ -71,5 +71,8 @@ func (s *Server) applyPromptCacheMode(r *http.Request, req *types.ChatRequest) {
 			Debug("TAS-Prompt-Cache: auto placed no breakpoints (non-Anthropic model or prefix below the model minimum)")
 	}
 
-	middleware.StampPromptCache(r.Context(), string(applied), breakpoints)
+	// The TTL is read AFTER Apply and Clamp, so it describes what actually
+	// reaches the vendor rather than what the caller asked for -- the same
+	// outcome-not-intent rule as mode and breakpoints above.
+	middleware.StampPromptCache(r.Context(), string(applied), breakpoints, req.MaxCacheTTL())
 }

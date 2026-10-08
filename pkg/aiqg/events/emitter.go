@@ -225,6 +225,13 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 			respFields["cache_read_cost_usd"] = ta.CacheReadCostUSD
 			respFields["cache_creation_cost_usd"] = ta.CacheCreationCostUSD
 			respFields["cache_aware_total_cost_usd"] = ta.CacheAwareTotalCostUSD
+			// Promoted beside the cache costs, not separately, because it is
+			// what makes cache_creation_cost_usd readable: the same token count
+			// costs 1.25x at 5m and 2x at 1h, so without the TTL the creation
+			// figure looks wrong by 1.6x to anyone checking the arithmetic.
+			if resp.Data.PromptCacheTTL != "" {
+				respFields["prompt_cache_ttl"] = resp.Data.PromptCacheTTL
+			}
 		}
 		// Cost decomposition (CLEAR v0.2) — promote as FIELDS (never
 		// stream labels: these are high-cardinality numerics). The

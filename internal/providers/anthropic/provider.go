@@ -660,6 +660,9 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 	// is the largest, safest win available (see
 	// docs/AIQG-PROMPT-CACHE-CONTROL.md §4.1).
 	var systemCached bool
+	// systemCacheControl keeps the control that asked, so its TTL survives to
+	// the wire. Before the SDK carried a TTL field there was nothing to keep.
+	var systemCacheControl *types.CacheControl
 	// systemBlocks is the block-preserving form. The vendor's `system` field is
 	// an ARRAY, and a caller who sent several blocks meant several blocks:
 	// merging them moves every cache_control and, when the first block is a
@@ -689,13 +692,14 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 					}
 					block := anthropic.TextBlockParam{Text: part.Text, Type: "text"}
 					if part.CacheControl != nil {
-						block.CacheControl = ephemeralCacheControl()
+						block.CacheControl = ephemeralCacheControl(part.CacheControl)
 					}
 					systemBlocks = append(systemBlocks, block)
 				}
 			}
 			if msg.CacheControl != nil {
 				systemCached = true
+				systemCacheControl = msg.CacheControl
 			}
 			continue
 		}
@@ -711,7 +715,7 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 		// so passthrough silently failed for exactly the agentic turns where it
 		// pays most.
 		if msg.CacheControl != nil {
-			markLastBlockCached(&anthropicMsg)
+			markLastBlockCached(&anthropicMsg, msg.CacheControl)
 		}
 		messages = append(messages, anthropicMsg)
 	}
@@ -731,20 +735,19 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 			// system prompt", which is the last block.
 			last := &systemBlocks[len(systemBlocks)-1]
 			if last.CacheControl.Type == "" {
-				last.CacheControl = ephemeralCacheControl()
+				last.CacheControl = ephemeralCacheControl(systemCacheControl)
 			}
 		}
 		anthropicReq.System = systemBlocks
 	} else if systemMessage != "" {
 		block := anthropic.TextBlockParam{Text: systemMessage, Type: "text"}
 		if systemCached {
-			// The pinned SDK's CacheControlEphemeralParam carries Type only —
-			// no TTL field — so a caller's 1h request cannot be expressed here
-			// and silently gets the 5m default. Honouring the breakpoint at
-			// the wrong TTL is still far better than dropping it, which is
-			// what happened before this existed. Upgrading the SDK is tracked
-			// separately (docs/AIQG-PROMPT-CACHE-CONTROL.md §7).
-			block.CacheControl = ephemeralCacheControl()
+			// Carries the caller's TTL since the SDK bump to v1.79.0. Before
+			// that, CacheControlEphemeralParam had Type only, so a 1h request
+			// silently became 5m -- honoured at the wrong TTL, which was still
+			// better than dropping the breakpoint but cost real money on any
+			// pause longer than five minutes (AIQG-38).
+			block.CacheControl = ephemeralCacheControl(systemCacheControl)
 		}
 		anthropicReq.System = []anthropic.TextBlockParam{block}
 	}
@@ -886,7 +889,7 @@ func (p *AnthropicProvider) convertToAnthropicRequest(req *types.ChatRequest) (*
 				// tool definitions are big and identical every turn. Threaded
 				// per #100; before this it was dropped like the message blocks.
 				if tool.CacheControl != nil {
-					anthropicTool.OfTool.CacheControl = ephemeralCacheControl()
+					anthropicTool.OfTool.CacheControl = ephemeralCacheControl(tool.CacheControl)
 				}
 				tools = append(tools, anthropicTool)
 			}
@@ -1071,7 +1074,7 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 				// Per-block breakpoint (#100 passthrough): a cache_control on
 				// this specific content part caches the prefix through it.
 				if part.CacheControl != nil {
-					setBlockCacheControl(&blk)
+					setBlockCacheControl(&blk, part.CacheControl)
 				}
 				blocks = append(blocks, blk)
 			}
@@ -1086,7 +1089,7 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 					continue
 				}
 				if part.CacheControl != nil {
-					setBlockCacheControl(&blk)
+					setBlockCacheControl(&blk, part.CacheControl)
 				}
 				blocks = append(blocks, blk)
 			}
@@ -1118,16 +1121,16 @@ func (p *AnthropicProvider) convertMessage(msg types.Message) (anthropic.Message
 // breakpoint at the wrong TTL is far better than dropping it, which is what the
 // gateway did before #100 for every breakpoint that was not on the system
 // block.
-func setBlockCacheControl(b *anthropic.ContentBlockParamUnion) {
+func setBlockCacheControl(b *anthropic.ContentBlockParamUnion, cc *types.CacheControl) {
 	switch {
 	case b.OfText != nil:
-		b.OfText.CacheControl = ephemeralCacheControl()
+		b.OfText.CacheControl = ephemeralCacheControl(cc)
 	case b.OfImage != nil:
-		b.OfImage.CacheControl = ephemeralCacheControl()
+		b.OfImage.CacheControl = ephemeralCacheControl(cc)
 	case b.OfToolUse != nil:
-		b.OfToolUse.CacheControl = ephemeralCacheControl()
+		b.OfToolUse.CacheControl = ephemeralCacheControl(cc)
 	case b.OfToolResult != nil:
-		b.OfToolResult.CacheControl = ephemeralCacheControl()
+		b.OfToolResult.CacheControl = ephemeralCacheControl(cc)
 	}
 }
 
@@ -1163,10 +1166,40 @@ func systemPartsFrom(content any) ([]types.ContentPart, bool) {
 // NOTHING and the breakpoint silently vanishes on the wire. Type must be set
 // explicitly for the field to appear. (This is why the system-block breakpoint
 // looked wired but produced no cache_control before #100's provider fix.)
-func ephemeralCacheControl() anthropic.CacheControlEphemeralParam {
-	cc := anthropic.CacheControlEphemeralParam{}
-	cc.Type = "ephemeral"
-	return cc
+func ephemeralCacheControl(cc *types.CacheControl) anthropic.CacheControlEphemeralParam {
+	out := anthropic.CacheControlEphemeralParam{}
+	out.Type = "ephemeral"
+	if ttl, ok := anthropicCacheTTL(cc); ok {
+		out.TTL = ttl
+	}
+	return out
+}
+
+// anthropicCacheTTL maps a client's cache_control.ttl onto the vendor's enum.
+//
+// Only "5m" and "1h" exist. An unrecognised value is DROPPED rather than
+// forwarded, because an invalid ttl 400s the whole request -- losing the TTL
+// preference degrades to the 5m default, losing the request loses the work. The
+// drop is counted, so "we ignored your TTL" is visible rather than silent: that
+// silence is what AIQG-38 measured, where a 1h request became 5m with nothing
+// recording it.
+//
+// An empty TTL is not a drop. It means the caller expressed no preference and
+// the vendor default (5m) is correct, so it is distinguished from a value we
+// could not honour.
+func anthropicCacheTTL(cc *types.CacheControl) (anthropic.CacheControlEphemeralTTL, bool) {
+	if cc == nil || cc.TTL == "" {
+		return "", false
+	}
+	switch strings.ToLower(cc.TTL) {
+	case "5m":
+		return anthropic.CacheControlEphemeralTTLTTL5m, true
+	case "1h":
+		return anthropic.CacheControlEphemeralTTLTTL1h, true
+	default:
+		metrics.ParamDroppedTotal.WithLabelValues("anthropic", "cache_control_ttl").Inc()
+		return "", false
+	}
 }
 
 // markLastBlockCached puts a breakpoint at the end of a message. A message-level
@@ -1174,11 +1207,11 @@ func ephemeralCacheControl() anthropic.CacheControlEphemeralParam {
 // types.Message.CacheControl), and Anthropic caches the prefix up to and
 // including the block the breakpoint sits on — so the last block is the right
 // place.
-func markLastBlockCached(m *anthropic.MessageParam) {
+func markLastBlockCached(m *anthropic.MessageParam, cc *types.CacheControl) {
 	if m == nil || len(m.Content) == 0 {
 		return
 	}
-	setBlockCacheControl(&m.Content[len(m.Content)-1])
+	setBlockCacheControl(&m.Content[len(m.Content)-1], cc)
 }
 
 // messageContentString flattens a message's content (string or multimodal

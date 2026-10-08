@@ -165,15 +165,34 @@ type Cost struct {
 //	cache-READ  (hit)      = 0.10× the input rate  (Anthropic; ~90% off)
 //	cache-WRITE (creation) = 1.25× the input rate  (Anthropic, 5-minute TTL)
 //
-// The 1-hour-TTL write premium (2×) is not modeled — the gateway does not
-// request 1-hour caching. Sources + cross-provider variation: AIQG_CACHING_PRIMER.md §4.
+// The 1-hour-TTL write premium (2×) IS now modeled, because the gateway now
+// requests 1-hour caching: the SDK bump to v1.79.0 gave CacheControlEphemeral a
+// TTL field, so a caller's `ttl: "1h"` finally reaches the vendor instead of
+// silently becoming 5m (AIQG-38). Honouring that without pricing it would have
+// under-reported every 1h creation by 1.6×.
+// Sources + cross-provider variation: AIQG_CACHING_PRIMER.md §4.
 const (
 	// CacheReadMultiplier is the DEFAULT cache-hit multiplier. Several models
 	// are cheaper than this -- see cacheReadMultiplierOverrides, and prefer
 	// CacheReadMultiplierFor over this constant.
 	CacheReadMultiplier  = 0.10
 	CacheWriteMultiplier = 1.25
+	// CacheWrite1hMultiplier prices a 1-hour-TTL cache WRITE. A cache read costs
+	// the same either way, so only the write rate differs by TTL.
+	CacheWrite1hMultiplier = 2.0
 )
+
+// CacheWriteMultiplierFor returns the cache-WRITE multiplier for a TTL.
+//
+// An unrecognised or empty ttl means "the caller expressed no preference", and
+// the vendor default is 5m -- so the conservative 1.25× is correct for it
+// rather than a guess. Only an explicit "1h" pays the premium.
+func CacheWriteMultiplierFor(ttl string) float64 {
+	if strings.EqualFold(ttl, "1h") {
+		return CacheWrite1hMultiplier
+	}
+	return CacheWriteMultiplier
+}
 
 // cacheReadMultiplierOverrides holds the models whose cache-hit price is NOT
 // the standard 0.1x of base input.
@@ -237,7 +256,7 @@ func ActualCost(vendor, model string, promptTokens, completionTokens int, usageF
 // rates —
 //
 //	uncachedInput  × inputRate                          (full rate)
-//	cacheCreation  × inputRate × CacheWriteMultiplier   (1.25×)
+//	cacheCreation  × inputRate × CacheWriteMultiplierFor(ttl)  (1.25× or 2×)
 //	cacheRead      × inputRate × CacheReadMultiplier     (0.10×)
 //
 // This matches provider billing (e.g. Anthropic's usage reports input_tokens
@@ -245,13 +264,22 @@ func ActualCost(vendor, model string, promptTokens, completionTokens int, usageF
 // cache_read_input_tokens separately). Passing 0 for both cache counts yields
 // exactly ActualCost's number, so callers with no cache data are unaffected.
 // Returns Priced=false when the vendor:model pair isn't in the table.
+// CacheAwareCost prices a response whose breakpoints used the default 5-minute
+// TTL. Kept as-is so existing callers are unaffected; CacheAwareCostTTL is the
+// form to use when the request's TTL is known.
 func CacheAwareCost(vendor, model string, uncachedInput, cacheCreation, cacheRead, completion int, usageFromVendor bool) Cost {
+	return CacheAwareCostTTL(vendor, model, uncachedInput, cacheCreation, cacheRead, completion, usageFromVendor, "")
+}
+
+// CacheAwareCostTTL is CacheAwareCost with the cache-write TTL supplied, so a
+// 1-hour breakpoint is priced at its real 2× rate.
+func CacheAwareCostTTL(vendor, model string, uncachedInput, cacheCreation, cacheRead, completion int, usageFromVendor bool, cacheTTL string) Cost {
 	inputRate, outputRate, found := LookupPricing(vendor, model)
 	if !found {
 		return Cost{Priced: false}
 	}
 	in := (float64(uncachedInput) / 1000.0) * inputRate
-	cw := (float64(cacheCreation) / 1000.0) * inputRate * CacheWriteMultiplier
+	cw := (float64(cacheCreation) / 1000.0) * inputRate * CacheWriteMultiplierFor(cacheTTL)
 	cr := (float64(cacheRead) / 1000.0) * inputRate * CacheReadMultiplierFor(vendor, model)
 	out := (float64(completion) / 1000.0) * outputRate
 	src := "computed"

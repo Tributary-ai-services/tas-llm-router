@@ -74,6 +74,7 @@ type RoutingView struct {
 	// breakpoints that actually reached the vendor.
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
+	PromptCacheTTL         string
 
 	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
 	// ApplicabilitySet=false means the sidecar was never stamped, and both
@@ -604,13 +605,20 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 			ta.ModelPricingVersion = clear.PricingVersion
 
 			// Cache-aware accounting: when the vendor reported cache tokens,
-			// price them at their real multiples of the input rate (creation
-			// 1.25×, read 0.10×) and record the true billed total. `prompt` is
-			// the uncached input (vendor input_tokens); cache tokens are
-			// separate. TotalCostUSD stays the legacy uncached+output figure.
+			// price them at their real multiples of the input rate (read 0.10×;
+			// creation 1.25× at the 5m TTL and 2× at 1h) and record the true
+			// billed total. `prompt` is the uncached input (vendor
+			// input_tokens); cache tokens are separate. TotalCostUSD stays the
+			// legacy uncached+output figure.
+			//
+			// PromptCacheTTL comes from the request, stamped after Apply/Clamp,
+			// so it is the TTL that actually reached the vendor. Passing it is
+			// what keeps the 1h lever from silently under-reporting cost by
+			// 1.6× now that the gateway can request 1h at all.
 			if routing.CacheCreationTokens > 0 || routing.CacheReadTokens > 0 {
-				ca := clear.CacheAwareCost(routing.Vendor, routing.Model, prompt,
-					routing.CacheCreationTokens, routing.CacheReadTokens, completion, routing.UsageSet)
+				ca := clear.CacheAwareCostTTL(routing.Vendor, routing.Model, prompt,
+					routing.CacheCreationTokens, routing.CacheReadTokens, completion, routing.UsageSet,
+					routing.PromptCacheTTL)
 				ta.CacheCreationTokens = routing.CacheCreationTokens
 				ta.CacheReadTokens = routing.CacheReadTokens
 				ta.CacheCreationCostUSD = ca.CacheCreationUSD
@@ -731,6 +739,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		FinishReason:               finishReason,
 		PromptCacheMode:            routing.PromptCacheMode,
 		PromptCacheBreakpoints:     routing.PromptCacheBreakpoints,
+		PromptCacheTTL:             routing.PromptCacheTTL,
 		Synthetic:                  synthetic,
 		SyntheticReason:            syntheticReason,
 		SignalsExcluded:            routing.SignalsExcluded,

@@ -55,6 +55,7 @@ type Routing struct {
 	affinityReason         string
 	promptCacheMode        string
 	promptCacheBreakpoints int
+	promptCacheTTL         string
 	finishReason           string
 
 	// Efficacy sub-metric APPLICABILITY (Plan #17a Tier 2, Phase 0a). Not
@@ -211,6 +212,7 @@ type RoutingSnapshot struct {
 	// breakpoints actually reached the vendor.
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
+	PromptCacheTTL         string
 
 	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
 	// ApplicabilitySet=false means never stamped — the event omits both flags
@@ -331,6 +333,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		AffinityReason:             r.affinityReason,
 		PromptCacheMode:            r.promptCacheMode,
 		PromptCacheBreakpoints:     r.promptCacheBreakpoints,
+		PromptCacheTTL:             r.promptCacheTTL,
 		SchemaRequested:            r.schemaRequested,
 		ToolsDeclared:              r.toolsDeclared,
 		ApplicabilitySet:           r.applicabilitySet,
@@ -862,7 +865,11 @@ func StampAffinity(ctx context.Context, held bool, epoch, reason string) {
 // on while the request carries zero breakpoints is precisely the silent failure
 // this feature exists to end, and it is only visible if the event reports what
 // happened rather than what was asked for.
-func StampPromptCache(ctx context.Context, mode string, breakpoints int) {
+// ttl is the strongest TTL any surviving breakpoint asks for ("1h", "5m" or
+// ""). It rides here rather than on the token stamp because it is a property of
+// the REQUEST, known before the vendor answers, and because the cost model
+// needs it: a 1h cache write is 2x input against 1.25x for 5m.
+func StampPromptCache(ctx context.Context, mode string, breakpoints int, ttl string) {
 	r := RoutingFromContext(ctx)
 	if r == nil {
 		return
@@ -871,6 +878,7 @@ func StampPromptCache(ctx context.Context, mode string, breakpoints int) {
 	defer r.mu.Unlock()
 	r.promptCacheMode = mode
 	r.promptCacheBreakpoints = breakpoints
+	r.promptCacheTTL = ttl
 }
 
 // StampFinishReason records the vendor-reported finish_reason on the routing
