@@ -11,6 +11,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 	"github.com/sirupsen/logrus"
 
 	"github.com/tributary-ai/llm-router-waf/internal/instrumentation"
@@ -217,6 +218,20 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *types.ChatR
 	ctx = instrumentation.Attach(ctx)
 
 	// Make the API call
+	// Pre-flight: the SDK will refuse this locally, before any HTTP request,
+	// and that refusal reaches the caller as an opaque 500. Answering it here
+	// gives a 400 that names the cause and the fix.
+	if requiresStreaming(req.Model, anthropicReq.MaxTokens) {
+		metrics.ParamDroppedTotal.WithLabelValues("anthropic", "non_streaming_too_large").Inc()
+		return nil, &types.UpstreamError{
+			Status: http.StatusBadRequest,
+			Type:   "invalid_request_error",
+			Message: fmt.Sprintf(
+				"max_tokens %d requires a streaming request on %s; retry with \"stream\": true",
+				anthropicReq.MaxTokens, req.Model),
+		}
+	}
+
 	resp, err := p.clientFor(ctx).Messages.New(ctx, *anthropicReq, betaOptions(req)...)
 	if err != nil {
 		ue := upstreamError(err)
@@ -240,6 +255,39 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *types.ChatR
 
 	// Convert response back to our format
 	return p.convertFromAnthropicResponse(resp, req), nil
+}
+
+// requiresStreaming mirrors the SDK's OWN pre-flight check (client.go, the
+// "streaming is required for operations that may take longer than 10 minutes"
+// guard) using the SDK's OWN table, so the two cannot drift.
+//
+// This matters because that refusal is CLIENT-SIDE: the SDK computes an
+// expected duration from max_tokens and returns a plain fmt.Errorf before any
+// HTTP request. The vendor is never contacted -- confirmed by the absence of
+// vendor_ttfb_ms on the event -- which corrects AIQG-50's own diagnosis that
+// "the request reached the vendor". There is no upstream status or body to
+// relay, because there is no upstream call.
+//
+// Catching it here turns a 500 labelled vendor_error into a 400 labelled
+// gateway_error, with a message naming the fix. Mirroring rather than
+// hardcoding keeps the failure direction safe: if the SDK ever becomes
+// STRICTER than this, it still rejects and nothing regresses; only a laxer SDK
+// would make us reject something that would have worked, and we track its
+// table rather than a copy of its numbers.
+func requiresStreaming(model string, maxTokens int64) bool {
+	if maxTokens <= 0 {
+		return false
+	}
+	const (
+		maximumTime = time.Hour
+		defaultTime = 10 * time.Minute
+	)
+	expected := time.Duration(float64(maximumTime) * float64(maxTokens) / 128000.0)
+	if expected > defaultTime {
+		return true
+	}
+	limit, hasLimit := constant.ModelNonStreamingTokens[model]
+	return hasLimit && maxTokens > int64(limit)
 }
 
 // upstreamError translates an Anthropic SDK error into the transport-neutral
