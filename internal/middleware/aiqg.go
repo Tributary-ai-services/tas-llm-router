@@ -368,7 +368,13 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		expSnap := routing.Snapshot()
 
 		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
-			HTTPStatus:      sw.status(),
+			HTTPStatus: sw.status(),
+			// An explicit outcome overrides the status derived from the HTTP
+			// code. Load-bearing for STREAMED failures: the handler writes 200
+			// and the SSE headers before the first chunk, so a stream that dies
+			// halfway still reports http_status 200 and would otherwise be
+			// recorded as a success (see StampOutcome).
+			Status:          expSnap.Outcome,
 			Region:          cfg.Region,
 			IPCaptureMode:   cfg.IPCaptureMode,
 			ResponseEventID: respEventID,

@@ -1912,9 +1912,22 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 		if chunk.Error != nil {
 			buf.markIncomplete()
 			middleware.StampFinishReason(ctx, "error")
+			// The event would otherwise record this as a SUCCESS: the SSE
+			// headers and a 200 went out before the first chunk, so
+			// StatusFromHTTP(200) says success and only finish_reason hinted
+			// otherwise. A failed stream must not feed CLEAR Reliability as a
+			// clean completion.
+			middleware.StampOutcome(ctx, events.StatusVendorError)
+			middleware.StampVendorError(ctx, chunk.Error.UpstreamStatus, chunk.Error.Type, chunk.Error.Message)
+			// Error, not Warn. A terminal failure that logs below error level
+			// is invisible to the first query anyone runs in an incident --
+			// the AIQG-50 defect, surviving on the streaming path because that
+			// fix was applied to the event emitter rather than here.
 			s.logger.WithField("provider", provider).
 				WithField("detail", chunk.Error.Message).
-				Warn("streaming completion failed mid-stream")
+				WithField("upstream_status", chunk.Error.UpstreamStatus).
+				WithField("error_type", chunk.Error.Type).
+				Error("streaming completion failed mid-stream")
 			enc.writeError(chunk.Error)
 			failed = true
 			break

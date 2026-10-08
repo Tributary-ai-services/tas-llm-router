@@ -59,6 +59,7 @@ type Routing struct {
 	vendorErrorStatus      int
 	vendorErrorType        string
 	vendorErrorMessage     string
+	outcome                string
 	finishReason           string
 
 	// Efficacy sub-metric APPLICABILITY (Plan #17a Tier 2, Phase 0a). Not
@@ -219,6 +220,7 @@ type RoutingSnapshot struct {
 	VendorErrorStatus      int
 	VendorErrorType        string
 	VendorErrorMessage     string
+	Outcome                string
 
 	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
 	// ApplicabilitySet=false means never stamped — the event omits both flags
@@ -343,6 +345,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		VendorErrorStatus:          r.vendorErrorStatus,
 		VendorErrorType:            r.vendorErrorType,
 		VendorErrorMessage:         r.vendorErrorMessage,
+		Outcome:                    r.outcome,
 		SchemaRequested:            r.schemaRequested,
 		ToolsDeclared:              r.toolsDeclared,
 		ApplicabilitySet:           r.applicabilitySet,
@@ -888,6 +891,35 @@ func StampPromptCache(ctx context.Context, mode string, breakpoints int, ttl str
 	r.promptCacheMode = mode
 	r.promptCacheBreakpoints = breakpoints
 	r.promptCacheTTL = ttl
+}
+
+// StampOutcome records an explicit response status, overriding the one the
+// event would otherwise derive from the HTTP status code.
+//
+// It exists because a STREAMED failure is invisible to that derivation. The
+// handler writes 200 and the SSE headers before the first chunk, so a stream
+// that dies halfway still has http_status 200 -- and StatusFromHTTP(200) is
+// `success`. A mid-stream vendor death was therefore recorded as a SUCCESSFUL
+// request, with only finish_reason="error" hinting otherwise, and that figure
+// feeds CLEAR Reliability and Efficacy, which gate routing. A gateway that
+// reports failures as successes corrupts the numbers the gate reads.
+//
+// Explicit rather than inferred from VendorErrorStatus being set: a request
+// that failed one provider and then SUCCEEDED on fallback would read as a
+// failure under that inference. Only a terminal outcome should call this.
+//
+// First-write-wins: the first terminal outcome is the one that ended the
+// request.
+func StampOutcome(ctx context.Context, status string) {
+	r := RoutingFromContext(ctx)
+	if r == nil || status == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.outcome == "" {
+		r.outcome = status
+	}
 }
 
 // StampVendorError records what the VENDOR said when it refused, so the
