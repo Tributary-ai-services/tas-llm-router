@@ -98,12 +98,14 @@ var forwardableBetas = map[string]string{
 	// produced blocks this gateway silently dropped before today.
 	"interleaved-thinking-2025-05-14": "thinking interleaved with tool use; blocks are handled since RT-7",
 
-	// Opt-in for a 1h cache TTL. Currently INERT and recorded as such rather
-	// than advertised: types.CacheControl carries TTL, but the pinned SDK
-	// v1.7.0 has no field to send it, so the vendor behaves identically with
-	// or without this header. Forwarded anyway so that the SDK upgrade is the
-	// only change needed later, not two.
-	"extended-cache-ttl-2025-04-11": "1h cache TTL; inert until the SDK carries ttl",
+	// Opt-in for a 1h cache TTL. No longer needed, and measured rather than
+	// assumed: probed 2026-10-08 against claude-haiku-4-5 with the SDK at
+	// v1.79.0, a `ttl: "1h"` breakpoint is accepted and creates a 1h entry
+	// WITHOUT this header (creation=5510 on the first call, read=5510 on the
+	// next). So the beta is GA and the header is a no-op. Still forwarded,
+	// because a client that sends it is not wrong and dropping a header the
+	// vendor accepts would be its own small lie.
+	"extended-cache-ttl-2025-04-11": "1h cache TTL; GA since at least 2026-10-08, header is a no-op",
 }
 
 // The six NOT forwarded, and why -- recorded because "we dropped it" is only
