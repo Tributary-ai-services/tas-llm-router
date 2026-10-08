@@ -232,6 +232,14 @@ type ResponseEvent struct {
 	// 2x rather than 1.25x, and a cost nobody can explain is the defect this
 	// whole line of work exists to end.
 	PromptCacheTTL string `json:"prompt_cache_ttl,omitempty"`
+	// The vendor's own account of a refusal. Present only on failure.
+	// UpstreamStatus is what the VENDOR returned, deliberately separate from
+	// HTTPStatus (what we returned to the caller): a deterministic vendor 400
+	// surfaced as our 500 is precisely the confusion AIQG-50 records, and
+	// keeping both lets a reader see the translation rather than guess at it.
+	UpstreamStatus int    `json:"upstream_status,omitempty"`
+	ErrorType      string `json:"error_type,omitempty"`
+	ErrorMessage   string `json:"error_message,omitempty"`
 
 	// Provider affinity (routing-decision.md §5.5). AffinityEpoch identifies
 	// the span over which the vendor cache can stay warm; AffinityReason says

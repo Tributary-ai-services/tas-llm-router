@@ -1,6 +1,7 @@
 package types
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -65,6 +66,60 @@ type StreamError struct {
 	Message string `json:"message"`
 	Type    string `json:"type,omitempty"`
 	Code    string `json:"code,omitempty"`
+}
+
+// UpstreamError is a failure the VENDOR reported, carrying the three things
+// that make it diagnosable after the fact: the status the vendor returned, its
+// error type, and its message.
+//
+// It exists because none of that used to survive. AIQG-50 measured a response
+// event reading `status: vendor_error, http_status: 500, finish_reason: ""`
+// with no error text, no upstream status and no vendor code, while the actual
+// cause -- "streaming is required for operations that may take longer than 10
+// minutes" -- sat in a log line carrying only error/level/msg/time, so it could
+// not be joined to the event it explained. The cause was logged and
+// structurally unattributable, which reads exactly like absent.
+//
+// Typed rather than a wrapped string so the server can classify without
+// importing a vendor SDK: each provider translates its own error here, and the
+// transport-neutral half of the gateway stays transport-neutral.
+type UpstreamError struct {
+	// Status is the HTTP status the VENDOR returned, not the one we will send.
+	Status int
+	// Type is the vendor's own error type, e.g. "invalid_request_error".
+	Type string
+	// Message is the vendor's human-readable reason.
+	Message string
+	// Err is the underlying error, kept for errors.Is/As chains.
+	Err error
+}
+
+func (e *UpstreamError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Type != "" {
+		return fmt.Sprintf("upstream %d %s: %s", e.Status, e.Type, e.Message)
+	}
+	return fmt.Sprintf("upstream %d: %s", e.Status, e.Message)
+}
+
+func (e *UpstreamError) Unwrap() error { return e.Err }
+
+// Retryable reports whether re-sending the IDENTICAL request could plausibly
+// succeed. A 4xx other than 408/429 is the vendor telling us the request is
+// wrong, so retrying it is guaranteed to fail the same way -- and advice to
+// "try again in a moment" on such an error is what invites a retry loop
+// (AIQG-50 observed 11 attempts and $1.68 on one).
+func (e *UpstreamError) Retryable() bool {
+	if e == nil {
+		return false
+	}
+	switch e.Status {
+	case 408, 429:
+		return true
+	}
+	return e.Status < 400 || e.Status >= 500
 }
 
 // Streaming response

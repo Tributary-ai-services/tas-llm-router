@@ -417,7 +417,33 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 			respFields["agent_drift"] = *ac.AgentDrift
 		}
 	}
-	e.Logger.WithFields(respFields).Info("aiqg response event")
+	// Promote the vendor's own account of a refusal, beside the status it
+	// explains. Without these the event said `status: vendor_error,
+	// http_status: 500` and nothing else -- a failure that could not be
+	// explained after the fact (AIQG-50).
+	if resp.Data.UpstreamStatus > 0 {
+		respFields["upstream_status"] = resp.Data.UpstreamStatus
+	}
+	if resp.Data.ErrorType != "" {
+		respFields["error_type"] = resp.Data.ErrorType
+	}
+	if resp.Data.ErrorMessage != "" {
+		respFields["error_message"] = resp.Data.ErrorMessage
+	}
+	// A FAILURE is logged at error level. This event was emitted at Info
+	// regardless of outcome, so `|= "error"` or `| level="ERROR"` -- the first
+	// query anyone runs during an incident -- missed every vendor failure the
+	// gateway had ever recorded.
+	//
+	// Only genuine failures qualify. policy_blocked and client_disconnect are
+	// OUTCOMES the gateway produced on purpose, and logging them as errors
+	// would refill the haystack this change exists to empty.
+	switch resp.Data.Status {
+	case StatusVendorError, StatusGatewayError, StatusTimeout:
+		e.Logger.WithFields(respFields).Error("aiqg response event")
+	default:
+		e.Logger.WithFields(respFields).Info("aiqg response event")
+	}
 	return nil
 }
 
