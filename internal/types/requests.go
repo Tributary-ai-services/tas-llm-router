@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -137,6 +138,54 @@ type CacheControl struct {
 	// requires an SDK upgrade (see docs/AIQG-PROMPT-CACHE-CONTROL.md §7), so it
 	// is carried but may not yet be honoured.
 	TTL string `json:"ttl,omitempty"`
+}
+
+// MaxCacheTTL reports the strongest prompt-cache TTL any breakpoint on this
+// request asks for: "1h", "5m", or "" when no breakpoint names one.
+//
+// It lives here, not in a provider, because three places need the same answer
+// and a second implementation is how they drift: the Anthropic provider decides
+// what to put on the wire, the handler stamps what was applied, and the cost
+// model prices a 1h WRITE at 2x input against 1.25x for 5m. The third is the
+// reason this is not cosmetic -- honouring a 1h request without telling the
+// cost model under-reports every 1h creation by 1.6x.
+//
+// "Strongest" rather than "first" because a request may mix TTLs and the cost
+// consequence is what matters: pricing all creation at the longest TTL asked
+// for can over-report a mixed request but can never under-report one, which is
+// the safe direction for a bill. The exact per-TTL split is available from the
+// vendor response (cache_creation.ephemeral_1h_input_tokens) and is the more
+// precise answer when someone needs it.
+func (r *ChatRequest) MaxCacheTTL() string {
+	if r == nil {
+		return ""
+	}
+	best := ""
+	note := func(cc *CacheControl) {
+		if cc == nil {
+			return
+		}
+		switch strings.ToLower(cc.TTL) {
+		case "1h":
+			best = "1h"
+		case "5m":
+			if best == "" {
+				best = "5m"
+			}
+		}
+	}
+	for i := range r.Messages {
+		note(r.Messages[i].CacheControl)
+		if parts, ok := r.Messages[i].Content.([]ContentPart); ok {
+			for j := range parts {
+				note(parts[j].CacheControl)
+			}
+		}
+	}
+	for i := range r.Tools {
+		note(r.Tools[i].CacheControl)
+	}
+	return best
 }
 
 // UnmarshalJSON restores Content's block form after a JSON round trip.

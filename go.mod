@@ -7,7 +7,7 @@ toolchain go1.24.4
 require (
 	github.com/IBM/sarama v1.46.3
 	github.com/Tributary-ai-services/Gatekeeper v0.0.0-00010101000000-000000000000
-	github.com/anthropics/anthropic-sdk-go v1.7.0
+	github.com/anthropics/anthropic-sdk-go v1.79.0
 	github.com/getkin/kin-openapi v0.133.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
@@ -18,6 +18,16 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.11.1
 	gopkg.in/yaml.v3 v3.0.1
+)
+
+require (
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/invopop/jsonschema v0.14.0 // indirect
+	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
+	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
+	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
+	golang.org/x/sync v0.17.0 // indirect
 )
 
 replace github.com/Tributary-ai-services/Gatekeeper => ../Gatekeeper
@@ -66,7 +76,7 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
-	github.com/tidwall/gjson v1.14.4 // indirect
+	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect

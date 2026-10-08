@@ -226,6 +226,12 @@ type ResponseEvent struct {
 	// recorded per request.
 	PromptCacheMode        string `json:"prompt_cache_mode,omitempty"`
 	PromptCacheBreakpoints int    `json:"prompt_cache_breakpoints,omitempty"`
+	// PromptCacheTTL is the cache-write TTL that reached the vendor ("1h",
+	// "5m", or absent when no breakpoint named one). Promoted, not merely
+	// carried: it is the one field that explains why a cache_creation cost is
+	// 2x rather than 1.25x, and a cost nobody can explain is the defect this
+	// whole line of work exists to end.
+	PromptCacheTTL string `json:"prompt_cache_ttl,omitempty"`
 
 	// Provider affinity (routing-decision.md §5.5). AffinityEpoch identifies
 	// the span over which the vendor cache can stay warm; AffinityReason says
