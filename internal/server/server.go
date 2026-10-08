@@ -1782,12 +1782,12 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 // So a vendor 4xx becomes a 4xx with the vendor's reason attached, and only a
 // genuinely retryable failure keeps the retryable wording. 408 and 429 stay
 // retryable because they are the two 4xx that mean "later, not never".
-func (s *Server) upstreamFailure(r *http.Request, err error) (status int, message string) {
+func (s *Server) upstreamFailure(r *http.Request, err error, prefix string) (status int, message string) {
 	var ue *types.UpstreamError
 	if !errors.As(err, &ue) || ue.Status == 0 {
 		// No vendor verdict to relay -- a dial failure, a cancellation, or a
 		// gateway bug. 500 is the honest answer.
-		return http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err)
+		return http.StatusInternalServerError, fmt.Sprintf("%s: %v", prefix, err)
 	}
 	middleware.StampVendorError(r.Context(), ue.Status, ue.Type, ue.Message)
 	if ue.Status >= 400 && ue.Status < 500 {
@@ -1803,7 +1803,7 @@ func (s *Server) upstreamFailure(r *http.Request, err error) (status int, messag
 func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, provider providers.LLMProvider, metadata *types.RouterMetadata) {
 	resp, err := s.completeWithFallback(r, req, provider, metadata)
 	if err != nil {
-		status, message := s.upstreamFailure(r, err)
+		status, message := s.upstreamFailure(r, err, "Completion failed")
 		s.logger.WithError(err).
 			WithField("provider", metadata.Provider).
 			WithField("returned_status", status).
@@ -2006,9 +2006,13 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 	// Perform actual completion with retry logic
 	resp, err = s.attemptCompletionWithRetryAndFallback(r.Context(), req, initialProvider, metadata)
 	if err != nil {
-		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("All completion attempts failed")
+		status, message := s.upstreamFailure(r, err, "Completion failed")
+		s.logger.WithError(err).
+			WithField("provider", metadata.Provider).
+			WithField("returned_status", status).
+			Error("All completion attempts failed")
 		routermetrics.ErrorsTotal.WithLabelValues(metadata.Provider, "completion_failed").Inc()
-		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
+		s.writeErrorCtx(w, r, status, message)
 		return
 	}
 
@@ -2568,8 +2572,12 @@ func (s *Server) handleStreamingCompletionWithRetry(w http.ResponseWriter, r *ht
 
 	chunks, err = s.attemptStreamingWithFallback(r.Context(), req, initialProvider, metadata)
 	if err != nil {
-		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("All streaming attempts failed")
-		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Streaming failed: %v", err))
+		status, message := s.upstreamFailure(r, err, "Streaming failed")
+		s.logger.WithError(err).
+			WithField("provider", metadata.Provider).
+			WithField("returned_status", status).
+			Error("All streaming attempts failed")
+		s.writeErrorCtx(w, r, status, message)
 		return
 	}
 
