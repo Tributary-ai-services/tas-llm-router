@@ -75,6 +75,9 @@ type RoutingView struct {
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
 	PromptCacheTTL         string
+	VendorErrorStatus      int
+	VendorErrorType        string
+	VendorErrorMessage     string
 
 	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
 	// ApplicabilitySet=false means the sidecar was never stamped, and both
@@ -740,6 +743,9 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		PromptCacheMode:            routing.PromptCacheMode,
 		PromptCacheBreakpoints:     routing.PromptCacheBreakpoints,
 		PromptCacheTTL:             routing.PromptCacheTTL,
+		UpstreamStatus:             routing.VendorErrorStatus,
+		ErrorType:                  routing.VendorErrorType,
+		ErrorMessage:               routing.VendorErrorMessage,
 		Synthetic:                  synthetic,
 		SyntheticReason:            syntheticReason,
 		SignalsExcluded:            routing.SignalsExcluded,

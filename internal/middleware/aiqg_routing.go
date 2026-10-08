@@ -56,6 +56,9 @@ type Routing struct {
 	promptCacheMode        string
 	promptCacheBreakpoints int
 	promptCacheTTL         string
+	vendorErrorStatus      int
+	vendorErrorType        string
+	vendorErrorMessage     string
 	finishReason           string
 
 	// Efficacy sub-metric APPLICABILITY (Plan #17a Tier 2, Phase 0a). Not
@@ -213,6 +216,9 @@ type RoutingSnapshot struct {
 	PromptCacheMode        string
 	PromptCacheBreakpoints int
 	PromptCacheTTL         string
+	VendorErrorStatus      int
+	VendorErrorType        string
+	VendorErrorMessage     string
 
 	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
 	// ApplicabilitySet=false means never stamped — the event omits both flags
@@ -334,6 +340,9 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		PromptCacheMode:            r.promptCacheMode,
 		PromptCacheBreakpoints:     r.promptCacheBreakpoints,
 		PromptCacheTTL:             r.promptCacheTTL,
+		VendorErrorStatus:          r.vendorErrorStatus,
+		VendorErrorType:            r.vendorErrorType,
+		VendorErrorMessage:         r.vendorErrorMessage,
 		SchemaRequested:            r.schemaRequested,
 		ToolsDeclared:              r.toolsDeclared,
 		ApplicabilitySet:           r.applicabilitySet,
@@ -879,6 +888,31 @@ func StampPromptCache(ctx context.Context, mode string, breakpoints int, ttl str
 	r.promptCacheMode = mode
 	r.promptCacheBreakpoints = breakpoints
 	r.promptCacheTTL = ttl
+}
+
+// StampVendorError records what the VENDOR said when it refused, so the
+// response event can explain itself.
+//
+// AIQG-50: an event reading `status: vendor_error, http_status: 500,
+// finish_reason: ""` carried no error text, no upstream status and no vendor
+// code, while the cause sat in a log line with no request_event_id, no model
+// and no flow_id -- logged, and structurally impossible to join to the event it
+// explained. Putting it on the event makes it attributable by construction
+// rather than by hoping two records can be correlated on a timestamp.
+//
+// First-write-wins: the first refusal is the one that ended the request.
+func StampVendorError(ctx context.Context, status int, errType, message string) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.vendorErrorMessage == "" && r.vendorErrorStatus == 0 {
+		r.vendorErrorStatus = status
+		r.vendorErrorType = errType
+		r.vendorErrorMessage = message
+	}
 }
 
 // StampFinishReason records the vendor-reported finish_reason on the routing

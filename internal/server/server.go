@@ -1768,13 +1768,48 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 // anthropic_messages.go — it translates the native Anthropic request/response
 // wire shapes at the boundary and reuses the shared completion pipeline.
 
+// upstreamFailure classifies a provider error for the caller and records the
+// vendor's own account of it on the routing sidecar.
+//
+// AIQG-50, three defects in one failure. The event carried no error detail; the
+// one log line that named the cause could not be joined to it; and a
+// DETERMINISTIC vendor 400 was returned as `HTTP 500 ... This is a server-side
+// issue, usually temporary -- try again in a moment`. That last one is not
+// cosmetic: retrying an identical invalid_request fails identically, and the
+// advice invites exactly the retry loop that was observed burning $1.68 over 11
+// attempts.
+//
+// So a vendor 4xx becomes a 4xx with the vendor's reason attached, and only a
+// genuinely retryable failure keeps the retryable wording. 408 and 429 stay
+// retryable because they are the two 4xx that mean "later, not never".
+func (s *Server) upstreamFailure(r *http.Request, err error) (status int, message string) {
+	var ue *types.UpstreamError
+	if !errors.As(err, &ue) || ue.Status == 0 {
+		// No vendor verdict to relay -- a dial failure, a cancellation, or a
+		// gateway bug. 500 is the honest answer.
+		return http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err)
+	}
+	middleware.StampVendorError(r.Context(), ue.Status, ue.Type, ue.Message)
+	if ue.Status >= 400 && ue.Status < 500 {
+		// Relayed verbatim, including the vendor's own wording: it names the
+		// cause far better than anything we could synthesise, and the whole
+		// finding was that the cause was being discarded.
+		return ue.Status, ue.Message
+	}
+	return http.StatusBadGateway, ue.Message
+}
+
 // handleNonStreamingCompletion handles non-streaming chat completions
 func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Request, req *types.ChatRequest, provider providers.LLMProvider, metadata *types.RouterMetadata) {
 	resp, err := s.completeWithFallback(r, req, provider, metadata)
 	if err != nil {
-		s.logger.WithError(err).WithField("provider", metadata.Provider).Error("Chat completion failed")
+		status, message := s.upstreamFailure(r, err)
+		s.logger.WithError(err).
+			WithField("provider", metadata.Provider).
+			WithField("returned_status", status).
+			Error("Chat completion failed")
 		routermetrics.ErrorsTotal.WithLabelValues(metadata.Provider, "completion_failed").Inc()
-		s.writeErrorCtx(w, r, http.StatusInternalServerError, fmt.Sprintf("Completion failed: %v", err))
+		s.writeErrorCtx(w, r, status, message)
 		return
 	}
 

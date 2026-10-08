@@ -219,12 +219,47 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *types.ChatR
 	// Make the API call
 	resp, err := p.clientFor(ctx).Messages.New(ctx, *anthropicReq, betaOptions(req)...)
 	if err != nil {
-		p.logger.WithError(err).Error("Anthropic API call failed")
-		return nil, fmt.Errorf("anthropic api call failed: %w", err)
+		ue := upstreamError(err)
+		// Fields, not just a message. This line used to carry only
+		// error/level/msg/time, so the one record that named the cause could
+		// not be joined to the event it explained (AIQG-50). `model` is the
+		// minimum join key the provider can supply without reaching for the
+		// routing sidecar; the event itself now carries the same detail
+		// alongside request_event_id and flow_id.
+		entry := p.logger.WithError(err).WithField("model", req.Model)
+		if u, ok := ue.(*types.UpstreamError); ok {
+			entry = entry.WithFields(map[string]interface{}{
+				"upstream_status": u.Status,
+				"upstream_type":   u.Type,
+				"retryable":       u.Retryable(),
+			})
+		}
+		entry.Error("Anthropic API call failed")
+		return nil, ue
 	}
 
 	// Convert response back to our format
 	return p.convertFromAnthropicResponse(resp, req), nil
+}
+
+// upstreamError translates an Anthropic SDK error into the transport-neutral
+// form the rest of the gateway can classify, so the vendor's own status, type
+// and message survive to the response event instead of being flattened into a
+// 500 with no detail (AIQG-50).
+//
+// A non-API error (DNS, dial, context cancellation) is returned unchanged: it
+// has no vendor status to carry and pretending otherwise would invent one.
+func upstreamError(err error) error {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	return &types.UpstreamError{
+		Status:  apiErr.StatusCode,
+		Type:    string(apiErr.Type()),
+		Message: apiErr.Error(),
+		Err:     err,
+	}
 }
 
 // StreamCompletion performs a streaming chat completion request
