@@ -123,6 +123,15 @@ type HealthStatus struct {
 	ResponseTime int64  `json:"response_time_ms"`
 	LastChecked  int64  `json:"last_checked"`
 	ErrorMessage string `json:"error_message,omitempty"`
+	// Reason is the CLASSIFIED cause of an unhealthy status, from a closed set
+	// (credit_exhausted, auth, rate_limited, vendor_unavailable, network,
+	// other). Empty when healthy.
+	//
+	// Separate from ErrorMessage because the two have different audiences and
+	// different safety: the message is vendor prose carrying request ids and
+	// our account's billing state and stays in logs, while the reason is safe
+	// to put on a Prometheus label and in a caller-facing 503 (OPS-55).
+	Reason string `json:"reason,omitempty"`
 }
 
 // Routing configuration

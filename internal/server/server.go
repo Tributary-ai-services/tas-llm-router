@@ -424,6 +424,26 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			return nil, fmt.Errorf("failed to register provider health metric: %w", err)
 		}
 	}
+	// The classified reason beside the 1/0, so an alert can distinguish "our
+	// account is out of credit" from "the vendor is down" (OPS-55).
+	if err := routermetrics.RegisterProviderUnhealthyReason(func() map[string]string {
+		out := map[string]string{}
+		for provider, health := range router.GetHealthStatus() {
+			if health != nil && health.Status != "healthy" {
+				reason := health.Reason
+				if reason == "" {
+					reason = "other"
+				}
+				out[provider] = reason
+			}
+		}
+		return out
+	}); err != nil {
+		var dup prometheus.AlreadyRegisteredError
+		if !errors.As(err, &dup) {
+			return nil, fmt.Errorf("failed to register provider unhealthy-reason metric: %w", err)
+		}
+	}
 
 	// Initialize security middleware if configured
 	if config.Security != nil {
