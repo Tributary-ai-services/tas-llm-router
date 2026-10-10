@@ -303,6 +303,22 @@ func (c *reasonCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+// StreamEmptyTotal counts streams that ended CLEANLY having produced no
+// content -- no text, no tool call, no reasoning.
+//
+// Separate from an error-frame failure because it has no error frame: the
+// vendor accepts, answers in ~1.5s, sends a handful of empty chunks over
+// 45-60s and closes normally (AIQG-56). Measured at 5 of 102 real dogfood
+// turns, so this is a rate worth watching rather than a curiosity, and it was
+// recorded as a success until now.
+var StreamEmptyTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "llm_router_stream_empty_total",
+		Help: "Streams that ended cleanly with no content (no text, tool call or reasoning).",
+	},
+	[]string{"provider", "model"},
+)
+
 // RegisterProviderUnhealthyReason wires llm_router_provider_unhealthy_reason to
 // a live source. Call once during server construction.
 //
@@ -423,6 +439,7 @@ func init() {
 		ModelFallbackTotal,
 		ModelAliasResolutionTotal,
 		ModelValidationTotal,
+		StreamEmptyTotal,
 	)
 }
 
