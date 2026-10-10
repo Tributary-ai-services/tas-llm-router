@@ -1916,6 +1916,14 @@ func setRouterMetadataHeaders(w http.ResponseWriter, metadata *types.RouterMetad
 // can feel.
 func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-chan *types.ChatChunk, provider, model string) *streamBuffer {
 	failed := false
+	// sawContent: did any chunk carry something the caller could use?
+	//
+	// The streamBuffer cannot answer this -- it holds TEXT only, and a
+	// tool-only turn legitimately has none (47 of 102 measured dogfood turns
+	// finished tool_use). So text, tool calls and reasoning all count, and
+	// reasoning counts deliberately: a thinking-only stream is strange but it
+	// is not nothing, and a false failure is worse than a missed one.
+	sawContent := false
 	var lastUsage *types.Usage
 	// A negative cap means "do not buffer", which returns streaming to being
 	// invisible to the judge — a deliberate break-glass, counted as an
@@ -1958,6 +1966,16 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 			buf.setUsage(chunk.Usage)
 		}
 		for _, c := range chunk.Choices {
+			if c.Delta != nil {
+				if t, ok := c.Delta.Content.(string); ok && t != "" {
+					sawContent = true
+				}
+				if len(c.Delta.ToolCalls) > 0 || len(c.Delta.Reasoning) > 0 {
+					sawContent = true
+				}
+			}
+		}
+		for _, c := range chunk.Choices {
 			if c.FinishReason != "" {
 				middleware.StampFinishReason(ctx, c.FinishReason)
 				break
@@ -1970,6 +1988,31 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 	}
 	if !failed {
 		enc.done()
+	}
+	// A stream that ended CLEANLY having produced nothing is a failure, and
+	// until now it was recorded as a success (AIQG-56). Measured on real
+	// dogfood traffic: 5 of 102 turns, every one `status: success`,
+	// `clear_reliability: 100`, and `clear_efficacy` NULL -- so a turn that
+	// delivered nothing was invisible to the quality gate AND flattered the
+	// efficacy average by 4 points by being skipped rather than scored.
+	//
+	// #263 only covers a vendor ERROR FRAME. This path has no frame at all:
+	// the vendor answered in ~1.5s, sent 2-11 chunks of nothing over 45-60s,
+	// and closed normally.
+	//
+	// finish_reason "error" is deliberate rather than new vocabulary --
+	// pkg/clear/efficacy.go already scores it 0 "undiluted, so a broken stream
+	// is not read as efficacious", which is exactly the verdict wanted. Being
+	// first-NON-EMPTY-wins, it lands only when the vendor reported no reason,
+	// so a vendor-reported outcome is never overwritten.
+	if !failed && !sawContent {
+		buf.markIncomplete()
+		middleware.StampFinishReason(ctx, "error")
+		middleware.StampOutcome(ctx, events.StatusVendorError)
+		routermetrics.StreamEmptyTotal.WithLabelValues(provider, model).Inc()
+		s.logger.WithField("provider", provider).
+			WithField("model", model).
+			Error("streamed completion produced no content")
 	}
 	// #171: streaming must feed tokens/cost too, or llm_router_cost_total
 	// under-reports by the streaming share on a gateway whose purpose is cost
