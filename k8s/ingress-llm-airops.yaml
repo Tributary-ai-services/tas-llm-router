@@ -52,7 +52,15 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     # 300s matches the internal host; Cloudflare gives up at 100s (524), so
     # public clients must stream.
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    # 1800 and 300: deliberately MORE patient than the gateway, which bounds
+    # at 900s (ROUTER_REQUEST_TIMEOUT / PROVIDER_REQUEST_TIMEOUT). nginx
+    # returning 504 first is the worst outcome -- the caller is told it failed
+    # while the gateway keeps generating tokens we still pay for, and no event
+    # records why. proxy-send-timeout was UNSET, i.e. on nginx's 60s default,
+    # which is the deadline for writing the REQUEST upstream; dogfood bodies
+    # measure 1.59 MB. OPS-66.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
     nginx.ingress.kubernetes.io/limit-rps: "50"
 spec:
