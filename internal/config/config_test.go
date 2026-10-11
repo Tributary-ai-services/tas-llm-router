@@ -43,9 +43,12 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.Server.ReadTimeout != 300*time.Second {
 		t.Errorf("Expected default read timeout 300s, got %v", cfg.Server.ReadTimeout)
 	}
-	if cfg.Server.WriteTimeout != 600*time.Second {
-		t.Errorf("Expected default write timeout 600s, got %v -- a streaming "+
-			"gateway cannot cap its whole response; see OPS-65", cfg.Server.WriteTimeout)
+	// 1200s: it must exceed the 900s provider/router bound so the handler
+	// survives long enough to record the outcome (OPS-66). TestTimeoutOrdering
+	// enforces the relationship; this pins the absolute value.
+	if cfg.Server.WriteTimeout != 1200*time.Second {
+		t.Errorf("Expected default write timeout 1200s, got %v -- a streaming "+
+			"gateway cannot cap its whole response; see OPS-65/OPS-66", cfg.Server.WriteTimeout)
 	}
 }
 

@@ -309,7 +309,18 @@ spec:
         # ConfigMap and an `apply -k` of this manifest is what would otherwise
         # silently restore 30s (the OPS-14 / OPS-59 failure mode).
         - name: SERVER_WRITE_TIMEOUT
-          value: "600s"
+          value: "1200s"
+        # The gateway must be the layer that bounds a request, because it is
+        # the only one that can record the event, attribute the cost and fire
+        # the right alert. A proxy returning 504 while the gateway keeps
+        # generating is the worst case: the caller is told it failed, and we
+        # pay for the rest anyway. So these two sit INSIDE the server
+        # deadline above and OUTSIDE nothing -- see ingress-*.yaml, which are
+        # deliberately more patient than this. OPS-66.
+        - name: ROUTER_REQUEST_TIMEOUT
+          value: "900s"
+        - name: PROVIDER_REQUEST_TIMEOUT
+          value: "900s"
         # 30s was also the read deadline for the whole REQUEST, and dogfood
         # bodies measure 1.59 MB -- large enough that nginx buffers them to
         # disk.

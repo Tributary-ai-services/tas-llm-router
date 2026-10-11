@@ -409,7 +409,12 @@ func (c *Config) setDefaults() {
 		// is the right place to enforce it (a proxy has idle-timeout
 		// semantics, which is what this actually wants), so nginx binds first
 		// and this stays a backstop against a handler that never returns.
-		WriteTimeout:   600 * time.Second,
+		// 1200s, and it must stay GREATER than providerRequestTimeout (900s):
+		// if this connection deadline fires first, the handler is killed before
+		// it can stamp the outcome and price the turn, so we pay for the tokens
+		// and record nothing. TestTimeoutOrdering enforces the relationship --
+		// it caught exactly this when 900s went in and this stayed at 600s.
+		WriteTimeout:   1200 * time.Second,
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
@@ -419,7 +424,7 @@ func (c *Config) setDefaults() {
 		HealthCheckInterval:    30 * time.Second,
 		MaxCostThreshold:       1.0,
 		EnableFallbackChaining: true,
-		RequestTimeout:         120 * time.Second,
+		RequestTimeout:         providerRequestTimeout,
 	}
 
 	// Logging defaults
@@ -812,7 +817,8 @@ func (c *Config) setDefaults() {
 					RestrictedParams:   true,
 				},
 			},
-			Timeout: 120 * time.Second,
+			// See the Anthropic note below -- same reasoning, same number.
+			Timeout: providerRequestTimeout,
 		},
 		Anthropic: &anthropic.AnthropicConfig{
 			Models: []types.ModelInfo{
@@ -986,10 +992,33 @@ func (c *Config) setDefaults() {
 					SupportsStructured: true,
 				},
 			},
-			Timeout: 120 * time.Second,
+			Timeout: providerRequestTimeout,
 		},
 	}
 }
+
+// providerRequestTimeout bounds one upstream call to a vendor.
+//
+// 900s, raised from 120s on 2026-10-11. The reason is economic, not
+// cosmetic: a severed stream is BILLED IN FULL -- the vendor generated
+// those tokens and charges for them -- while delivering nothing the caller
+// can use. So cutting a slow answer does not save money, it spends it twice
+// and produces a support question. Patience is the cheaper policy.
+//
+// The number is sized from measurement, not taste: a 12,000-token answer
+// measured 92.7s end to end, already 78% of the old 120s budget, and
+// max_tokens goes considerably higher than 12,000. 120s was not a
+// deliberate ceiling, it was a plausible-looking default that nothing had
+// tested against a long answer.
+//
+// It is still BOUNDED. A hung upstream holds a connection and a goroutine,
+// so this is "patient", not "infinite" -- and the gateway, not a proxy, is
+// what should enforce it, because only the gateway can record the event,
+// attribute the cost and fire the right alert. Every layer OUTSIDE it is
+// therefore set more generously; see k8s/ingress-*.yaml.
+//
+// Override with PROVIDER_REQUEST_TIMEOUT.
+const providerRequestTimeout = 900 * time.Second
 
 // loadFromFile loads configuration from YAML file
 func (c *Config) loadFromFile(path string) error {
@@ -1057,6 +1086,19 @@ func (c *Config) loadFromEnv() {
 		c.Router.DefaultStrategy = strategy
 	}
 
+	// PROVIDER_REQUEST_TIMEOUT was not overridable at all until 2026-10-11,
+	// which meant the pod -- which mounts no config file -- was pinned to the
+	// compiled default and the 120s ceiling could only be moved by a rebuild.
+	if pt := os.Getenv("PROVIDER_REQUEST_TIMEOUT"); pt != "" {
+		if d, err := time.ParseDuration(pt); err == nil {
+			if c.Providers.OpenAI != nil {
+				c.Providers.OpenAI.Timeout = d
+			}
+			if c.Providers.Anthropic != nil {
+				c.Providers.Anthropic.Timeout = d
+			}
+		}
+	}
 	if rt := os.Getenv("ROUTER_REQUEST_TIMEOUT"); rt != "" {
 		if d, err := time.ParseDuration(rt); err == nil {
 			c.Router.RequestTimeout = d
