@@ -177,3 +177,29 @@ func TestGetHealthStatus_CopiesEveryField(t *testing.T) {
 		}
 	}
 }
+
+// The verbatim message Anthropic returned on 2026-10-11, as a 400
+// invalid_request_error, when the account's configured API usage limit was
+// reached. It was classified `other` -- so the caller got "the last upstream
+// health check failed" and the credit alert could not fire -- which is the
+// whole failure this classifier exists to prevent.
+//
+// Kept verbatim rather than paraphrased: the bug was that we matched the words
+// we expected instead of the words the vendor sends.
+func TestClassifyHealthFailure_AnthropicSpecifiedUsageLimit(t *testing.T) {
+	err := errors.New(`anthropic health check failed: POST "https://api.anthropic.com/v1/messages": ` +
+		`400 Bad Request (Request-ID: req_011CfvjQR4hpWpXvNYVwDMcA) ` +
+		`{"type":"error","error":{"type":"invalid_request_error","message":` +
+		`"You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC."},` +
+		`"request_id":"req_011CfvjQR4hpWpXvNYVwDMcA"}`)
+	if got := classifyHealthFailure(err); got != ReasonCreditExhausted {
+		t.Errorf("classifyHealthFailure = %q, want %q\n"+
+			"A spend cap is the one failure mode that needs a human in a billing console, so "+
+			"classifying it %q sends whoever is paged looking for an outage that is not there.",
+			got, ReasonCreditExhausted, got)
+	}
+	// And the caller must be told something that points at billing.
+	if msg := humanHealthReason(classifyHealthFailure(err)); !strings.Contains(msg, "spend limit") {
+		t.Errorf("humanHealthReason = %q, want it to mention a spend limit", msg)
+	}
+}
