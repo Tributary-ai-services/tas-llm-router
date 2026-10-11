@@ -393,9 +393,23 @@ func LoadConfig(configPath string) (*Config, error) {
 func (c *Config) setDefaults() {
 	// Server defaults
 	c.Server = ServerConfig{
-		Port:           "8080",
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		Port:        "8080",
+		ReadTimeout: 300 * time.Second,
+		// WriteTimeout is an ABSOLUTE deadline on the whole response, not an
+		// idle timeout -- so on a STREAMING gateway it is a hard cap on how
+		// long any answer may take, and 30s silently severed every stream
+		// that ran longer than that. Measured 2026-10-11 from nginx's own
+		// access log: a request at req_time 33.06s was cut (logged 200 with
+		// 12,101 bytes sent, then "upstream prematurely closed connection"),
+		// while 2.9s, 4.0s, 5.3s and 23.7s all completed. The client sees
+		// ECONNRESET mid-answer; a 12,000-token answer takes ~93s and never
+		// had a chance.
+		//
+		// 600s, not 0: nginx caps these routes at proxy-read-timeout 300s and
+		// is the right place to enforce it (a proxy has idle-timeout
+		// semantics, which is what this actually wants), so nginx binds first
+		// and this stays a backstop against a handler that never returns.
+		WriteTimeout:   600 * time.Second,
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 

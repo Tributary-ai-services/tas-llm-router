@@ -33,8 +33,19 @@ func TestLoadConfig_Defaults(t *testing.T) {
 		t.Errorf("Expected default log level 'info', got %s", cfg.Logging.Level)
 	}
 
-	if cfg.Server.ReadTimeout != 30*time.Second {
-		t.Errorf("Expected default read timeout 30s, got %v", cfg.Server.ReadTimeout)
+	// 300s/600s, not the 30s this asserted until 2026-10-11. The old values
+	// were not a tuning choice, they were the Go struct's conventional
+	// defaults applied to a STREAMING gateway, where WriteTimeout is an
+	// absolute deadline on the whole response rather than an idle timeout --
+	// so 30s silently severed every answer that took longer (OPS-65). This
+	// test pinned the defect in place, which is why it is asserted explicitly
+	// here with the reason attached instead of just being bumped.
+	if cfg.Server.ReadTimeout != 300*time.Second {
+		t.Errorf("Expected default read timeout 300s, got %v", cfg.Server.ReadTimeout)
+	}
+	if cfg.Server.WriteTimeout != 600*time.Second {
+		t.Errorf("Expected default write timeout 600s, got %v -- a streaming "+
+			"gateway cannot cap its whole response; see OPS-65", cfg.Server.WriteTimeout)
 	}
 }
 

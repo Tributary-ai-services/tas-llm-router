@@ -293,6 +293,28 @@ spec:
         # checks failing) which kills the liveness probe; tcpSocket
         # only checks that the process is binding the port. The
         # /health endpoint itself remains available for ad-hoc probing.
+        # STREAMING NEEDS THIS. Go's http.Server.WriteTimeout is an ABSOLUTE
+        # deadline on the whole response, not an idle timeout, so on a
+        # streaming gateway it caps how long ANY answer may take. The built-in
+        # default was 30s and this pod mounts no config file, so it ran on that
+        # default and silently severed every stream longer than 30 seconds
+        # (OPS-65). Measured from nginx's own access log 2026-10-11: a request
+        # at req_time 33.06s was cut -- logged 200 with 12,101 bytes sent, then
+        # "upstream prematurely closed connection while reading upstream" --
+        # while 2.9s, 4.0s, 5.3s and 23.7s completed. A 12,000-token answer
+        # takes ~93s and never had a chance; the client saw ECONNRESET
+        # mid-answer.
+        #
+        # Set here as WELL as in the image default, because this pod takes no
+        # ConfigMap and an `apply -k` of this manifest is what would otherwise
+        # silently restore 30s (the OPS-14 / OPS-59 failure mode).
+        - name: SERVER_WRITE_TIMEOUT
+          value: "600s"
+        # 30s was also the read deadline for the whole REQUEST, and dogfood
+        # bodies measure 1.59 MB -- large enough that nginx buffers them to
+        # disk.
+        - name: SERVER_READ_TIMEOUT
+          value: "300s"
         livenessProbe:
           tcpSocket:
             port: 8086
