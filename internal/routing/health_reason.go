@@ -42,8 +42,25 @@ func classifyHealthFailure(err error) string {
 	switch {
 	// Checked before the generic auth case: a spend limit and an exhausted
 	// balance both arrive as a 400, not a 401, and both mean "pay us".
+	//
+	// "usage limit" and "regain access" are here because of a real miss, and
+	// the verbatim string is in the test rather than paraphrased. On
+	// 2026-10-11 Anthropic returned, as a 400 invalid_request_error:
+	//
+	//   "You have reached your specified API usage limits. You will regain
+	//    access on 2026-11-01 at 00:00 UTC."
+	//
+	// None of the terms below it matched, so the single most actionable
+	// failure there is -- a spend cap that needs a human in a billing console
+	// -- was classified `other`, the caller was told the generic "the last
+	// upstream health check failed", and LLMRouterUpstreamCreditExhausted
+	// could not fire. This classifier exists to prevent exactly that, and it
+	// failed on its first real test, which is the argument for matching the
+	// vendor's actual words instead of the words we expected.
 	case strings.Contains(s, "credit balance"),
 		strings.Contains(s, "spend limit"),
+		strings.Contains(s, "usage limit"),
+		strings.Contains(s, "regain access"),
 		strings.Contains(s, "quota"),
 		strings.Contains(s, "insufficient_quota"),
 		strings.Contains(s, "billing"):
