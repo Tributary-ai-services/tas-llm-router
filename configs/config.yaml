@@ -1,7 +1,10 @@
 server:
   port: "8080"
-  read_timeout: 30s
-  write_timeout: 30s
+  read_timeout: 300s
+  # An ABSOLUTE deadline on the whole response, not an idle timeout: on a
+  # streaming gateway this is a hard cap on how long any answer may take.
+  # 30s cut every stream longer than that (OPS-65). See config.go.
+  write_timeout: 600s
   max_header_bytes: 1048576
   
   # API validation configuration
