@@ -56,7 +56,7 @@ spec:
 
       containers:
       - name: llm-router
-        image: llm-router:aiqg-v5.75
+        image: llm-router:aiqg-v5.117
         imagePullPolicy: Always
         ports:
         - containerPort: 8086
@@ -74,12 +74,23 @@ spec:
         # Timeouts: these existed ONLY on the live Deployment until 2026-09-19 —
         # in no manifest and in no ConfigMap — so nothing in git recorded how
         # long the router waits.
+        # Same ordering as the aiqg deployment, and for the same reason
+        # (OPS-66): provider <= router < server write < nginx read. These had
+        # been 180/180/150, which is better than the 30s compiled default the
+        # aiqg pod was running but still a cap on a streaming gateway -- a
+        # 12,000-token answer measures 92.7s and a 180s write deadline leaves
+        # no room for a longer one. A severed stream is billed in full, so
+        # impatience here costs money and delivers nothing.
         - name: SERVER_READ_TIMEOUT
-          value: "180s"
+          value: "300s"
         - name: SERVER_WRITE_TIMEOUT
-          value: "180s"
+          value: "1200s"
         - name: ROUTER_REQUEST_TIMEOUT
-          value: "150s"
+          value: "900s"
+        # New in aiqg-v5.117; before that the provider ceiling was the
+        # compiled 120s and could not be moved without a rebuild.
+        - name: PROVIDER_REQUEST_TIMEOUT
+          value: "900s"
         # KAFKA_BROKERS is ALSO in llm-router-config as kafka-shared.tas-shared:9092
         # (the headless Service). This explicit entry overrides it with broker
         # pod-0 directly, and an explicit env silently beats envFrom — so the
