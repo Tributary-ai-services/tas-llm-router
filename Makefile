@@ -3,7 +3,12 @@
 # Variables
 BINARY_NAME=llm-router
 DOCKER_IMAGE=llm-router-waf
-VERSION?=aiqg-v5.21
+# The version lives in ./VERSION, one semver string, and nothing else may set it
+# (CLAUDE.md "Versioning & Release Policy"). Bump the file in the PR that ships
+# the change; an rc counter resets when its version ships. The image tag is
+# derived from it, never typed. aiqg-v5.117 was the last tag of the old
+# convention and maps to 5.117.0.
+VERSION:=$(shell cat VERSION)
 BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT=$(shell git rev-parse --short HEAD)
 
@@ -143,11 +148,11 @@ docker-build: ## Build Docker image (stamps AIQG events.GatewayVersion with git 
 #
 # AETHER_SHARED points at a different aether-shared checkout, e.g. a worktree
 # carrying a module branch not yet on main:
-#   make docker-build-slim VERSION=5.118.0-rc.1 \
-#     AETHER_SHARED=$(abspath ../.worktrees/aether-shared-turnstart)
+#   make docker-build-slim AETHER_SHARED=$(abspath ../.worktrees/aether-shared-x)
 #
-# VERSION must be given explicitly and must not be a floating tag (CLAUDE.md,
-# "Versioning & Release Policy"). No :latest is tagged and nothing is pushed.
+# The tag comes from ./VERSION. The build refuses an invalid semver, a dirty
+# tree (the revision label would name a commit the image was not built from),
+# and a tag already in the registry. No :latest is ever tagged.
 TAS_ROOT       ?= $(abspath ..)
 AETHER_SHARED  ?= $(TAS_ROOT)/aether-shared
 GATEKEEPER     ?= $(TAS_ROOT)/Gatekeeper
@@ -157,6 +162,17 @@ VARIANT        ?=
 SHARED_MODULES := go-events go-aiqg-matcher go-aiqg-resilience go-aiqg-workload
 SLIM_TAG        = $(VERSION)$(if $(VARIANT),_$(VARIANT))
 SLIM_BUILD_ARGS = GATEWAY_VERSION=$(GIT_COMMIT)
+# semver 2.0.0 core + optional pre-release (no build metadata: `+` is illegal in a tag)
+SEMVER_RE       = ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$$
+
+.PHONY: version-check
+version-check: ## Validate ./VERSION and refuse a dirty tree or an existing registry tag
+	@test "$(origin VERSION)" = file || { echo "VERSION comes from ./VERSION; do not override it ($(origin VERSION))"; exit 1; }
+	@echo "$(VERSION)" | grep -Eq '$(SEMVER_RE)' || { echo "./VERSION is not semver: '$(VERSION)'"; exit 1; }
+	@test -z "$$(git status --porcelain --untracked-files=no)" || { echo "working tree is dirty; commit first so the revision label is true"; exit 1; }
+	@if docker manifest inspect $(SLIM_IMAGE):$(SLIM_TAG) >/dev/null 2>&1; then \
+		echo "$(SLIM_IMAGE):$(SLIM_TAG) already exists in the registry; bump ./VERSION"; exit 1; fi
+	@echo "version $(SLIM_TAG) ok"
 
 .PHONY: docker-context
 docker-context: ## Assemble the slim build context (siblings + this repo) in SLIM_CONTEXT
@@ -170,9 +186,7 @@ docker-context: ## Assemble the slim build context (siblings + this repo) in SLI
 	@du -sh "$(SLIM_CONTEXT)"
 
 .PHONY: docker-build-slim
-docker-build-slim: docker-context ## Build the gateway image from the slim context (VERSION=<semver> required)
-	@case "$(origin VERSION)" in command\ line|environment) ;; *) echo "pass VERSION=<semver>, e.g. VERSION=5.118.0-rc.1"; exit 1;; esac
-	@case "$(VERSION)" in latest|main|master|"") echo "VERSION=$(VERSION) is a floating tag"; exit 1;; esac
+docker-build-slim: version-check docker-context ## Build the gateway image from the slim context, tagged from ./VERSION
 	docker build -f "$(SLIM_CONTEXT)/tas-llm-router/docker/Dockerfile" \
 		--build-arg $(SLIM_BUILD_ARGS) \
 		--label org.opencontainers.image.version=$(VERSION) \
@@ -181,6 +195,14 @@ docker-build-slim: docker-context ## Build the gateway image from the slim conte
 		--label tas.variant=$(VARIANT) \
 		--label tas.config.sha256=$(shell printf '%s\n' $(SLIM_BUILD_ARGS) | sort | sha256sum | cut -d' ' -f1) \
 		-t $(SLIM_IMAGE):$(SLIM_TAG) "$(SLIM_CONTEXT)"
+
+.PHONY: docker-push-slim
+docker-push-slim: ## Push the ./VERSION tag (never :latest) and print the digest to pin in k8s/
+	@docker image inspect $(SLIM_IMAGE):$(SLIM_TAG) >/dev/null 2>&1 || { echo "build it first: make docker-build-slim"; exit 1; }
+	@if docker manifest inspect $(SLIM_IMAGE):$(SLIM_TAG) >/dev/null 2>&1; then \
+		echo "$(SLIM_IMAGE):$(SLIM_TAG) already exists in the registry; refusing to overwrite"; exit 1; fi
+	docker push $(SLIM_IMAGE):$(SLIM_TAG)
+	@docker image inspect --format '{{index .RepoDigests 0}}' $(SLIM_IMAGE):$(SLIM_TAG)
 
 .PHONY: docker-run
 docker-run: docker-build ## Run Docker container
