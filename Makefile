@@ -134,6 +134,54 @@ docker-build: ## Build Docker image (stamps AIQG events.GatewayVersion with git 
 		-t ${DOCKER_IMAGE}:${VERSION} .
 	docker tag ${DOCKER_IMAGE}:${VERSION} ${DOCKER_IMAGE}:latest
 
+# docker-build above cannot work from this directory: docker/Dockerfile COPYs
+# the sibling modules go.mod `replace`s to (Gatekeeper, aether-shared/*), which
+# sit outside the repo. docker-build-slim assembles a context holding exactly
+# those plus this repo, then builds from it. SHARED_MODULES must list every
+# aether-shared module go.mod replaces; the Dockerfile's COPY list is the other
+# half of the same coupling.
+#
+# AETHER_SHARED points at a different aether-shared checkout, e.g. a worktree
+# carrying a module branch not yet on main:
+#   make docker-build-slim VERSION=5.118.0-rc.1 \
+#     AETHER_SHARED=$(abspath ../.worktrees/aether-shared-turnstart)
+#
+# VERSION must be given explicitly and must not be a floating tag (CLAUDE.md,
+# "Versioning & Release Policy"). No :latest is tagged and nothing is pushed.
+TAS_ROOT       ?= $(abspath ..)
+AETHER_SHARED  ?= $(TAS_ROOT)/aether-shared
+GATEKEEPER     ?= $(TAS_ROOT)/Gatekeeper
+SLIM_CONTEXT   ?= $(or $(TMPDIR),/tmp)/tas-llm-router-ctx
+SLIM_IMAGE     ?= registry-api.tas.scharber.com/tas-llm-router
+VARIANT        ?=
+SHARED_MODULES := go-events go-aiqg-matcher go-aiqg-resilience go-aiqg-workload
+SLIM_TAG        = $(VERSION)$(if $(VARIANT),_$(VARIANT))
+SLIM_BUILD_ARGS = GATEWAY_VERSION=$(GIT_COMMIT)
+
+.PHONY: docker-context
+docker-context: ## Assemble the slim build context (siblings + this repo) in SLIM_CONTEXT
+	@test -d "$(GATEKEEPER)" || { echo "missing $(GATEKEEPER)"; exit 1; }
+	@for m in $(SHARED_MODULES); do test -d "$(AETHER_SHARED)/$$m" || { echo "missing $(AETHER_SHARED)/$$m"; exit 1; }; done
+	rm -rf "$(SLIM_CONTEXT)" && mkdir -p "$(SLIM_CONTEXT)/aether-shared"
+	rsync -a --exclude .git --exclude node_modules "$(GATEKEEPER)/" "$(SLIM_CONTEXT)/Gatekeeper/"
+	for m in $(SHARED_MODULES); do rsync -a --exclude .git "$(AETHER_SHARED)/$$m/" "$(SLIM_CONTEXT)/aether-shared/$$m/"; done
+	rsync -a --exclude .git --exclude node_modules --exclude go.work --exclude go.work.sum --exclude .claude \
+		./ "$(SLIM_CONTEXT)/tas-llm-router/"
+	@du -sh "$(SLIM_CONTEXT)"
+
+.PHONY: docker-build-slim
+docker-build-slim: docker-context ## Build the gateway image from the slim context (VERSION=<semver> required)
+	@case "$(origin VERSION)" in command\ line|environment) ;; *) echo "pass VERSION=<semver>, e.g. VERSION=5.118.0-rc.1"; exit 1;; esac
+	@case "$(VERSION)" in latest|main|master|"") echo "VERSION=$(VERSION) is a floating tag"; exit 1;; esac
+	docker build -f "$(SLIM_CONTEXT)/tas-llm-router/docker/Dockerfile" \
+		--build-arg $(SLIM_BUILD_ARGS) \
+		--label org.opencontainers.image.version=$(VERSION) \
+		--label org.opencontainers.image.revision=$(shell git rev-parse HEAD) \
+		--label org.opencontainers.image.created=$(BUILD_TIME) \
+		--label tas.variant=$(VARIANT) \
+		--label tas.config.sha256=$(shell printf '%s\n' $(SLIM_BUILD_ARGS) | sort | sha256sum | cut -d' ' -f1) \
+		-t $(SLIM_IMAGE):$(SLIM_TAG) "$(SLIM_CONTEXT)"
+
 .PHONY: docker-run
 docker-run: docker-build ## Run Docker container
 	docker run -p 8080:8080 --env-file .env ${DOCKER_IMAGE}:latest

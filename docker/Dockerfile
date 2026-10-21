@@ -34,6 +34,9 @@ COPY aether-shared/go-aiqg-matcher/ /build/aether-shared/go-aiqg-matcher/
 # for it, so the next image build would have failed on a missing replace target
 # rather than on anything in the change that triggered it.
 COPY aether-shared/go-aiqg-resilience/ /build/aether-shared/go-aiqg-resilience/
+# Shared workload extractor: SDLC mode A reads ExtractTurnStart from it
+# (internal/sdlctag). Same sibling-replace pattern, same coupling.
+COPY aether-shared/go-aiqg-workload/ /build/aether-shared/go-aiqg-workload/
 
 WORKDIR /build/app
 
