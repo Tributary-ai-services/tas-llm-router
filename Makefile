@@ -163,6 +163,13 @@ SHARED_MODULES := go-events go-aiqg-matcher go-aiqg-resilience go-aiqg-workload
 SLIM_TAG        = $(VERSION)$(if $(VARIANT),_$(VARIANT))
 SLIM_BUILD_ARGS = GATEWAY_VERSION=$(GIT_COMMIT)
 # semver 2.0.0 core + optional pre-release (no build metadata: `+` is illegal in a tag)
+# Sets $$state to present | absent | unknown. A failed `manifest inspect` is NOT
+# "absent": an unreachable registry fails the same way, and reading that as
+# "tag is free" is exactly how a guard against overwriting a tag passes blind.
+REGISTRY_TAG_STATE = out=$$(timeout 30 docker manifest inspect $(SLIM_IMAGE):$(SLIM_TAG) 2>&1); rc=$$?; \
+	if [ $$rc -eq 0 ]; then state=present; \
+	elif echo "$$out" | grep -qiE 'manifest unknown|no such manifest|not found'; then state=absent; \
+	else state=unknown; fi
 SEMVER_RE       = ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$$
 
 .PHONY: version-check
@@ -170,9 +177,10 @@ version-check: ## Validate ./VERSION and refuse a dirty tree or an existing regi
 	@test "$(origin VERSION)" = file || { echo "VERSION comes from ./VERSION; do not override it ($(origin VERSION))"; exit 1; }
 	@echo "$(VERSION)" | grep -Eq '$(SEMVER_RE)' || { echo "./VERSION is not semver: '$(VERSION)'"; exit 1; }
 	@test -z "$$(git status --porcelain --untracked-files=no)" || { echo "working tree is dirty; commit first so the revision label is true"; exit 1; }
-	@if docker manifest inspect $(SLIM_IMAGE):$(SLIM_TAG) >/dev/null 2>&1; then \
-		echo "$(SLIM_IMAGE):$(SLIM_TAG) already exists in the registry; bump ./VERSION"; exit 1; fi
-	@echo "version $(SLIM_TAG) ok"
+	@$(REGISTRY_TAG_STATE); case $$state in \
+		present) echo "$(SLIM_IMAGE):$(SLIM_TAG) already exists in the registry; bump ./VERSION"; exit 1;; \
+		absent) echo "version $(SLIM_TAG) ok (not in registry)";; \
+		*) echo "WARNING: could not reach the registry, so the tag was NOT checked for reuse; docker-push-slim checks again";; esac
 
 .PHONY: docker-context
 docker-context: ## Assemble the slim build context (siblings + this repo) in SLIM_CONTEXT
@@ -199,8 +207,10 @@ docker-build-slim: version-check docker-context ## Build the gateway image from 
 .PHONY: docker-push-slim
 docker-push-slim: ## Push the ./VERSION tag (never :latest) and print the digest to pin in k8s/
 	@docker image inspect $(SLIM_IMAGE):$(SLIM_TAG) >/dev/null 2>&1 || { echo "build it first: make docker-build-slim"; exit 1; }
-	@if docker manifest inspect $(SLIM_IMAGE):$(SLIM_TAG) >/dev/null 2>&1; then \
-		echo "$(SLIM_IMAGE):$(SLIM_TAG) already exists in the registry; refusing to overwrite"; exit 1; fi
+	@$(REGISTRY_TAG_STATE); case $$state in \
+		absent) ;; \
+		present) echo "$(SLIM_IMAGE):$(SLIM_TAG) already exists in the registry; refusing to overwrite"; exit 1;; \
+		*) echo "cannot reach the registry to check $(SLIM_TAG) for reuse; refusing to push blind"; exit 1;; esac
 	docker push $(SLIM_IMAGE):$(SLIM_TAG)
 	@docker image inspect --format '{{index .RepoDigests 0}}' $(SLIM_IMAGE):$(SLIM_TAG)
 
