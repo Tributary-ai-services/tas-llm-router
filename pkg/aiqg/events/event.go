@@ -115,6 +115,11 @@ type RequestEvent struct {
 
 	// Identity attribution (additive) — see AgentContext.
 	AgentContext *AgentContext `json:"agent_context,omitempty"`
+
+	// SDLC mode A turn-start flags (additive) — see SDLCTurnStart. Nil
+	// unless mode A is enabled globally AND for this tenant AND the request
+	// starts a human turn.
+	SDLCTurnStart *SDLCTurnStart `json:"sdlc_turn_start,omitempty"`
 }
 
 // AgentContext is the self-asserted identity attribution for a request:
@@ -358,6 +363,49 @@ type ResponseEvent struct {
 
 	// Identity attribution (additive) — see AgentContext.
 	AgentContext *AgentContext `json:"agent_context,omitempty"`
+
+	// SDLC mode A turn-start flags, denormalized from the request like
+	// AgentContext so the response stream (the one mode B reads) carries
+	// them. Same pointer, same nil rule.
+	SDLCTurnStart *SDLCTurnStart `json:"sdlc_turn_start,omitempty"`
+}
+
+// SDLCTurnStart is the inline (mode A) tag for a request that starts a human
+// turn: what the prompt and the agent message it replies to look like, as
+// booleans, counts and one length bucket. It carries NO text and NO turn act.
+// The turn-act axis has not graduated (tas-session-corpus
+// DESIGN-continuous-labeling.md §3, "P1 result": 50% exact agreement on the
+// held-out control turns against an 85% lower-bound bar), so a provisional act
+// is deliberately absent rather than emitted with a low confidence.
+//
+// Fields mirror go-aiqg-workload TurnStartFlags one for one; a test in
+// internal/sdlctag fails if the two drift. Every field must stay a bool, an
+// int or a closed enum: TestSDLCTurnStartCarriesNoText enforces it.
+type SDLCTurnStart struct {
+	ExtractorVersion string `json:"extractor_version"` // workload.TurnStartExtractorVersion, e.g. "ts-1"
+	PromptLen        string `json:"prompt_len"`        // tiny | short | medium | long
+	HasPrev          bool   `json:"has_prev"`
+	// Truncated: an input exceeded the gateway's read cap, so flags were set
+	// from the prompt's head and the previous message's tail.
+	Truncated bool `json:"truncated,omitempty"`
+
+	StartsApproval bool `json:"starts_approval"`
+	StartsNegation bool `json:"starts_negation"`
+	SelectionReply bool `json:"selection_reply"`
+	HasQuestion    bool `json:"has_question"`
+	Imperative     bool `json:"imperative"`
+	CorrectionCue  bool `json:"correction_cue"`
+	VerifyCue      bool `json:"verify_cue"`
+	StatusCue      bool `json:"status_cue"`
+	InfoCue        bool `json:"info_cue"`
+
+	PrevEndsQuestion bool `json:"prev_ends_question"`
+	PrevExplicitAsk  bool `json:"prev_explicit_ask"`
+	PrevOffersChoice bool `json:"prev_offers_choice"`
+	PrevStatusList   bool `json:"prev_status_list"`
+
+	TicketIDsPrompt int `json:"ticket_ids_prompt"`
+	TicketIDsPrev   int `json:"ticket_ids_prev"`
 }
 
 // ResolvedPolicyBundle mirrors the dashboard-be ResolveResponse shape.

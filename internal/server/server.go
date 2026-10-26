@@ -27,6 +27,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/providers"
 	"github.com/tributary-ai/llm-router-waf/internal/registry"
 	"github.com/tributary-ai/llm-router-waf/internal/routing"
+	"github.com/tributary-ai/llm-router-waf/internal/sdlctag"
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
 	"github.com/tributary-ai/llm-router-waf/internal/upstreamkey"
@@ -102,6 +103,9 @@ type Server struct {
 	// Nil when disabled — every cache branch is a no-op in that case.
 	respCache    responsecache.Cache
 	respCacheCfg responsecache.Config
+
+	// sdlcTagger is SDLC mode A. Nil when off, which is the default.
+	sdlcTagger *sdlctag.Tagger
 
 	// semCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
 	// Nil when disabled. Runs on the C1 exact-miss path (L0→L1). In shadow mode
@@ -307,6 +311,10 @@ type AIQGServerConfig struct {
 
 	// ResponseCache is the C1 exact-match response cache (docs/AIQG-CACHING.md).
 	ResponseCache AIQGResponseCacheConfig `yaml:"response_cache"`
+
+	// SDLCTag is SDLC mode A, inline turn-start tagging. Off unless enabled
+	// globally and for the request's tenant (see sdlctag.Config).
+	SDLCTag sdlctag.Config `yaml:"sdlc_tag"`
 
 	// Affinity keeps a conversation on the provider whose vendor prompt cache
 	// is warm. Mirrors config.AIQGAffinityConfig.
@@ -566,6 +574,17 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				logger.WithFields(logrus.Fields{"redis_addr": opt.Addr, "ttl": promptcache.DefaultTTL}).
 					Info("AIQG prompt-cache probe enabled (P0 measure-only: reports prefix reuse, changes no requests)")
 			}
+		}
+
+		// SDLC mode A (inline turn-start tagging). New returns nil unless the
+		// global switch is on AND at least one tenant is named, so the default
+		// config never constructs a tagger and never reads a message.
+		if t := sdlctag.New(config.AIQG.SDLCTag, logger); t != nil {
+			server.sdlcTagger = t
+			logger.WithFields(logrus.Fields{
+				"tenants": len(config.AIQG.SDLCTag.Tenants),
+				"budget":  config.AIQG.SDLCTag.Budget.String(),
+			}).Warn("SDLC mode A inline tagging ENABLED (tag-only: flags, no text, no turn act)")
 		}
 
 		// C1 exact-match response cache (docs/AIQG-CACHING.md). Prefers the
@@ -1227,6 +1246,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// AIQG (fingerprinted tier): structural signature (toolset + config) so
 	// untagged programmatic traffic resolves to an inferred agent surrogate.
 	middleware.StampFingerprint(r.Context(), agentFingerprint(&req))
+	// AIQG (SDLC mode A): turn-start flags — booleans, counts and a length
+	// bucket, never text or a turn act. Gated on the AIQG sidecar too, so a
+	// non-AIQG request never reaches the extractor. Tag is fail-open (nil on
+	// panic) and switches itself off after repeated budget overruns.
+	if s.sdlcTagger != nil && middleware.RoutingFromContext(r.Context()) != nil {
+		middleware.StampSDLCTurnStart(r.Context(),
+			s.sdlcTagger.Tag(middleware.ResolvedTenantFromContext(r.Context()), req.Messages))
+	}
 	// AIQG (prompt-cache probe, P0 — docs/AIQG-PROMPT-CACHE-CONTROL.md §9):
 	// hash of the tools+system span a vendor cache breakpoint would cover, so
 	// the middleware can report whether it recurred inside a cache lifetime.

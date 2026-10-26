@@ -44,6 +44,7 @@ replace github.com/Tributary-ai-services/aether-shared/go-events => ../aether-sh
 require (
 	github.com/Tributary-ai-services/aether-shared/go-aiqg-matcher v0.0.0
 	github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience v0.0.0
+	github.com/Tributary-ai-services/aether-shared/go-aiqg-workload v0.0.0
 	github.com/Tributary-ai-services/aether-shared/go-events v0.0.0-00010101000000-000000000000 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -92,3 +93,8 @@ require (
 replace github.com/Tributary-ai-services/aether-shared/go-aiqg-matcher => ../aether-shared/go-aiqg-matcher
 
 replace github.com/Tributary-ai-services/aether-shared/go-aiqg-resilience => ../aether-shared/go-aiqg-resilience
+
+// SDLC mode A (inline turn-start tagging) reads ExtractTurnStart from the
+// shared workload module. Same sibling-replace pattern, so docker/Dockerfile
+// carries a matching COPY.
+replace github.com/Tributary-ai-services/aether-shared/go-aiqg-workload => ../aether-shared/go-aiqg-workload

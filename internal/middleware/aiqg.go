@@ -985,6 +985,7 @@ func routingView(r *Routing) events.RoutingView {
 		Workflow:                   s.Workflow,
 		NISTFindings:               s.NISTFindings,
 		TagFindings:                s.TagFindings,
+		SDLCTurnStart:              s.SDLCTurnStart,
 	}
 }
 
