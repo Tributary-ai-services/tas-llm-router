@@ -439,6 +439,40 @@ var PromptCacheSavingsUSDTotal = prometheus.NewCounterVec(
 	[]string{"vendor"},
 )
 
+// SDLCTagTotal counts SDLC mode A (inline turn-start tagging) calls by
+// outcome: tagged, not_turn_start, panic, over_budget. Only calls that reached
+// the extractor gate are counted, so a mode A that is off (globally or for the
+// tenant) contributes nothing here — the series being absent IS "off".
+var SDLCTagTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "aiqg_sdlc_tag_total",
+		Help: "SDLC mode A inline tag attempts by outcome.",
+	},
+	[]string{"outcome"},
+)
+
+// SDLCTagDurationSeconds is the extractor's wall time per tagged request. The
+// budget is 1 ms; the buckets bracket it so the p99 against the budget reads
+// straight off the histogram.
+var SDLCTagDurationSeconds = prometheus.NewHistogram(
+	prometheus.HistogramOpts{
+		Name:    "aiqg_sdlc_tag_duration_seconds",
+		Help:    "Wall time of the SDLC mode A turn-start extractor per request.",
+		Buckets: []float64{0.00001, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.01},
+	},
+)
+
+// SDLCTagTripped is 1 when this pod's mode A tagger has switched itself off
+// (repeated budget overruns or panics) and 0 otherwise. Per pod, and it stays
+// tripped until the pod restarts: an automatic re-enable would let a slow
+// input class flap the request path on and off.
+var SDLCTagTripped = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Name: "aiqg_sdlc_tag_tripped",
+		Help: "1 when the SDLC mode A tagger has switched itself off on this pod.",
+	},
+)
+
 func init() {
 	Registry.MustRegister(
 		EventsEmittedTotal,
@@ -464,6 +498,9 @@ func init() {
 		PromptCacheReadTokensTotal,
 		PromptCacheCreationTokensTotal,
 		PromptCacheSavingsUSDTotal,
+		SDLCTagTotal,
+		SDLCTagDurationSeconds,
+		SDLCTagTripped,
 	)
 	seed()
 }

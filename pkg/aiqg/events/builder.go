@@ -173,6 +173,11 @@ type RoutingView struct {
 	// Gatekeeper pattern_id → count for this request. Drives the
 	// /api/v1/metrics/tags endpoint. Nil when no findings.
 	TagFindings map[string]int
+
+	// SDLC mode A turn-start flags. Nil when mode A is off, the tenant is
+	// not enabled, or the request does not start a human turn; the events
+	// then omit the field entirely.
+	SDLCTurnStart *SDLCTurnStart
 }
 
 // TokenView is the subset of resolved-token state the event builder
@@ -560,6 +565,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		GatewayVersion:            GatewayVersion,
 		LifecycleState:            LifecyclePairedWithResponse,
 		AgentContext:              agentCtx,
+		SDLCTurnStart:             routing.SDLCTurnStart,
 	}
 
 	// Routing's FinishReason wins over BuildOptions.FinishReason when
@@ -777,6 +783,7 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		GatewayVersion:             GatewayVersion,
 		ResolvedPolicyBundle:       opts.ResolvedPolicyBundle,
 		AgentContext:               agentCtx,
+		SDLCTurnStart:              routing.SDLCTurnStart,
 	}
 
 	reqEnv := RequestEnvelope{

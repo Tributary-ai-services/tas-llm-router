@@ -11,6 +11,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/internal/middleware"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/anthropic"
 	"github.com/tributary-ai/llm-router-waf/internal/providers/openai"
+	"github.com/tributary-ai/llm-router-waf/internal/sdlctag"
 	"github.com/tributary-ai/llm-router-waf/internal/security"
 	"github.com/tributary-ai/llm-router-waf/internal/server"
 	"github.com/tributary-ai/llm-router-waf/internal/types"
@@ -134,6 +135,25 @@ type AIQGConfig struct {
 	// SemCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
 	// Default off. Uses the dedicated redis-semcache (FT.*) + Ollama embeddings.
 	SemCache AIQGSemCacheConfig `yaml:"semantic_cache"`
+
+	// SDLCTag is SDLC mode A, inline turn-start tagging (internal/sdlctag).
+	// Off at both levels by default; a tenant is tagged only when Enabled is
+	// true AND its id is in Tenants.
+	SDLCTag AIQGSDLCTagConfig `yaml:"sdlc_tag"`
+}
+
+// AIQGSDLCTagConfig configures SDLC mode A. Env: SDLC_TAG_ENABLED (global,
+// default false), SDLC_TAG_TENANTS (comma-separated tenant ids, default none),
+// SDLC_TAG_BUDGET (Go duration, default 1ms), SDLC_TAG_MAX_STRIKES (default 3).
+//
+// Enable gate: do not set Enabled until an axis clears the graduation rule
+// (tas-session-corpus DESIGN-continuous-labeling.md §2: Wilson 95% lower bound
+// >= 85% over >= 60 audited control turns) and John flips it.
+type AIQGSDLCTagConfig struct {
+	Enabled    bool          `yaml:"enabled"`
+	Tenants    []string      `yaml:"tenants"`
+	Budget     time.Duration `yaml:"budget"`
+	MaxStrikes int           `yaml:"max_strikes"`
 }
 
 // AIQGSemCacheConfig configures the C4 semantic cache. Env:
@@ -1296,6 +1316,23 @@ func (c *Config) loadFromEnv() {
 		}
 	}
 	// C4 semantic cache. Shadow defaults ON when enabled (safe first mode).
+	// SDLC mode A. Both switches default off; see AIQGSDLCTagConfig.
+	if v := os.Getenv("SDLC_TAG_ENABLED"); v != "" {
+		c.AIQG.SDLCTag.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("SDLC_TAG_TENANTS"); v != "" {
+		c.AIQG.SDLCTag.Tenants = splitCommaTrim(v)
+	}
+	if v := os.Getenv("SDLC_TAG_BUDGET"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.AIQG.SDLCTag.Budget = d
+		}
+	}
+	if v := os.Getenv("SDLC_TAG_MAX_STRIKES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.AIQG.SDLCTag.MaxStrikes = n
+		}
+	}
 	if v := os.Getenv("AIQG_SEMCACHE_ENABLED"); v != "" {
 		c.AIQG.SemCache.Enabled = v == "true" || v == "1"
 		c.AIQG.SemCache.Shadow = true
@@ -1591,6 +1628,12 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			JudgeEnabled:    c.AIQG.SemCache.JudgeEnabled,
 			JudgeModel:      c.AIQG.SemCache.JudgeModel,
 			JudgeSampleRate: c.AIQG.SemCache.JudgeSampleRate,
+		},
+		SDLCTag: sdlctag.Config{
+			Enabled:    c.AIQG.SDLCTag.Enabled,
+			Tenants:    c.AIQG.SDLCTag.Tenants,
+			Budget:     c.AIQG.SDLCTag.Budget,
+			MaxStrikes: c.AIQG.SDLCTag.MaxStrikes,
 		},
 	}
 	if len(c.AIQG.Tokens) > 0 {

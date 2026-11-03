@@ -3,6 +3,8 @@ package middleware
 import (
 	"context"
 	"sync"
+
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 )
 
 // Routing carries the routing-layer decision (vendor, model, streaming
@@ -170,6 +172,9 @@ type Routing struct {
 	// stamp use one decision). Empty when no experiment claimed it.
 	experimentID      string
 	experimentVariant string
+
+	// SDLC mode A: turn-start flags (booleans, counts, a bucket; no text).
+	sdlcTurnStart *events.SDLCTurnStart
 }
 
 // NewRouting returns an empty Routing. Attach to ctx via WithRouting.
@@ -306,6 +311,9 @@ type RoutingSnapshot struct {
 	// experiments (Phase D): claiming experiment + variant. Empty when none.
 	ExperimentID      string
 	ExperimentVariant string
+
+	// SDLC mode A turn-start flags. Nil unless stamped.
+	SDLCTurnStart *events.SDLCTurnStart
 }
 
 // Snapshot returns a read-only view of the current routing state.
@@ -373,6 +381,25 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		CacheThreshold:             r.cacheThreshold,
 		ExperimentID:               r.experimentID,
 		ExperimentVariant:          r.experimentVariant,
+		SDLCTurnStart:              r.sdlcTurnStart,
+	}
+}
+
+// StampSDLCTurnStart records the mode A turn-start flags for this request.
+// First-write-wins; nil (mode A off, tenant not enabled, not a turn start, or
+// the tagger tripped) is a no-op, so the event omits the field.
+func StampSDLCTurnStart(ctx context.Context, ts *events.SDLCTurnStart) {
+	if ts == nil {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sdlcTurnStart == nil {
+		r.sdlcTurnStart = ts
 	}
 }
 

@@ -579,3 +579,33 @@ func BenchmarkConfig_GetEnabledProviders(b *testing.B) {
 		_ = cfg.GetEnabledProviders()
 	}
 }
+
+// SDLC mode A is off at both levels unless the environment turns it on, and
+// ToAIQGServerConfig carries the switch set through to the server unchanged.
+func TestLoadConfig_SDLCTag(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-openai-key")
+	t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+	t.Setenv("AIQG_ENABLED", "true")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AIQG.SDLCTag.Enabled || len(cfg.AIQG.SDLCTag.Tenants) != 0 {
+		t.Fatalf("SDLC mode A must default off at both levels, got %+v", cfg.AIQG.SDLCTag)
+	}
+
+	t.Setenv("SDLC_TAG_ENABLED", "true")
+	t.Setenv("SDLC_TAG_TENANTS", "tenant-a, tenant-b")
+	t.Setenv("SDLC_TAG_BUDGET", "500us")
+	t.Setenv("SDLC_TAG_MAX_STRIKES", "5")
+	cfg, err = LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := cfg.ToAIQGServerConfig().SDLCTag
+	if !got.Enabled || len(got.Tenants) != 2 || got.Tenants[1] != "tenant-b" ||
+		got.Budget != 500*time.Microsecond || got.MaxStrikes != 5 {
+		t.Fatalf("server SDLCTag = %+v", got)
+	}
+}
