@@ -78,7 +78,7 @@ spec:
         # flow_id attribution (#252). That is TEST-3's lesson and OPS-14's
         # hazard: a merged PR pinning the previous image is a loaded gun
         # pointed at the one that replaced it.
-        image: llm-router:aiqg-v5.117
+        image: llm-router:5.118.0-rc.1@sha256:561a994925989d6f05a8732b90feddf735dcb2d745f1138a294b2c89931c5bd8
         imagePullPolicy: Always
         ports:
         - containerPort: 8086
