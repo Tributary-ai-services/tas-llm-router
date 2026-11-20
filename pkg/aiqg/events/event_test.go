@@ -614,3 +614,36 @@ func (w testWriter) Write(b []byte) (int, error) {
 	w.t.Logf("log: %s", string(b))
 	return len(b), nil
 }
+
+func TestLogEmitter_PromotesScanOnce(t *testing.T) {
+	emit := func(resp ResponseEvent) map[string]any {
+		cap := &fieldCapture{}
+		l := logrus.New()
+		l.SetOutput(testWriter{t})
+		l.AddHook(cap)
+		e := &LogEmitter{Logger: l}
+		resp.ResponseEventID, resp.RequestEventID = "resp-1", "req-1"
+		reqEnv := RequestEnvelope{Type: TypeRequest, ID: "req-1", Data: RequestEvent{RequestEventID: "req-1"}}
+		if err := e.Emit(context.Background(), reqEnv, ResponseEnvelope{Type: TypeResponse, ID: "resp-1", Data: resp}); err != nil {
+			t.Fatalf("Emit: %v", err)
+		}
+		return cap.entries[1]
+	}
+
+	got := emit(ResponseEvent{Status: StatusSuccess, HTTPStatus: 200,
+		ScanOnce: true, ScanMessages: 7, ScanSkipped: 5, AttestationHits: 6, ScanMs: 0.4})
+	requireField(t, got, "scan_once", true)
+	requireField(t, got, "scan_messages", 7)
+	requireField(t, got, "scan_skipped", 5)
+	requireField(t, got, "attestation_hits", 6)
+	requireField(t, got, "scan_ms", 0.4)
+
+	// Scan ran the old way: timing promoted, scan-once fields absent.
+	got = emit(ResponseEvent{Status: StatusSuccess, HTTPStatus: 200, ScanMs: 1.2})
+	requireField(t, got, "scan_ms", 1.2)
+	for _, k := range []string{"scan_once", "scan_skipped", "attestation_hits"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("%s promoted without scan-once", k)
+		}
+	}
+}
