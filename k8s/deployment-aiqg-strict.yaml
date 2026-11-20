@@ -78,7 +78,7 @@ spec:
         # flow_id attribution (#252). That is TEST-3's lesson and OPS-14's
         # hazard: a merged PR pinning the previous image is a loaded gun
         # pointed at the one that replaced it.
-        image: llm-router:5.119.0-rc.1@sha256:dcc7ed0d7f1199b377843bc3f1a061a4bc9e9d4021ca87aa7c5402f31a73157f
+        image: llm-router:5.119.0-rc.2@sha256:fdf25e6573a20aaeb3e58ef4e50541318780221349d6b1fee211dc653bad9f28
         imagePullPolicy: Always
         ports:
         - containerPort: 8086
@@ -187,6 +187,14 @@ spec:
         # this connection carries cached model responses, not just linkage.
         - name: AIQG_LINKAGE_REDIS_URL
           value: redis://:$(REDIS_PASSWORD)@redis-shared.tas-shared.svc.cluster.local:6379
+        # Scan-once (Plan #22 GK-5a, enabled 2026-11-20 by John): each inbound
+        # message is scanned once per tenant and conversation, and a finding
+        # is COUNTED once, not once per turn. Data-safety counts drop from
+        # this date; events carry scan_once=true. The store is the Redis
+        # above (AIQG_LINKAGE_REDIS_URL fallback). Fail-safe: any store error
+        # or a 20ms timeout scans and counts everything, as before.
+        - name: GATEKEEPER_SCAN_ONCE_ENABLED
+          value: "true"
 
         # C1 exact-match response cache. Only caches deterministic,
         # non-streaming, tool-free requests (responsecache.Decide).
