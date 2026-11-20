@@ -30,11 +30,11 @@ func TestOpenAIProvider(t *testing.T) {
 		APIKey: apiKey,
 		Models: []types.ModelInfo{
 			{
-				Name:             "gpt-3.5-turbo",
-				ProviderModelID:  "gpt-3.5-turbo",
-				InputCostPer1K:   0.0015,
-				OutputCostPer1K:  0.002,
-				MaxContextWindow: 16385,
+				Name:             "gpt-4o-mini",
+				ProviderModelID:  "gpt-4o-mini",
+				InputCostPer1K:   0.00015,
+				OutputCostPer1K:  0.0006,
+				MaxContextWindow: 128000,
 				MaxOutputTokens:  4096,
 			},
 		},
@@ -46,7 +46,7 @@ func TestOpenAIProvider(t *testing.T) {
 
 	t.Run("ChatCompletion", func(t *testing.T) {
 		request := &types.ChatRequest{
-			Model: "gpt-3.5-turbo",
+			Model: "gpt-4o-mini",
 			Messages: []types.Message{
 				{
 					Role:    "user",
@@ -61,7 +61,7 @@ func TestOpenAIProvider(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.NotNil(t, response)
-		assert.Contains(t, response.Model, "gpt-3.5-turbo")
+		assert.Contains(t, response.Model, "gpt-4o-mini")
 		assert.Len(t, response.Choices, 1)
 		assert.Equal(t, "assistant", response.Choices[0].Message.Role)
 		assert.NotEmpty(t, response.Choices[0].Message.Content)
