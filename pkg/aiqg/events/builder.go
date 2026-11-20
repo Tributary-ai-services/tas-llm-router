@@ -124,6 +124,13 @@ type RoutingView struct {
 	// inbound messages before the vendor call (G1). 0 = none/off.
 	RedactionCount int
 
+	// Scan-once (GK-5a): see ResponseEvent.ScanOnce.
+	ScanOnce        bool
+	ScanMessages    int
+	ScanSkipped     int
+	AttestationHits int
+	ScanMs          float64
+
 	// CacheState / CacheKeyHash carry the C1 response-cache interaction
 	// (docs/AIQG-CACHING.md §6): "hit" / "miss" / "bypass" / "" and the
 	// exact-match key. A hit means the vendor was not called.
@@ -771,6 +778,11 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		Assurance:                  assuranceSummary,
 		RedactionApplied:           routing.RedactionCount > 0,
 		RedactedCount:              routing.RedactionCount,
+		ScanOnce:                   routing.ScanOnce,
+		ScanMessages:               routing.ScanMessages,
+		ScanSkipped:                routing.ScanSkipped,
+		AttestationHits:            routing.AttestationHits,
+		ScanMs:                     routing.ScanMs,
 		CacheState:                 routing.CacheState,
 		CacheKeyHash:               routing.CacheKeyHash,
 		CacheSavedPromptTokens:     routing.CacheSavedPromptTokens,

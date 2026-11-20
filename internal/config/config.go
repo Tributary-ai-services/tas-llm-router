@@ -281,6 +281,17 @@ type GatekeeperConfig struct {
 	Outbound          ScanDirectionConfig `yaml:"outbound"`
 	Extraction        ExtractionConfig    `yaml:"extraction"`
 	Redaction         RedactionConfig     `yaml:"redaction"`
+	ScanOnce          ScanOnceConfig      `yaml:"scan_once"`
+}
+
+// ScanOnceConfig wires the inbound scan-once store (Plan #22 GK-5a). Off
+// unless GATEKEEPER_SCAN_ONCE_ENABLED=true. Turning it on lowers Data-safety
+// counts (a finding is counted once per conversation, not once per turn).
+type ScanOnceConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	RedisURL string        `yaml:"redis_url"`
+	TTL      time.Duration `yaml:"ttl"`
+	Timeout  time.Duration `yaml:"timeout"`
 }
 
 // RedactionConfig wires inbound PII redaction (G1). Default OFF (redaction is
@@ -1145,6 +1156,27 @@ func (c *Config) loadFromEnv() {
 	}
 	if s := os.Getenv("GATEKEEPER_REDACT_STRATEGY"); s != "" {
 		c.Gatekeeper.Redaction.Strategy = s
+	}
+
+	// Scan-once (GK-5a). The Redis URL falls back to the linkage store's,
+	// which every AIQG gateway already has.
+	if os.Getenv("GATEKEEPER_SCAN_ONCE_ENABLED") == "true" {
+		c.Gatekeeper.ScanOnce.Enabled = true
+	}
+	if u := os.Getenv("GATEKEEPER_SCAN_ONCE_REDIS_URL"); u != "" {
+		c.Gatekeeper.ScanOnce.RedisURL = u
+	} else if c.Gatekeeper.ScanOnce.RedisURL == "" {
+		c.Gatekeeper.ScanOnce.RedisURL = os.Getenv("AIQG_LINKAGE_REDIS_URL")
+	}
+	if v := os.Getenv("GATEKEEPER_SCAN_ONCE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Gatekeeper.ScanOnce.TTL = d
+		}
+	}
+	if v := os.Getenv("GATEKEEPER_SCAN_ONCE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Gatekeeper.ScanOnce.Timeout = d
+		}
 	}
 
 	// AIQG shadow payload-reduction extractor (Plan #7 Phase 2). Off unless

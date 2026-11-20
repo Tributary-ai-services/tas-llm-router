@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
+	"github.com/Tributary-ai-services/Gatekeeper/pkg/pipeline"
 	"github.com/Tributary-ai-services/Gatekeeper/pkg/scan"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
@@ -1291,7 +1292,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			Source:    "llm_input",
 		}
 
-		result, err := s.gatekeeper.ScanMessages(r.Context(), req.Messages, meta)
+		inbound, err := s.gatekeeper.ScanInbound(r.Context(), req.Messages, meta)
+		var result *pipeline.ProcessResult
+		countable := []scan.Finding(nil)
+		if inbound != nil {
+			result = inbound.Result
+			countable = inbound.Countable
+			middleware.StampInboundScan(r.Context(), inbound.StoreUsed, inbound.Messages, inbound.Skipped, inbound.Hits, inbound.ScanMs)
+		}
 		if err != nil {
 			s.logger.WithError(err).WithField("request_id", req.ID).Error("Inbound scan failed")
 			if !s.gatekeeperConfig.FailOpen {
@@ -1328,8 +1336,12 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			// produced all of this; the gateway used to discard it here, which
 			// is why "why was this blocked?" was previously unanswerable beyond
 			// "a rule fired somewhere".
-			audit := make([]middleware.ScanFinding, 0, len(result.ScanResult.Findings))
-			for _, f := range result.ScanResult.Findings {
+			// Counts come from the COUNTABLE findings: with scan-once on, a
+			// finding in content already counted on an earlier turn of this
+			// tenant's conversation is not counted again (GK-5a). Blocking
+			// above and enforcement below still see every finding.
+			audit := make([]middleware.ScanFinding, 0, len(countable))
+			for _, f := range countable {
 				counts[string(f.Severity)]++
 				nistCounts[middleware.MapPatternToNIST(f.PatternID)]++
 				tagCounts[f.PatternID]++

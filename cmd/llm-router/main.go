@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
 	"os"
 	"os/signal"
 	"syscall"
@@ -135,6 +136,19 @@ func NewApplication(configPath string) (*Application, error) {
 				&gatekeeper.NoopAuditLogger{},
 				logger,
 			)
+			if so := cfg.Gatekeeper.ScanOnce; so.Enabled {
+				if so.RedisURL == "" {
+					logger.Warn("Gatekeeper scan-once enabled but no Redis URL; scanning every turn")
+				} else if store, err := gatekeeper.NewRedisScanOnceStore(so.RedisURL); err != nil {
+					logger.WithError(err).Warn("Gatekeeper scan-once store init failed; scanning every turn")
+				} else {
+					gkClient.SetScanOnceStore(store, gatekeeper.ScanOnceConfig{
+						Enabled: true, TTL: so.TTL, Timeout: so.Timeout,
+						BuildID: events.GatewayVersion,
+					})
+					logger.Info("Gatekeeper scan-once enabled (findings counted once per conversation)")
+				}
+			}
 			serverInstance.SetGatekeeper(gkClient, &gkCfg, bypassMgr)
 			logger.Info("Gatekeeper content scanning enabled")
 		}
