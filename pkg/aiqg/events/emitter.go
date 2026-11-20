@@ -362,6 +362,20 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 			respFields["tag_"+sanitizeTagKey(k)] = v
 		}
 	}
+	// Scan-once (GK-5a): promoted so a Data-safety query can tell events
+	// counted once per conversation (scan_once=true) from events that
+	// re-counted the whole history, and so scan_skipped per turn is a LogQL
+	// aggregation. scan_messages/scan_ms are emitted whenever the inbound
+	// scan ran; the scan-once fields only when the store was used.
+	if d := resp.Data; d.ScanMessages > 0 || d.ScanMs > 0 {
+		respFields["scan_messages"] = d.ScanMessages
+		respFields["scan_ms"] = d.ScanMs
+	}
+	if d := resp.Data; d.ScanOnce {
+		respFields["scan_once"] = true
+		respFields["scan_skipped"] = d.ScanSkipped
+		respFields["attestation_hits"] = d.AttestationHits
+	}
 	// Promote self-asserted identity attribution so dashboards can
 	// `| json | user_id="…"` / group by (agent_id) / by (flow_id)
 	// without parsing the payload. Only non-empty fields are promoted.
