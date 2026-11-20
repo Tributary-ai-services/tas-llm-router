@@ -27,7 +27,8 @@ require (
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
-	golang.org/x/sync v0.17.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
 )
 
 replace github.com/Tributary-ai-services/Gatekeeper => ../Gatekeeper

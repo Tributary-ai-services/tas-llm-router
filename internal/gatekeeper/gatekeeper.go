@@ -147,6 +147,11 @@ type Client struct {
 	redactor scan.RedactionEngine
 	config   Config
 	logger   *logrus.Logger
+
+	// scan-once (GK-5a); nil store = off. See scanonce.go.
+	scanOnce       ScanOnceStore
+	scanOnceCfg    ScanOnceConfig
+	rulesetVersion string
 }
 
 // New creates a new Gatekeeper client.
@@ -426,9 +431,13 @@ func (c *Client) RedactMessages(ctx context.Context, messages []types.Message, m
 	out := make([]types.Message, len(messages))
 	copy(out, messages)
 
+	// Scan-once (GK-5a): content remembered clean has nothing to redact, so
+	// it is not scanned a second time here. All false when scan-once is off.
+	rememberedClean := c.RememberedClean(ctx, out, meta)
+
 	total := 0
 	for i := range out {
-		if !shouldScanMessage(out[i], policy) {
+		if !shouldScanMessage(out[i], policy) || rememberedClean[i] {
 			continue
 		}
 		s, ok := out[i].Content.(string)

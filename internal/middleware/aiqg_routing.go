@@ -136,6 +136,15 @@ type Routing struct {
 	// a redacting route is attributable.
 	redactionCount int
 
+	// scan-once (GK-5a): how the inbound scan used remembered results.
+	// scanOnce is true only when the store was consulted successfully, so a
+	// false value with findings means "counted the old way, once per turn".
+	scanOnce        bool
+	scanMessages    int
+	scanSkipped     int
+	attestationHits int
+	scanMs          float64
+
 	// prompt-cache probe (docs/AIQG-PROMPT-CACHE-CONTROL.md §9, P0): canonical
 	// hash of the tools+system span a vendor cache breakpoint would cover.
 	// Measurement only — the middleware probes it against a TTL'd index to
@@ -291,6 +300,13 @@ type RoutingSnapshot struct {
 	// redaction (G1): count of PII findings redacted inbound. 0 = none.
 	RedactionCount int
 
+	// scan-once (GK-5a).
+	ScanOnce        bool
+	ScanMessages    int
+	ScanSkipped     int
+	AttestationHits int
+	ScanMs          float64
+
 	// prompt-cache probe (P0): hash of the tools+system span a vendor cache
 	// breakpoint would cover. Empty when nothing is cacheable.
 	CachePrefixHash string
@@ -371,6 +387,11 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		StateHash:                  r.stateHash,
 		Fingerprint:                r.fingerprint,
 		RedactionCount:             r.redactionCount,
+		ScanOnce:                   r.scanOnce,
+		ScanMessages:               r.scanMessages,
+		ScanSkipped:                r.scanSkipped,
+		AttestationHits:            r.attestationHits,
+		ScanMs:                     r.scanMs,
 		CachePrefixHash:            r.cachePrefixHash,
 		CacheState:                 r.cacheState,
 		CacheKeyHash:               r.cacheKeyHash,
@@ -593,6 +614,21 @@ func StampFingerprint(ctx context.Context, fp string) {
 
 // StampRedaction records the number of PII findings redacted from the inbound
 // messages (G1). First-write-wins; count<=0 is a no-op.
+// StampInboundScan records how the inbound scan ran (GK-5a scan-once).
+func StampInboundScan(ctx context.Context, scanOnce bool, messages, skipped, hits int, ms float64) {
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scanOnce = scanOnce
+	r.scanMessages = messages
+	r.scanSkipped = skipped
+	r.attestationHits = hits
+	r.scanMs = ms
+}
+
 func StampRedaction(ctx context.Context, count int) {
 	if count <= 0 {
 		return

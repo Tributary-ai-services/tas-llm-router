@@ -320,6 +320,20 @@ type ResponseEvent struct {
 	RedactionApplied bool `json:"redaction_applied,omitempty"`
 	RedactedCount    int  `json:"redacted_count,omitempty"`
 
+	// Scan-once (Plan #22 GK-5a). When scan_once is true, the inbound
+	// Assurance counts on this event are counted ONCE per (tenant, content,
+	// pattern): a finding in a message resent from an earlier turn is not
+	// counted again. Before GK-5a (and whenever scan_once is false) every
+	// turn re-counted the whole history. scan_messages is how many messages
+	// were eligible, scan_skipped how many were not rescanned because they
+	// were remembered clean, attestation_hits how many were remembered at
+	// all, scan_ms the time spent scanning.
+	ScanOnce        bool    `json:"scan_once,omitempty"`
+	ScanMessages    int     `json:"scan_messages,omitempty"`
+	ScanSkipped     int     `json:"scan_skipped,omitempty"`
+	AttestationHits int     `json:"attestation_hits,omitempty"`
+	ScanMs          float64 `json:"scan_ms,omitempty"`
+
 	// Response cache (C1, docs/AIQG-CACHING.md §6): how the request interacted
 	// with the exact-match cache — "hit" (vendor not called), "miss", "bypass",
 	// or omitted when the cache didn't participate. cache_key_hash correlates a

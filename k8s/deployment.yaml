@@ -87,10 +87,6 @@ spec:
           value: "1200s"
         - name: ROUTER_REQUEST_TIMEOUT
           value: "900s"
-        # New in aiqg-v5.117; before that the provider ceiling was the
-        # compiled 120s and could not be moved without a rebuild.
-        - name: PROVIDER_REQUEST_TIMEOUT
-          value: "900s"
         # KAFKA_BROKERS is ALSO in llm-router-config as kafka-shared.tas-shared:9092
         # (the headless Service). This explicit entry overrides it with broker
         # pod-0 directly, and an explicit env silently beats envFrom — so the
@@ -148,6 +144,10 @@ spec:
           value: all-minilm
         - name: AIQG_EXTRACTION_MIN_CONTENT_SIZE
           value: "2000"
+        # New in aiqg-v5.117; before that the provider ceiling was the
+        # compiled 120s and could not be moved without a rebuild.
+        - name: PROVIDER_REQUEST_TIMEOUT
+          value: "900s"
 
         resources:
           requests:
