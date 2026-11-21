@@ -182,6 +182,11 @@ type ResponseEvent struct {
 	RequestEventID  string `json:"request_event_id"`
 	TenantID        string `json:"tenant_id,omitempty"`
 	AIQGAccountID   string `json:"aiqg_account_id,omitempty"`
+	// Plan #22 P1: which token authenticated the request, and whose it is.
+	// On the request event too, but the aggregator reads response events
+	// only, so they are stamped here (response-event.md 1.2.0).
+	TASAuthTokenID string `json:"tas_auth_token_id,omitempty"`
+	TokenOwnerSub  string `json:"token_owner_sub,omitempty"`
 
 	// Routing attribution — denormalized from the request's routing
 	// decision so the response event is self-describing: per-vendor and
