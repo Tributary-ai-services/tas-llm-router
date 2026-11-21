@@ -193,6 +193,16 @@ func (e *LogEmitter) Emit(_ context.Context, req RequestEnvelope, resp ResponseE
 	if resp.Data.SourceApp != "" {
 		respFields["source_app"] = resp.Data.SourceApp
 	}
+	// Plan #22 P1: who sent this. token_id is the authenticated token and
+	// token_owner_sub the person who issued it; user_id (baggage) is what the
+	// caller asserted. Promoted so Loki-backed reads can attribute a request
+	// without the Kafka payload. Omitted when empty.
+	if resp.Data.TASAuthTokenID != "" {
+		respFields["tas_auth_token_id"] = resp.Data.TASAuthTokenID
+	}
+	if resp.Data.TokenOwnerSub != "" {
+		respFields["token_owner_sub"] = resp.Data.TokenOwnerSub
+	}
 
 	// Token accounting — nil-safe; either fully populated or omitted.
 	if ta := resp.Data.TokenAccounting; ta != nil {

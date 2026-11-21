@@ -1008,6 +1008,7 @@ func tokenView(t *tokens.Token) events.TokenView {
 		AIQGAccountID:  t.AIQGAccountID,
 		TASAuthTokenID: t.TokenID,
 		SourceApp:      t.SourceApp,
+		OwnerSub:       t.OwnerSub,
 	}
 }
 

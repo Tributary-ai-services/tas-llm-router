@@ -198,6 +198,7 @@ type TokenView struct {
 	AIQGAccountID  string
 	TASAuthTokenID string
 	SourceApp      string // token-claim source_app; header overrides per spec §80
+	OwnerSub       string // Keycloak sub of the token's issuer (Plan #22 P1); "" = unowned
 }
 
 // GatewayVersion is the build version stamped on every event. Override
@@ -738,6 +739,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		RequestEventID:             reqID,
 		TenantID:                   token.TenantID,                                                              // denormalized per response-event.md §"Denormalization rationale"
 		AIQGAccountID:              token.AIQGAccountID,                                                         // ditto
+		TASAuthTokenID:             token.TASAuthTokenID,                                                        // Plan #22 P1: the aggregator reads response events only
+		TokenOwnerSub:              token.OwnerSub,                                                              // Plan #22 P1: authenticated "who"; never the email
 		Vendor:                     routing.Vendor,                                                              // denormalized from routing decision (same as RequestEvent)
 		Model:                      routing.Model,                                                               // ditto — powers per-vendor/model dashboards off the response stream
 		Workflow:                   preferredWorkflow(headers.Workflow, headers.OTelWorkflow, routing.Workflow), // ditto — carries the workflow_type dimension on the response stream

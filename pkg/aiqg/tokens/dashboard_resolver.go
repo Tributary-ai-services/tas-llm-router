@@ -84,6 +84,10 @@ type validateResponse struct {
 	AIQGAccountID string `json:"aiqg_account_id"`
 	SourceApp     string `json:"source_app"`
 	Suspended     bool   `json:"suspended"`
+	// Plan #22 P1, aiqg-dashboard-be >= 0.25.0. Absent from older
+	// dashboards and for unowned tokens; both decode to "".
+	Label    string `json:"label"`
+	OwnerSub string `json:"owner_sub"`
 }
 
 // Resolve calls the dashboard-be validate endpoint and converts its
@@ -128,6 +132,8 @@ func (r *DashboardResolver) Resolve(ctx context.Context, bearer string) (*Token,
 			AIQGAccountID: v.AIQGAccountID,
 			SourceApp:     v.SourceApp,
 			Suspended:     v.Suspended,
+			Label:         v.Label,
+			OwnerSub:      v.OwnerSub,
 		}, nil
 
 	case http.StatusUnauthorized:

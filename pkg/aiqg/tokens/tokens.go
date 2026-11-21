@@ -50,6 +50,14 @@ type Token struct {
 	// Token presence + recognition is fine; the account itself is
 	// suspended.
 	Suspended bool
+
+	// Label is the token's human-readable name (aiqg.token.label).
+	Label string
+
+	// OwnerSub is the Keycloak `sub` of the person who issued the token
+	// (aiqg.token.owner_sub, Plan #22 P1). Empty for an unowned token.
+	// Stamped on the response event as token_owner_sub.
+	OwnerSub string
 }
 
 // ErrTokenNotFound means the bearer wasn't recognized by the resolver.
@@ -87,6 +95,8 @@ func NewMapResolver(tokens []ConfigToken) *MapResolver {
 			AIQGAccountID: t.AIQGAccountID,
 			SourceApp:     t.SourceApp,
 			Suspended:     t.Suspended,
+			Label:         t.Label,
+			OwnerSub:      t.OwnerSub,
 		}
 	}
 	return m
@@ -123,6 +133,8 @@ type ConfigToken struct {
 	AIQGAccountID string `yaml:"aiqg_account_id"`
 	SourceApp     string `yaml:"source_app"`
 	Suspended     bool   `yaml:"suspended"`
+	Label         string `yaml:"label"`
+	OwnerSub      string `yaml:"owner_sub"`
 }
 
 // Context plumbing — same shape as middleware.WithHeaders. Lets

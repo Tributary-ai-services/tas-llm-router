@@ -178,3 +178,35 @@ func TestDashboardResolver_TimeoutBoundsHotPath(t *testing.T) {
 
 // Compile-time assertion that DashboardResolver satisfies Resolver.
 var _ Resolver = (*DashboardResolver)(nil)
+
+// Plan #22 P1: label and owner_sub decode when the dashboard sends them
+// (>= 0.25.0) and are empty when it does not (older dashboard, unowned token).
+func TestDashboardResolver_DecodesLabelAndOwner(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		body        map[string]any
+		label, user string
+	}{
+		{"owned", map[string]any{"token_id": "t", "tenant_id": "a", "aiqg_account_id": "a",
+			"label": "laptop", "owner_sub": "kc-owner"}, "laptop", "kc-owner"},
+		{"older dashboard", map[string]any{"token_id": "t", "tenant_id": "a", "aiqg_account_id": "a"}, "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(c.body)
+			}))
+			defer srv.Close()
+			r, err := NewDashboardResolver(srv.URL, "secret-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tok, err := r.Resolve(context.Background(), "tas_qg_live_abc")
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if tok.Label != c.label || tok.OwnerSub != c.user {
+				t.Errorf("label/owner = (%q, %q), want (%q, %q)", tok.Label, tok.OwnerSub, c.label, c.user)
+			}
+		})
+	}
+}
