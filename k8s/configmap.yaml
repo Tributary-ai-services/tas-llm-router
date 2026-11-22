@@ -89,6 +89,11 @@ data:
   # Deterministic `linked`-tier attribution (tool_call_id echo index,
   # docs/AIQG-AGENT-FLOW-ATTRIBUTION.md §A). Empty disables linkage.
   AIQG_LINKAGE_REDIS_URL: "redis://redis-shared.tas-shared.svc.cluster.local:6379"
+  # Plan #22 T.5: one com.tas.aiqg.tool_call.v1 per model tool call, sent at
+  # close with its final outcome (pending store in Redis via the deployments'
+  # password-bearing AIQG_LINKAGE_REDIS_URL). Spark 0.5.0 lets a proxy outcome
+  # win any merge, so the gateway's timeout no_result cannot overwrite it.
+  AIQG_TOOL_CALL_EVENTS_ENABLED: "true"
   # LLM-as-judge quality layer (docs/AIQG-EXPERIMENTS-RUNNER.md §6.6). A third
   # model rubric-scores a sampled fraction of responses off the hot path; the
   # score is recorded to aiqg-dashboard-be (/internal/judge) as a feedback
