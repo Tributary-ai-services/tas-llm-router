@@ -477,6 +477,7 @@ type MemoryEmitter struct {
 	mu        sync.Mutex
 	requests  []RequestEnvelope
 	responses []ResponseEnvelope
+	toolCalls []ToolCallEnvelope
 }
 
 // Emit appends both envelopes to the internal slices.
@@ -522,6 +523,7 @@ func (e *MemoryEmitter) Reset() {
 	defer e.mu.Unlock()
 	e.requests = nil
 	e.responses = nil
+	e.toolCalls = nil
 }
 
 // sanitizeTagKey converts a Gatekeeper pattern_id ("aiqg-role-claim",

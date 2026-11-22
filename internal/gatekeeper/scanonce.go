@@ -169,6 +169,41 @@ type InboundScan struct {
 	ScanMs float64
 	// StoreUsed is true when scan-once consulted the store successfully.
 	StoreUsed bool
+	// ToolResults attributes the scan to tool results (role=tool messages,
+	// which Anthropic tool_result blocks become), keyed by tool_call_id.
+	// Filled only on the per-message path (scan-once on), the only path that
+	// scans each message on its own; nil otherwise. Plan #22 T.5 credits
+	// these to the tool call the result answers.
+	ToolResults map[string]ToolResultScan
+}
+
+// ToolResultScan is what the inbound scan found in one tool result.
+type ToolResultScan struct {
+	// Findings are the COUNTABLE findings by pattern id: the same set that
+	// reaches the response event's tag_findings, so a finding credited to a
+	// tool call is never counted a second time there.
+	Findings map[string]int
+	// Skipped is true when the content was remembered clean and not scanned.
+	Skipped bool
+}
+
+func (in *InboundScan) recordToolResult(toolCallID string, findings []scan.Finding, skipped bool) {
+	if toolCallID == "" {
+		return
+	}
+	if in.ToolResults == nil {
+		in.ToolResults = map[string]ToolResultScan{}
+	}
+	tr, ok := in.ToolResults[toolCallID]
+	if !ok {
+		tr = ToolResultScan{Findings: map[string]int{}, Skipped: skipped}
+	} else {
+		tr.Skipped = tr.Skipped && skipped
+	}
+	for _, f := range findings {
+		tr.Findings[f.PatternID]++
+	}
+	in.ToolResults[toolCallID] = tr
 }
 
 // SetScanOnceStore enables scan-once with the given store. A nil store
@@ -219,8 +254,9 @@ func (c *Client) ScanInbound(ctx context.Context, messages []types.Message, meta
 	tier := parseTrustTier(c.config.Inbound.TrustTier)
 
 	type item struct {
-		content []byte
-		key     string
+		content    []byte
+		key        string
+		toolCallID string
 	}
 	var items []item
 	for _, msg := range messages {
@@ -231,7 +267,7 @@ func (c *Client) ScanInbound(ctx context.Context, messages []types.Message, meta
 		if len(content) == 0 {
 			continue
 		}
-		items = append(items, item{content: content,
+		items = append(items, item{content: content, toolCallID: msg.ToolCallID,
 			key: scanOnceKey(meta.TenantID, content, profile, tier, c.rulesetVersion, c.scanOnceCfg.BuildID)})
 	}
 
@@ -268,6 +304,7 @@ func (c *Client) ScanInbound(ctx context.Context, messages []types.Message, meta
 			touch = append(touch, it.key)
 			if prev.Clean() {
 				out.Skipped++
+				out.recordToolResult(it.toolCallID, nil, true)
 				continue
 			}
 		}
@@ -299,6 +336,7 @@ func (c *Client) ScanInbound(ctx context.Context, messages []types.Message, meta
 
 		if prev == nil {
 			out.Countable = append(out.Countable, findings...)
+			out.recordToolResult(it.toolCallID, findings, false)
 			newRecs[it.key] = ScanRecord{Patterns: patternIDs(findings)}
 		} else {
 			// Content we have seen with findings: count only patterns that
@@ -309,11 +347,14 @@ func (c *Client) ScanInbound(ctx context.Context, messages []types.Message, meta
 			for _, p := range prev.Patterns {
 				seen[p] = true
 			}
+			var fresh []scan.Finding
 			for _, f := range findings {
 				if !seen[f.PatternID] {
-					out.Countable = append(out.Countable, f)
+					fresh = append(fresh, f)
 				}
 			}
+			out.Countable = append(out.Countable, fresh...)
+			out.recordToolResult(it.toolCallID, fresh, false)
 		}
 	}
 	out.ScanMs = msSince(start)

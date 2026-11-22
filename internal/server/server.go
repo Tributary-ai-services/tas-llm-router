@@ -46,6 +46,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/responsecache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/semcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/toolcalls"
 	"github.com/tributary-ai/llm-router-waf/pkg/clear"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -107,6 +108,10 @@ type Server struct {
 
 	// sdlcTagger is SDLC mode A. Nil when off, which is the default.
 	sdlcTagger *sdlctag.Tagger
+
+	// toolCalls emits gateway tool_call.v1 events (Plan #22 T.5). Nil when
+	// off, which is the default; every extraction is skipped then.
+	toolCalls *toolcalls.Tracker
 
 	// semCache is the C4 semantic response cache (docs/AIQG-SEMANTIC-CACHING.md).
 	// Nil when disabled. Runs on the C1 exact-miss path (L0→L1). In shadow mode
@@ -240,6 +245,12 @@ func degradeToLogEmitter(logger *logrus.Logger, cfg *AIQGServerConfig, err error
 		"A Kafka outage costs telemetry, not availability.")
 }
 
+// AIQGToolCallEventsConfig mirrors config.AIQGToolCallEventsConfig.
+type AIQGToolCallEventsConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	ResultTimeout time.Duration `yaml:"result_timeout"`
+}
+
 // AIQGServerConfig configures the AIQG ingress wire-up.
 //
 // In permissive mode (Strict=false), the middleware mounts on the three
@@ -316,6 +327,9 @@ type AIQGServerConfig struct {
 	// SDLCTag is SDLC mode A, inline turn-start tagging. Off unless enabled
 	// globally and for the request's tenant (see sdlctag.Config).
 	SDLCTag sdlctag.Config `yaml:"sdlc_tag"`
+
+	// ToolCallEvents: gateway tool-call events (Plan #22 T.5). Off by default.
+	ToolCallEvents AIQGToolCallEventsConfig `yaml:"tool_call_events"`
 
 	// Affinity keeps a conversation on the provider whose vendor prompt cache
 	// is warm. Mirrors config.AIQGAffinityConfig.
@@ -574,6 +588,30 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 				logger.WithField("redis_addr", opt.Addr).Info("AIQG linkage: tool_call_id echo index enabled (linked tier)")
 				logger.WithFields(logrus.Fields{"redis_addr": opt.Addr, "ttl": promptcache.DefaultTTL}).
 					Info("AIQG prompt-cache probe enabled (P0 measure-only: reports prefix reuse, changes no requests)")
+			}
+		}
+
+		// Gateway tool-call events (Plan #22 T.5). Needs the shared Redis: the
+		// pending-call store must be the same for every replica, or an echo
+		// that lands on another pod would never find its call and the call
+		// would be swept as no_result. Without Redis the feature stays off
+		// rather than reporting wrong outcomes.
+		if config.AIQG.ToolCallEvents.Enabled {
+			pub := events.AsToolCallPublisher(server.aiqgEmitter)
+			switch {
+			case sharedRedis == nil:
+				logger.Warn("AIQG tool-call events requested but AIQG_LINKAGE_REDIS_URL is not set; tool-call events DISABLED")
+			case pub == nil:
+				logger.Warn("AIQG tool-call events requested but the AIQG emitter cannot publish them; tool-call events DISABLED")
+			default:
+				server.toolCalls = toolcalls.New(toolcalls.NewRedisStore(sharedRedis), pub, logger,
+					toolcalls.Config{ResultTimeout: config.AIQG.ToolCallEvents.ResultTimeout},
+					toolcalls.Hooks{
+						Emitted: func(o string) { routermetrics.ToolCallEventsTotal.WithLabelValues(o).Inc() },
+						Dropped: func(r string, n int) { routermetrics.ToolCallEventsDroppedTotal.WithLabelValues(r).Add(float64(n)) },
+					})
+				logger.WithField("result_timeout", config.AIQG.ToolCallEvents.ResultTimeout).
+					Info("AIQG tool-call events enabled (com.tas.aiqg.tool_call.v1, observed_by=gateway)")
 			}
 		}
 
@@ -843,6 +881,7 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 			Linkage:        linkageStore,
 			PromptCache:    cacheProbe,
 			Experiments:    experimentResolver,
+			ToolCalls:      server.toolCalls,
 		})
 		logger.WithFields(logrus.Fields{
 			"strict":           config.AIQG.Strict,
@@ -921,6 +960,13 @@ func (s *Server) Stop(ctx context.Context) error {
 		if err := s.gatekeeper.Close(); err != nil {
 			s.logger.WithError(err).Error("Failed to close gatekeeper")
 		}
+	}
+
+	// Drain queued tool-call events before the producer closes under them.
+	if s.toolCalls != nil {
+		tctx, tcancel := context.WithTimeout(ctx, 5*time.Second)
+		s.toolCalls.Close(tctx)
+		tcancel()
 	}
 
 	// Flush + close any Kafka producer underneath the AIQG emitter
@@ -1240,6 +1286,9 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	// AIQG (linked tier): tool_call_ids this request echoes (role=tool) so
 	// the middleware can prove which flow/step it continues.
 	middleware.StampEchoedToolCalls(r.Context(), echoedToolCallIDs(&req))
+	// AIQG (Plan #22 T.5): offered toolset + first-seen tool results, for
+	// tool-call events. No-op unless the tracker is on.
+	s.stampToolCallRequest(r.Context(), &req)
 	// AIQG (prefix-chaining tier): hash of the conversation prefix this
 	// request continues, so the middleware can recognize a tool-less
 	// multi-turn thread it previously served.
@@ -1299,6 +1348,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			result = inbound.Result
 			countable = inbound.Countable
 			middleware.StampInboundScan(r.Context(), inbound.StoreUsed, inbound.Messages, inbound.Skipped, inbound.Hits, inbound.ScanMs)
+			s.stampToolCallScan(r.Context(), inbound)
 		}
 		if err != nil {
 			s.logger.WithError(err).WithField("request_id", req.ID).Error("Inbound scan failed")
@@ -1890,6 +1940,7 @@ func (s *Server) handleNonStreamingCompletion(w http.ResponseWriter, r *http.Req
 		// AIQG (linked tier): tool_call_ids this response served, so a later
 		// request echoing them links back to this step.
 		middleware.StampServedToolCalls(r.Context(), servedToolCallIDs(resp))
+		s.stampToolCallsMade(r.Context(), resp)
 		// AIQG (prefix-chaining tier): hash of the conversation state this
 		// response leaves, so a later request re-sending it as prefix links
 		// to this turn's conversation.
@@ -1964,6 +2015,7 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 	// is not nothing, and a false failure is worse than a missed one.
 	sawContent := false
 	var lastUsage *types.Usage
+	var madeCalls streamToolCalls
 	// A negative cap means "do not buffer", which returns streaming to being
 	// invisible to the judge — a deliberate break-glass, counted as an
 	// exclusion rather than left silent.
@@ -2012,6 +2064,11 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 				if len(c.Delta.ToolCalls) > 0 || len(c.Delta.Reasoning) > 0 {
 					sawContent = true
 				}
+				if s.toolCalls != nil {
+					for _, tc := range c.Delta.ToolCalls {
+						madeCalls.add(tc)
+					}
+				}
 			}
 		}
 		for _, c := range chunk.Choices {
@@ -2027,6 +2084,9 @@ func (s *Server) streamChunks(ctx context.Context, enc streamEncoder, chunks <-c
 	}
 	if !failed {
 		enc.done()
+		// AIQG (Plan #22 T.5): the calls this stream made. A failed stream
+		// made none the client could act on.
+		middleware.StampToolCallsMade(ctx, madeCalls.calls)
 	}
 	// A stream that ended CLEANLY having produced nothing is a failure, and
 	// until now it was recorded as a success (AIQG-56). Measured on real
@@ -2202,6 +2262,7 @@ func (s *Server) handleNonStreamingCompletionWithRetry(w http.ResponseWriter, r 
 		// AIQG (linked tier): tool_call_ids this response served, so a later
 		// request echoing them links back to this step.
 		middleware.StampServedToolCalls(r.Context(), servedToolCallIDs(resp))
+		s.stampToolCallsMade(r.Context(), resp)
 		// AIQG (prefix-chaining tier): hash of the conversation state this
 		// response leaves, so a later request re-sending it as prefix links
 		// to this turn's conversation.

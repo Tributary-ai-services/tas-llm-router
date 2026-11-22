@@ -609,3 +609,29 @@ func TestLoadConfig_SDLCTag(t *testing.T) {
 		t.Fatalf("server SDLCTag = %+v", got)
 	}
 }
+
+// Plan #22 T.5: tool-call events default off and reach the server config.
+func TestLoadConfig_ToolCallEvents(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-openai-key")
+	t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+	t.Setenv("AIQG_ENABLED", "true")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AIQG.ToolCallEvents.Enabled {
+		t.Fatal("tool-call events must default off")
+	}
+
+	t.Setenv("AIQG_TOOL_CALL_EVENTS_ENABLED", "true")
+	t.Setenv("AIQG_TOOL_CALL_RESULT_TIMEOUT", "30m")
+	cfg, err = LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := cfg.ToAIQGServerConfig().ToolCallEvents
+	if !got.Enabled || got.ResultTimeout != 30*time.Minute {
+		t.Fatalf("server ToolCallEvents = %+v", got)
+	}
+}

@@ -132,6 +132,28 @@ var (
 		[]string{"result"},
 	)
 
+	// ToolCallEventsTotal counts gateway tool-call events published
+	// (Plan #22 T.5), by outcome (ok | no_result).
+	ToolCallEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aiqg_tool_call_events_total",
+			Help: "Gateway tool_call.v1 events published, by outcome.",
+		},
+		[]string{"outcome"},
+	)
+
+	// ToolCallEventsDroppedTotal counts tool-call work the gateway gave up
+	// on rather than slow or endanger a request: queue_full, store_error,
+	// publish_error, too_many_ids, too_many_tools, expired, shutdown, panic,
+	// suppressed_after_loss (see pkg/aiqg/toolcalls Drop* constants).
+	ToolCallEventsDroppedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aiqg_tool_call_events_dropped_total",
+			Help: "Gateway tool_call.v1 work dropped, by reason.",
+		},
+		[]string{"reason"},
+	)
+
 	// BlockedRequestsTotal counts requests refused by policy enforcement.
 	// Direction is "inbound" (the prompt) or "outbound" (the completion), so a
 	// dashboard can distinguish leaking secrets from ingesting them.
@@ -224,6 +246,8 @@ func init() {
 		CostTotal,
 		ErrorsTotal,
 		AuthAttemptsTotal,
+		ToolCallEventsTotal,
+		ToolCallEventsDroppedTotal,
 		RateLimitHitsTotal,
 		BlockedRequestsTotal,
 		SemCacheLookupsTotal,

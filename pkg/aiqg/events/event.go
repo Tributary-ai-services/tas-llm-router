@@ -303,6 +303,15 @@ type ResponseEvent struct {
 	SchemaRequested *bool `json:"schema_requested,omitempty"`
 	ToolsDeclared   *bool `json:"tools_declared,omitempty"`
 
+	// Offered toolset (Plan #22 T.5, design §9.5 "Never called"). Emitted
+	// only when gateway tool-call events are on. tools_schema_bytes is the
+	// total size of the request's tool definitions: the input cost of
+	// offering them, on every request. tools_offered lists each tool once
+	// per toolset per tenant per hour (per replica) — the gateway rows for
+	// aiqg.tool_catalogue (server_id NULL, observed_by 'gateway').
+	ToolsSchemaBytes *int          `json:"tools_schema_bytes,omitempty"`
+	ToolsOffered     []OfferedTool `json:"tools_offered,omitempty"`
+
 	// Embedded timing block — see event-timestamps.md
 	EventTimestamps instrumentation.Snapshot `json:"event_timestamps"`
 
