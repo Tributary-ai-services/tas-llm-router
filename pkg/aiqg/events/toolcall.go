@@ -27,6 +27,17 @@ const (
 	// tool failed, only whether its result came back.
 	ToolOutcomeOK       = "ok"
 	ToolOutcomeNoResult = "no_result"
+
+	// no_result_basis: WHY the gateway says the result never came back.
+	// Present only when outcome is no_result.
+	//   sibling  — the next turn of the flow returned other results of the
+	//              same response, not this one (direct evidence);
+	//   timeout  — nothing came back within the result timeout (the flow
+	//              closed); weaker, since lost gateway work looks the same;
+	//   reminted — the same id was minted again while this call was pending.
+	NoResultSibling  = "sibling"
+	NoResultTimeout  = "timeout"
+	NoResultReminted = "reminted"
 )
 
 // ToolCallEvent is the `data` of a com.tas.aiqg.tool_call.v1 CloudEvent.
@@ -64,6 +75,10 @@ type ToolCallEvent struct {
 	// ScanSkipped is true when scan-once remembered the result as clean and
 	// did not scan it again. Nil when unknown.
 	ScanSkipped *bool `json:"scan_skipped,omitempty"`
+
+	// NoResultBasis is set only for outcome no_result: sibling | timeout |
+	// reminted. Additive to the contract; the writer ignores it until read.
+	NoResultBasis string `json:"no_result_basis,omitempty"`
 
 	// OccurredAt is when the call happened: the completion of the response
 	// that made it.

@@ -608,7 +608,7 @@ func NewServer(router *routing.Router, config *ServerConfig, logger *logrus.Logg
 					toolcalls.Config{ResultTimeout: config.AIQG.ToolCallEvents.ResultTimeout},
 					toolcalls.Hooks{
 						Emitted: func(o string) { routermetrics.ToolCallEventsTotal.WithLabelValues(o).Inc() },
-						Dropped: func(r string) { routermetrics.ToolCallEventsDroppedTotal.WithLabelValues(r).Inc() },
+						Dropped: func(r string, n int) { routermetrics.ToolCallEventsDroppedTotal.WithLabelValues(r).Add(float64(n)) },
 					})
 				logger.WithField("result_timeout", config.AIQG.ToolCallEvents.ResultTimeout).
 					Info("AIQG tool-call events enabled (com.tas.aiqg.tool_call.v1, observed_by=gateway)")

@@ -46,7 +46,7 @@ func TestAIQG_ToolCallEvents_EndToEnd(t *testing.T) {
 	serve(func(w http.ResponseWriter, r *http.Request) {
 		StampToolsOffered(r.Context(), []events.OfferedTool{{Name: "draw", SchemaBytes: 120}, {Name: "erase", SchemaBytes: 80}}, 200)
 		StampEchoedToolCalls(r.Context(), []string{"toolu_A"})
-		StampToolResults(r.Context(), []toolcalls.Result{{ID: "toolu_A", Bytes: 400}})
+		StampToolResults(r.Context(), []toolcalls.Result{{ID: "toolu_A", Bytes: 400}}, 0)
 		StampToolResultScans(r.Context(), map[string]ToolResultScan{"toolu_A": {Findings: map[string]int{"pii-email": 1}}})
 		w.WriteHeader(http.StatusOK)
 	})

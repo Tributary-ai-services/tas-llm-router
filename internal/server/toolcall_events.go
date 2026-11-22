@@ -27,34 +27,52 @@ func (s *Server) stampToolCallRequest(ctx context.Context, req *types.ChatReques
 	if s.toolCalls == nil || req == nil || middleware.RoutingFromContext(ctx) == nil {
 		return
 	}
-	if tools, total := offeredTools(req.Tools); len(tools) > 0 {
+	tools, total, over := offeredTools(req.Tools)
+	if len(tools) > 0 {
 		middleware.StampToolsOffered(ctx, tools, total)
 	}
-	middleware.StampToolResults(ctx, newToolResults(req.Messages))
+	s.toolCalls.DropOverflow(toolcalls.DropTooManyTools, over)
+	results, over := newToolResults(req.Messages)
+	middleware.StampToolResults(ctx, results, over)
 }
+
+// maxOfferedTools caps the catalogue rows one request contributes. Large
+// MCP-heavy clients offer a few hundred tools; past this the rest are
+// counted (reason "too_many_tools"), not listed. tools_schema_bytes still
+// covers the whole toolset.
+const maxOfferedTools = 512
 
 // offeredTools returns each tool's name and definition size (the JSON of its
 // function: name, description, parameters — what the vendor is sent and
-// bills as input), and the total.
-func offeredTools(tools []types.Tool) ([]events.OfferedTool, int) {
+// bills as input), the total over the whole toolset, and how many tools were
+// left out of the list by maxOfferedTools.
+func offeredTools(tools []types.Tool) ([]events.OfferedTool, int, int) {
 	if len(tools) == 0 {
-		return nil, 0
+		return nil, 0, 0
 	}
-	out := make([]events.OfferedTool, 0, len(tools))
-	total := 0
+	n := len(tools)
+	if n > maxOfferedTools {
+		n = maxOfferedTools
+	}
+	out := make([]events.OfferedTool, 0, n)
+	total, over := 0, 0
 	for _, t := range tools {
 		if t.Function.Name == "" {
 			continue
 		}
 		b, err := json.Marshal(t.Function)
-		n := 0
+		size := 0
 		if err == nil {
-			n = len(b)
+			size = len(b)
 		}
-		total += n
-		out = append(out, events.OfferedTool{Name: t.Function.Name, SchemaBytes: n})
+		total += size
+		if len(out) >= maxOfferedTools {
+			over++
+			continue
+		}
+		out = append(out, events.OfferedTool{Name: t.Function.Name, SchemaBytes: size})
 	}
-	return out, total
+	return out, total, over
 }
 
 // newToolResults returns the tool results after the last assistant message.
@@ -62,8 +80,9 @@ func offeredTools(tools []types.Tool) ([]events.OfferedTool, int) {
 // earlier is history the client re-sends on every turn, and its calls were
 // closed on the turn that first carried them. Considering only the tail also
 // keeps the store work per request proportional to one turn's calls, not to
-// the length of the conversation.
-func newToolResults(msgs []types.Message) []toolcalls.Result {
+// the length of the conversation. At most toolcalls.MaxIDsPerObservation are
+// collected; the rest are only counted (returned as overflow).
+func newToolResults(msgs []types.Message) ([]toolcalls.Result, int) {
 	last := -1
 	for i, m := range msgs {
 		if m.Role == "assistant" {
@@ -71,13 +90,18 @@ func newToolResults(msgs []types.Message) []toolcalls.Result {
 		}
 	}
 	var out []toolcalls.Result
+	over := 0
 	for _, m := range msgs[last+1:] {
 		if m.Role != "tool" || m.ToolCallID == "" {
 			continue
 		}
+		if len(out) >= toolcalls.MaxIDsPerObservation {
+			over++
+			continue
+		}
 		out = append(out, toolcalls.Result{ID: m.ToolCallID, Bytes: contentBytes(m.Content)})
 	}
-	return out
+	return out, over
 }
 
 // contentBytes is the text size of a message's content: a string, or the

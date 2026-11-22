@@ -69,6 +69,7 @@ func TestToolCallEnvelope_FieldsMatchWriterSchema(t *testing.T) {
 		"server_id": true, "observed_by": true, "outcome": true, "duration_ms": true, "round_trip_ms": true,
 		"result_bytes": true, "result_tokens_est": true, "reduced_bytes": true, "scan_skipped": true,
 		"occurred_at": true, "findings": true,
+		"no_result_basis": true, // additive (PR #284 review); T.7 reads it next
 	}
 	b, _ := json.Marshal(goldenToolCall())
 	var env map[string]json.RawMessage
@@ -85,6 +86,34 @@ func TestToolCallEnvelope_FieldsMatchWriterSchema(t *testing.T) {
 		assert.NotContains(t, data, k)
 	}
 	assert.JSONEq(t, `"com.tas.aiqg.tool_call.v1"`, string(env["type"]))
+}
+
+func goldenNoResult() ToolCallEnvelope {
+	ev := goldenToolCall()
+	d := ev.Data
+	d.Outcome, d.NoResultBasis = ToolOutcomeNoResult, NoResultTimeout
+	d.RoundTripMs, d.ResultBytes, d.ResultTokensEst, d.Findings, d.ScanSkipped = nil, nil, nil, nil, nil
+	return NewToolCallEnvelope(d, ev.Time)
+}
+
+func TestToolCallEnvelope_GoldenNoResult(t *testing.T) {
+	got, err := json.MarshalIndent(goldenNoResult(), "", "  ")
+	require.NoError(t, err)
+	got = append(got, '\n')
+	path := filepath.Join("testdata", "tool_call_gateway_no_result.golden.json")
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		require.NoError(t, os.WriteFile(path, got, 0o644))
+	}
+	want, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(want), string(got))
+}
+
+func TestToolCallEnvelope_NoResultBasisOnlyOnNoResult(t *testing.T) {
+	b, _ := json.Marshal(goldenToolCall())
+	assert.NotContains(t, string(b), "no_result_basis")
+	b, _ = json.Marshal(goldenNoResult())
+	assert.Contains(t, string(b), `"no_result_basis":"timeout"`)
 }
 
 func TestToolCallEnvelope_FindingsNullVsEmpty(t *testing.T) {

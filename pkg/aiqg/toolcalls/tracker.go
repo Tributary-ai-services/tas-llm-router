@@ -5,11 +5,36 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+)
+
+// MaxIDsPerObservation caps the tool results and the tool calls one request
+// contributes. The pending-call store runs each batch as one Lua script on
+// the shared AIQG Redis (linkage, C1 cache, breaker, affinity), and a 10 MB
+// body holds ~150k tool messages: unbounded, one request could stall that
+// Redis for hundreds of milliseconds. Real turns carry a handful of parallel
+// calls. Overflow is counted as dropped, reason "too_many_ids".
+const MaxIDsPerObservation = 128
+
+// Drop reasons, the values of aiqg_tool_call_events_dropped_total{reason}.
+const (
+	DropQueueFull    = "queue_full"
+	DropStoreError   = "store_error"
+	DropPublishError = "publish_error"
+	DropTooManyIDs   = "too_many_ids"
+	DropTooManyTools = "too_many_tools"
+	DropExpired      = "expired"
+	DropShutdown     = "shutdown"
+	DropPanic        = "panic"
+	// DropSuppressed: a call reached its result timeout after echo work for
+	// its tenant had been lost. Its result may have been the lost one, so it
+	// is not reported as no_result.
+	DropSuppressed = "suppressed_after_loss"
 )
 
 // Call is one tool call a response made.
@@ -45,12 +70,15 @@ type Observation struct {
 	IssuedAt time.Time
 	Echoed   []Result
 	Served   []Call
+	// Overflow is how many tool results or calls the extractor did not
+	// collect because the request was over MaxIDsPerObservation.
+	Overflow int
 }
 
 // Hooks observe the tracker for metrics. Any field may be nil.
 type Hooks struct {
 	Emitted func(outcome string)
-	Dropped func(reason string)
+	Dropped func(reason string, n int)
 }
 
 // Config configures a Tracker.
@@ -72,6 +100,9 @@ type Config struct {
 // its request into the flow, so the flow has closed for the gateway.
 const DefaultResultTimeout = time.Hour
 
+// lossFlushInterval is how often recorded echo losses reach the shared store.
+const lossFlushInterval = time.Second
+
 // Tracker turns observations into exactly one tool_call event per call. All
 // store and publish work runs on its own goroutines: Observe never blocks.
 type Tracker struct {
@@ -86,10 +117,19 @@ type Tracker struct {
 	stop  chan struct{}
 	wg    sync.WaitGroup
 	once  sync.Once
+	// closed is set when Close gives up waiting. From then on nothing is
+	// published: the caller is about to close the producer underneath us.
+	closed atomic.Bool
 
 	catMu   sync.Mutex
 	catHour int64
 	catSeen map[string]struct{}
+
+	// lost holds, per tenant, the latest time echo work was lost and not yet
+	// written to the store. Kept in memory so recording a loss never does
+	// I/O on the request path (queue_full happens there).
+	lossMu sync.Mutex
+	lost   map[string]time.Time
 }
 
 // New returns a started tracker. Close it on shutdown.
@@ -114,6 +154,7 @@ func New(store Store, pub events.ToolCallPublisher, log *logrus.Logger, cfg Conf
 		queue:   make(chan Observation, cfg.QueueSize),
 		stop:    make(chan struct{}),
 		catSeen: map[string]struct{}{},
+		lost:    map[string]time.Time{},
 	}
 	for i := 0; i < cfg.Workers; i++ {
 		t.wg.Add(1)
@@ -127,23 +168,85 @@ func New(store Store, pub events.ToolCallPublisher, log *logrus.Logger, cfg Conf
 // Observe queues one request's tool activity. Never blocks: a full queue
 // drops the observation and counts it.
 func (t *Tracker) Observe(o Observation) {
-	if t == nil || o.Identity.TenantID == "" || (len(o.Echoed) == 0 && len(o.Served) == 0) {
+	if t == nil || o.Identity.TenantID == "" {
+		return
+	}
+	o = capObservation(t, o)
+	if len(o.Echoed) == 0 && len(o.Served) == 0 {
 		return
 	}
 	select {
 	case <-t.stop:
+		t.lose(o, DropShutdown)
 		return
 	default:
 	}
 	select {
 	case t.queue <- o:
 	default:
-		t.drop("queue_full")
+		t.lose(o, DropQueueFull)
+	}
+}
+
+// capObservation enforces MaxIDsPerObservation and counts the overflow.
+func capObservation(t *Tracker, o Observation) Observation {
+	over := o.Overflow
+	o.Overflow = 0
+	if n := len(o.Echoed); n > MaxIDsPerObservation {
+		over += n - MaxIDsPerObservation
+		o.Echoed = o.Echoed[:MaxIDsPerObservation]
+	}
+	if n := len(o.Served); n > MaxIDsPerObservation {
+		over += n - MaxIDsPerObservation
+		o.Served = o.Served[:MaxIDsPerObservation]
+	}
+	if over > 0 {
+		t.dropN(DropTooManyIDs, over)
+	}
+	return o
+}
+
+// lose counts a dropped observation and, when it carried echoes, records
+// the loss so the sweeper does not report their calls as no_result.
+func (t *Tracker) lose(o Observation, reason string) {
+	t.drop(reason)
+	if len(o.Echoed) > 0 {
+		t.noteLoss(o.Identity.TenantID, o.EchoAt)
+	}
+}
+
+func (t *Tracker) noteLoss(tenantID string, at time.Time) {
+	if at.IsZero() {
+		at = t.now()
+	}
+	t.lossMu.Lock()
+	defer t.lossMu.Unlock()
+	if len(t.lost) >= 10000 {
+		return // bounded; the flusher empties it every second
+	}
+	if at.After(t.lost[tenantID]) {
+		t.lost[tenantID] = at
+	}
+}
+
+// flushLosses writes recorded losses to the store. A failed write is kept
+// for the next flush (a store outage is when losses happen).
+func (t *Tracker) flushLosses(ctx context.Context) {
+	t.lossMu.Lock()
+	pending := t.lost
+	t.lost = map[string]time.Time{}
+	t.lossMu.Unlock()
+	ttl := t.cfg.ResultTimeout + time.Hour
+	for tenant, at := range pending {
+		if err := t.store.MarkLoss(ctx, tenant, at, ttl); err != nil {
+			t.noteLoss(tenant, at)
+		}
 	}
 }
 
 // Close stops the sweeper and drains the queue, waiting at most until ctx
-// is done.
+// is done. After it returns nothing more is published, so the caller may
+// close the producer.
 func (t *Tracker) Close(ctx context.Context) {
 	if t == nil {
 		return
@@ -155,6 +258,10 @@ func (t *Tracker) Close(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
+	t.closed.Store(true)
+	fctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.flushLosses(fctx)
+	cancel()
 }
 
 func (t *Tracker) work() {
@@ -162,13 +269,18 @@ func (t *Tracker) work() {
 	for {
 		select {
 		case o := <-t.queue:
-			t.Process(context.Background(), o)
+			t.safeProcess(o)
 		case <-t.stop:
-			// Drain what is already queued, then exit.
+			// Drain what is already queued, then exit. Once Close has given
+			// up, what is left is counted, not processed.
 			for {
 				select {
 				case o := <-t.queue:
-					t.Process(context.Background(), o)
+					if t.closed.Load() {
+						t.lose(o, DropShutdown)
+						continue
+					}
+					t.safeProcess(o)
 				default:
 					return
 				}
@@ -177,13 +289,30 @@ func (t *Tracker) work() {
 	}
 }
 
+// safeProcess keeps a bad observation from killing a worker.
+func (t *Tracker) safeProcess(o Observation) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.log.WithField("panic", r).Error("aiqg tool_call: worker recovered")
+			t.lose(o, DropPanic)
+		}
+	}()
+	t.Process(context.Background(), o)
+}
+
 func (t *Tracker) sweepLoop() {
 	defer t.wg.Done()
-	tk := time.NewTicker(t.cfg.SweepInterval)
-	defer tk.Stop()
+	sweep := time.NewTicker(t.cfg.SweepInterval)
+	defer sweep.Stop()
+	flush := time.NewTicker(lossFlushInterval)
+	defer flush.Stop()
 	for {
 		select {
-		case <-tk.C:
+		case <-flush.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			t.flushLosses(ctx)
+			cancel()
+		case <-sweep.C:
 			t.Sweep(context.Background())
 		case <-t.stop:
 			return
@@ -200,14 +329,21 @@ func (t *Tracker) sweepLoop() {
 func (t *Tracker) Process(ctx context.Context, o Observation) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	o = capObservation(t, o)
 	tenant := o.Identity.TenantID
 
 	if len(o.Echoed) > 0 {
-		ids := make([]string, len(o.Echoed))
+		// One id twice in one tail is one result: dedupe, first wins.
+		results := make([]Result, 0, len(o.Echoed))
+		ids := make([]string, 0, len(o.Echoed))
 		echoed := make(map[string]bool, len(o.Echoed))
-		for i, r := range o.Echoed {
-			ids[i] = r.ID
+		for _, r := range o.Echoed {
+			if r.ID == "" || echoed[r.ID] {
+				continue
+			}
 			echoed[r.ID] = true
+			results = append(results, r)
+			ids = append(ids, r.ID)
 		}
 		// An id this same response mints again must not leave a tombstone,
 		// or the open below would close the NEW call as already answered.
@@ -226,14 +362,19 @@ func (t *Tracker) Process(ctx context.Context, o Observation) {
 		closed, err := t.closeEchoes(ctx, tenant, ids, tombIDs, plainIDs, o.EchoAt)
 		if err != nil {
 			t.log.WithError(err).Warn("aiqg tool_call: echo close failed")
-			t.drop("store_error")
+			t.drop(DropStoreError)
+			t.noteLoss(tenant, o.EchoAt)
 		}
 		var missing []string
 		for i, p := range closed {
 			if p == nil {
 				continue
 			}
-			r := o.Echoed[i]
+			if p.Expired {
+				t.drop(DropExpired)
+				continue
+			}
+			r := results[i]
 			t.emit(ctx, okEvent(*p, o.EchoAt, &r))
 			for _, sib := range p.Siblings {
 				if !echoed[sib] {
@@ -247,13 +388,9 @@ func (t *Tracker) Process(ctx context.Context, o Observation) {
 			got, err := t.store.Claim(ctx, tenant, missing)
 			if err != nil {
 				t.log.WithError(err).Warn("aiqg tool_call: sibling close failed")
-				t.drop("store_error")
+				t.drop(DropStoreError)
 			}
-			for _, p := range got {
-				if p != nil {
-					t.emit(ctx, noResultEvent(*p))
-				}
-			}
+			t.emitNoResults(ctx, got, events.NoResultSibling)
 		}
 	}
 
@@ -284,14 +421,14 @@ func (t *Tracker) Process(ctx context.Context, o Observation) {
 		res, err := t.store.Open(ctx, tenant, calls, o.IssuedAt.Add(t.cfg.ResultTimeout))
 		if err != nil {
 			t.log.WithError(err).Warn("aiqg tool_call: open failed")
-			t.drop("store_error")
+			t.drop(DropStoreError)
 			return
 		}
 		anyEchoed := false
 		closedHere := map[string]bool{}
 		for i, r := range res {
 			if r.Displaced != nil {
-				t.emit(ctx, noResultEvent(*r.Displaced))
+				t.emit(ctx, noResultEvent(*r.Displaced, events.NoResultReminted))
 			}
 			if r.EchoedAt != nil {
 				anyEchoed = true
@@ -310,19 +447,27 @@ func (t *Tracker) Process(ctx context.Context, o Observation) {
 			}
 			got, err := t.store.Claim(ctx, tenant, rest)
 			if err != nil {
-				t.drop("store_error")
+				t.drop(DropStoreError)
 			}
-			for _, p := range got {
-				if p != nil {
-					t.emit(ctx, noResultEvent(*p))
-				}
-			}
+			t.emitNoResults(ctx, got, events.NoResultSibling)
+		}
+	}
+}
+
+func (t *Tracker) emitNoResults(ctx context.Context, got []*Pending, basis string) {
+	for _, p := range got {
+		switch {
+		case p == nil:
+		case p.Expired:
+			t.drop(DropExpired)
+		default:
+			t.emit(ctx, noResultEvent(*p, basis))
 		}
 	}
 }
 
 // closeEchoes closes ids (tombstoning tombIDs, not plainIDs) and returns
-// the results aligned with ids.
+// the results aligned with ids. ids must be distinct.
 func (t *Tracker) closeEchoes(ctx context.Context, tenant string, ids, tombIDs, plainIDs []string, echoAt time.Time) ([]*Pending, error) {
 	byID := map[string]*Pending{}
 	var firstErr error
@@ -332,7 +477,9 @@ func (t *Tracker) closeEchoes(ctx context.Context, tenant string, ids, tombIDs, 
 			firstErr = err
 		}
 		for i, p := range got {
-			byID[tombIDs[i]] = p
+			if p != nil {
+				byID[tombIDs[i]] = p
+			}
 		}
 	}
 	if len(plainIDs) > 0 {
@@ -341,7 +488,9 @@ func (t *Tracker) closeEchoes(ctx context.Context, tenant string, ids, tombIDs, 
 			firstErr = err
 		}
 		for i, p := range got {
-			byID[plainIDs[i]] = p
+			if p != nil {
+				byID[plainIDs[i]] = p
+			}
 		}
 	}
 	out := make([]*Pending, len(ids))
@@ -351,10 +500,29 @@ func (t *Tracker) closeEchoes(ctx context.Context, tenant string, ids, tombIDs, 
 	return out, firstErr
 }
 
-// Sweep emits no_result for every call whose flow has closed.
+// Sweep emits no_result for every call whose flow has closed, except calls
+// whose tenant lost echo work after the call was made: their result may be
+// the one that was lost, and a false no_result is worse than a missing one.
 func (t *Tracker) Sweep(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	t.flushLosses(ctx) // this replica's own losses count too
+	lastLoss := map[string]*time.Time{}
+	lossFor := func(tenant string) *time.Time {
+		if v, ok := lastLoss[tenant]; ok {
+			return v
+		}
+		var v *time.Time
+		if at, ok, err := t.store.LastLoss(ctx, tenant); err == nil && ok {
+			v = &at
+		} else if err != nil {
+			// Cannot tell: suppress rather than risk a false no_result.
+			now := t.now()
+			v = &now
+		}
+		lastLoss[tenant] = v
+		return v
+	}
 	for i := 0; i < 20; i++ { // bounded: at most 2,000 calls per tick
 		got, err := t.store.Expired(ctx, t.now(), 100)
 		if err != nil {
@@ -362,7 +530,14 @@ func (t *Tracker) Sweep(ctx context.Context) {
 			return
 		}
 		for _, p := range got {
-			t.emit(ctx, noResultEvent(p))
+			switch {
+			case p.Expired:
+				t.drop(DropExpired)
+			case func() bool { l := lossFor(p.TenantID); return l != nil && !l.Before(p.IssuedAt) }():
+				t.drop(DropSuppressed)
+			default:
+				t.emit(ctx, noResultEvent(p, events.NoResultTimeout))
+			}
 		}
 		if len(got) < 100 {
 			return
@@ -399,13 +574,30 @@ func (t *Tracker) CatalogueDue(tenantID string, tools []events.OfferedTool, now 
 	return true
 }
 
+// DropOverflow counts collection overflow reported by a caller that capped
+// its own extraction (e.g. a toolset over the offered-tools cap).
+func (t *Tracker) DropOverflow(reason string, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.dropN(reason, n)
+}
+
 func (t *Tracker) emit(ctx context.Context, ev events.ToolCallEvent) {
 	if t.pub == nil {
 		return
 	}
-	if err := t.pub.PublishToolCall(ctx, events.NewToolCallEnvelope(ev, t.now())); err != nil {
+	if t.closed.Load() {
+		t.drop(DropShutdown)
+		return
+	}
+	if err := t.publish(ctx, ev); err != nil {
 		t.log.WithError(err).Warn("aiqg tool_call: publish failed")
-		t.drop("publish_error")
+		if _, panicked := err.(errPublishPanicked); panicked {
+			t.drop(DropPanic)
+		} else {
+			t.drop(DropPublishError)
+		}
 		return
 	}
 	if t.hooks.Emitted != nil {
@@ -413,9 +605,26 @@ func (t *Tracker) emit(ctx context.Context, ev events.ToolCallEvent) {
 	}
 }
 
-func (t *Tracker) drop(reason string) {
+// errPublishPanicked reports a publish that panicked: sarama panics when a
+// message is sent on a producer closed during shutdown.
+type errPublishPanicked struct{ v interface{} }
+
+func (e errPublishPanicked) Error() string { return "publish panicked during shutdown" }
+
+func (t *Tracker) publish(ctx context.Context, ev events.ToolCallEvent) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errPublishPanicked{r}
+		}
+	}()
+	return t.pub.PublishToolCall(ctx, events.NewToolCallEnvelope(ev, t.now()))
+}
+
+func (t *Tracker) drop(reason string) { t.dropN(reason, 1) }
+
+func (t *Tracker) dropN(reason string, n int) {
 	if t.hooks.Dropped != nil {
-		t.hooks.Dropped(reason)
+		t.hooks.Dropped(reason, n)
 	}
 }
 
@@ -460,9 +669,10 @@ func okEvent(p Pending, echoAt time.Time, r *Result) events.ToolCallEvent {
 	return ev
 }
 
-func noResultEvent(p Pending) events.ToolCallEvent {
+func noResultEvent(p Pending, basis string) events.ToolCallEvent {
 	ev := baseEvent(p)
 	ev.Outcome = events.ToolOutcomeNoResult
+	ev.NoResultBasis = basis
 	return ev
 }
 

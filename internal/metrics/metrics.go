@@ -143,7 +143,9 @@ var (
 	)
 
 	// ToolCallEventsDroppedTotal counts tool-call work the gateway gave up
-	// on rather than slow a request: queue_full, store_error, publish_error.
+	// on rather than slow or endanger a request: queue_full, store_error,
+	// publish_error, too_many_ids, too_many_tools, expired, shutdown, panic,
+	// suppressed_after_loss (see pkg/aiqg/toolcalls Drop* constants).
 	ToolCallEventsDroppedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aiqg_tool_call_events_dropped_total",

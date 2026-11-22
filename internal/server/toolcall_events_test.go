@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -208,4 +209,39 @@ func TestToolCallScan_Stamped(t *testing.T) {
 		"call_2": {Findings: map[string]int{"pii-email": 1}},
 	}})
 	assert.Equal(t, map[string]middleware.ToolResultScan{"call_2": {Findings: map[string]int{"pii-email": 1}}}, r.Snapshot().ToolResultScans)
+}
+
+// PR #284 review finding 1: a request with a huge tool-message tail sends at
+// most MaxIDsPerObservation ids on, and counts the rest.
+func TestToolCallRequest_ToolResultsCapped(t *testing.T) {
+	msgs := []types.Message{{Role: "user", Content: "go"}, {Role: "assistant", Content: "calling"}}
+	for i := 0; i < 20000; i++ {
+		msgs = append(msgs, types.Message{Role: "tool", ToolCallID: fmt.Sprintf("call_%d", i), Content: "x"})
+	}
+	got, over := newToolResults(msgs)
+	assert.Len(t, got, toolcalls.MaxIDsPerObservation)
+	assert.Equal(t, 20000-toolcalls.MaxIDsPerObservation, over)
+
+	s := toolServer(t)
+	ctx, r := aiqgCtx()
+	s.stampToolCallRequest(ctx, &types.ChatRequest{Messages: msgs})
+	snap := r.Snapshot()
+	assert.Len(t, snap.ToolResults, toolcalls.MaxIDsPerObservation)
+	assert.Equal(t, 20000-toolcalls.MaxIDsPerObservation, snap.ToolResultsOver)
+}
+
+func TestToolCallRequest_OfferedToolsCapped(t *testing.T) {
+	tools := make([]types.Tool, 600)
+	for i := range tools {
+		tools[i] = types.Tool{Type: "function", Function: types.Function{Name: fmt.Sprintf("t%d", i)}}
+	}
+	got, total, over := offeredTools(tools)
+	assert.Len(t, got, maxOfferedTools)
+	assert.Equal(t, 600-maxOfferedTools, over)
+	sum := 0
+	for _, tl := range tools {
+		b, _ := json.Marshal(tl.Function)
+		sum += len(b)
+	}
+	assert.Equal(t, sum, total, "tools_schema_bytes still covers the whole toolset")
 }

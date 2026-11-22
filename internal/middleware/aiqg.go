@@ -423,7 +423,7 @@ func observeToolCalls(t *toolcalls.Tracker, routing *Routing, resp events.Respon
 		return
 	}
 	rs := routing.Snapshot()
-	if len(rs.ToolResults) == 0 && len(rs.ServedToolCalls) == 0 {
+	if len(rs.ToolResults) == 0 && len(rs.ServedToolCalls) == 0 && rs.ToolResultsOver == 0 {
 		return
 	}
 	d := resp.Data
@@ -470,6 +470,7 @@ func observeToolCalls(t *toolcalls.Tracker, routing *Routing, resp events.Respon
 		IssuedAt: issuedAt,
 		Echoed:   results,
 		Served:   served,
+		Overflow: rs.ToolResultsOver,
 	})
 }
 

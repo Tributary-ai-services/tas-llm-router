@@ -267,9 +267,9 @@ func TestTracker_ObserveNeverBlocks(t *testing.T) {
 	bs := &blockingStore{MemoryStore: NewMemoryStore(), release: make(chan struct{})}
 	var dropped atomic.Int64
 	tr := New(bs, &events.MemoryEmitter{}, logrus.New(), Config{QueueSize: 2, Workers: 1, SweepInterval: time.Hour},
-		Hooks{Dropped: func(r string) {
+		Hooks{Dropped: func(r string, n int) {
 			if r == "queue_full" {
-				dropped.Add(1)
+				dropped.Add(int64(n))
 			}
 		}})
 	start := time.Now()

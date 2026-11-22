@@ -125,6 +125,7 @@ type Routing struct {
 	// toolsOffered / toolsSchemaBytes: the request's toolset.
 	servedToolCalls  []toolcalls.Call
 	toolResults      []toolcalls.Result
+	toolResultsOver  int
 	toolResultScans  map[string]ToolResultScan
 	toolsOffered     []events.OfferedTool
 	toolsSchemaBytes int
@@ -303,6 +304,7 @@ type RoutingSnapshot struct {
 	// tool-call events (Plan #22 T.5); see the Routing fields.
 	ServedToolCalls  []toolcalls.Call
 	ToolResults      []toolcalls.Result
+	ToolResultsOver  int
 	ToolResultScans  map[string]ToolResultScan
 	ToolsOffered     []events.OfferedTool
 	ToolsSchemaBytes int
@@ -405,6 +407,7 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		ServedToolCallIDs:          append([]string(nil), r.servedToolCallIDs...),
 		ServedToolCalls:            append([]toolcalls.Call(nil), r.servedToolCalls...),
 		ToolResults:                append([]toolcalls.Result(nil), r.toolResults...),
+		ToolResultsOver:            r.toolResultsOver,
 		ToolResultScans:            r.toolResultScans,
 		ToolsOffered:               append([]events.OfferedTool(nil), r.toolsOffered...),
 		ToolsSchemaBytes:           r.toolsSchemaBytes,
@@ -503,9 +506,10 @@ func StampToolCallsMade(ctx context.Context, calls []toolcalls.Call) {
 }
 
 // StampToolResults records the tool results this request carried for the
-// first time. Append semantics. No-op outside AIQG.
-func StampToolResults(ctx context.Context, results []toolcalls.Result) {
-	if len(results) == 0 {
+// first time, and how many more it carried past the collection cap. Append
+// semantics. No-op outside AIQG.
+func StampToolResults(ctx context.Context, results []toolcalls.Result, overflow int) {
+	if len(results) == 0 && overflow == 0 {
 		return
 	}
 	r := RoutingFromContext(ctx)
@@ -515,6 +519,7 @@ func StampToolResults(ctx context.Context, results []toolcalls.Result) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.toolResults = append(r.toolResults, results...)
+	r.toolResultsOver += overflow
 }
 
 // StampToolResultScans records the inbound scan's per-tool-result findings,

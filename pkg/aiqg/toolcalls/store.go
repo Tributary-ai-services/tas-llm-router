@@ -61,6 +61,11 @@ type Pending struct {
 	IssuedAt   time.Time `json:"at"`
 	// Siblings are the other ids the same response served (parallel calls).
 	Siblings []string `json:"sib,omitempty"`
+
+	// Expired is set (never stored) when a close won the call but its value
+	// had already expired: the call is gone and cannot be emitted. Counted as
+	// a drop, reason "expired".
+	Expired bool `json:"-"`
 }
 
 // OpenResult reports, per opened call, what the open found.
@@ -88,11 +93,24 @@ type Store interface {
 	Claim(ctx context.Context, tenantID string, ids []string) ([]*Pending, error)
 	// Expired closes up to limit calls whose deadline is before now.
 	Expired(ctx context.Context, now time.Time, limit int) ([]Pending, error)
+
+	// MarkLoss records that echo work for this tenant was lost at `at` (a
+	// dropped observation, a store error, a shutdown). LastLoss returns the
+	// latest such time. The sweeper uses it to suppress timeout no_result
+	// for calls whose echo may have been the one lost.
+	MarkLoss(ctx context.Context, tenantID string, at time.Time, ttl time.Duration) error
+	LastLoss(ctx context.Context, tenantID string) (time.Time, bool, error)
 }
 
 // TombstoneTTL bounds how long an unmatched echo waits for its Open. The
 // open is normally milliseconds behind; a minute is generous.
 const TombstoneTTL = time.Minute
+
+// TombstoneSkew is how far an echo's time may fall BEFORE the call's
+// IssuedAt and still count as its echo: the two times come from different
+// replicas' clocks. An older tombstone belongs to an earlier call with the
+// same id (a client that reuses "call_0" retrying a turn) and is ignored.
+const TombstoneSkew = 500 * time.Millisecond
 
 // All keys share one hash tag so the scripts' keys land in one Redis Cluster
 // slot. The due set is global (one sweeper scan finds every tenant's
@@ -101,6 +119,7 @@ const (
 	dueKey     = "{aiqg:tc}:due"
 	pendPrefix = "{aiqg:tc}:p:"
 	tombPrefix = "{aiqg:tc}:t:"
+	lossPrefix = "{aiqg:tc}:loss:"
 )
 
 func member(tenantID, id string) string { return tenantID + "|" + id }
@@ -113,21 +132,26 @@ func splitMember(m string) (tenantID, id string, ok bool) {
 	return m[:i], m[i+1:], true
 }
 
-// openScript: KEYS = [due, p1..pn, t1..tn]; ARGV = [n, score, ttlMs, m1..mn, v1..vn].
-// Per call: a tombstone means the echo came first -> consume it and do not
-// open ("E" + echo ms). Otherwise displace any pending call with the same id
-// ("O" + old value) and open the new one.
+// openScript: KEYS = [due, p1..pn, t1..tn];
+// ARGV = [n, score, ttlMs, skewMs, m1..mn, v1..vn, issued1..issuedn].
+// Per call: a tombstone whose echo time is not before this call's issue time
+// (less the clock skew allowance) means the echo of THIS call came first ->
+// consume it and do not open ("E" + echo ms). An older tombstone belongs to
+// an earlier call with the same id: delete it and open normally. Otherwise
+// displace any pending call with the same id ("O" + old value) and open.
 var openScript = redis.NewScript(`
 local n = tonumber(ARGV[1])
+local skew = tonumber(ARGV[4])
 local out = {}
 for i = 1, n do
   local p = KEYS[1 + i]
   local t = KEYS[1 + n + i]
-  local m = ARGV[3 + i]
-  local v = ARGV[3 + n + i]
+  local m = ARGV[4 + i]
+  local v = ARGV[4 + n + i]
+  local issued = tonumber(ARGV[4 + 2 * n + i])
   local tomb = redis.call('GET', t)
-  if tomb then
-    redis.call('DEL', t)
+  if tomb then redis.call('DEL', t) end
+  if tomb and tonumber(tomb) >= issued - skew then
     out[i] = 'E' .. tomb
   else
     local old = ''
@@ -145,7 +169,9 @@ return out
 // closeScript: KEYS = [due, p1..pn, t1..tn]; ARGV = [n, tomb (0|1), echoMs, tombTtlMs, m1..mn].
 // Per id: remove from the due set; the caller whose ZREM returned 1 owns the
 // close and gets the value. With tomb=1 an id with nothing pending gets a
-// tombstone (SET NX: the first echo's time wins).
+// tombstone holding the LATEST echo time: the open compares it with the
+// call's issue time, and a stale echo of an earlier same-id call must not
+// mask the echo of the current one.
 var closeScript = redis.NewScript(`
 local n = tonumber(ARGV[1])
 local out = {}
@@ -158,7 +184,7 @@ for i = 1, n do
     redis.call('DEL', p)
   else
     if ARGV[2] == '1' then
-      redis.call('SET', t, ARGV[3], 'NX', 'PX', ARGV[4])
+      redis.call('SET', t, ARGV[3], 'PX', ARGV[4])
     end
     out[i] = ''
   end
@@ -193,6 +219,7 @@ func (s *RedisStore) Open(ctx context.Context, tenantID string, calls []Pending,
 	ids := make([]string, len(calls))
 	members := make([]interface{}, len(calls))
 	vals := make([]interface{}, len(calls))
+	issued := make([]interface{}, len(calls))
 	for i, c := range calls {
 		ids[i] = c.ToolCallID
 		members[i] = member(tenantID, c.ToolCallID)
@@ -201,15 +228,17 @@ func (s *RedisStore) Open(ctx context.Context, tenantID string, calls []Pending,
 			return nil, err
 		}
 		vals[i] = string(b)
+		issued[i] = c.IssuedAt.UnixMilli()
 	}
 	// The value outlives the deadline so the sweeper can still read it.
 	ttl := time.Until(deadline) + TombstoneTTL
 	if ttl < TombstoneTTL {
 		ttl = TombstoneTTL
 	}
-	argv := []interface{}{len(calls), deadline.UnixMilli(), ttl.Milliseconds()}
+	argv := []interface{}{len(calls), deadline.UnixMilli(), ttl.Milliseconds(), TombstoneSkew.Milliseconds()}
 	argv = append(argv, members...)
 	argv = append(argv, vals...)
+	argv = append(argv, issued...)
 	raw, err := openScript.Run(ctx, s.R, s.keys(tenantID, ids), argv...).StringSlice()
 	if err != nil {
 		return nil, err
@@ -252,14 +281,18 @@ func (s *RedisStore) close(ctx context.Context, tenantID string, ids []string, t
 		return nil, err
 	}
 	out := make([]*Pending, len(ids))
-	for i := range ids {
-		if i >= len(raw) || len(raw[i]) < 2 || raw[i][0] != 'C' {
-			continue // nothing pending, or closed but the value had expired
+	for i, id := range ids {
+		if i >= len(raw) || raw[i] == "" || raw[i][0] != 'C' {
+			continue // nothing pending
 		}
 		var p Pending
-		if json.Unmarshal([]byte(raw[i][1:]), &p) == nil {
-			out[i] = &p
+		if len(raw[i]) < 2 || json.Unmarshal([]byte(raw[i][1:]), &p) != nil {
+			// This caller won the close, but the value had expired (or was
+			// unreadable): the call is gone. Reported, not skipped silently.
+			out[i] = &Pending{Identity: Identity{TenantID: tenantID}, ToolCallID: id, Expired: true}
+			continue
 		}
+		out[i] = &p
 	}
 	return out, nil
 }
@@ -308,6 +341,30 @@ func (s *RedisStore) Expired(ctx context.Context, now time.Time, limit int) ([]P
 	return out, nil
 }
 
+// lossScript keeps the LATEST loss time: KEYS = [k]; ARGV = [ms, ttlMs].
+var lossScript = redis.NewScript(`
+local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+if tonumber(ARGV[1]) > cur then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+end
+return 1
+`)
+
+func (s *RedisStore) MarkLoss(ctx context.Context, tenantID string, at time.Time, ttl time.Duration) error {
+	return lossScript.Run(ctx, s.R, []string{lossPrefix + tenantID}, at.UnixMilli(), ttl.Milliseconds()).Err()
+}
+
+func (s *RedisStore) LastLoss(ctx context.Context, tenantID string) (time.Time, bool, error) {
+	v, err := s.R.Get(ctx, lossPrefix+tenantID).Int64()
+	if err == redis.Nil {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return time.UnixMilli(v), true, nil
+}
+
 // MemoryStore is an in-process Store for tests. It is NOT used in
 // production: with more than one replica, an echo landing on another pod
 // would never find its call, and the call would be swept as no_result.
@@ -315,6 +372,7 @@ type MemoryStore struct {
 	mu   sync.Mutex
 	pend map[string]memEntry
 	tomb map[string]memTomb
+	loss map[string]time.Time
 	now  func() time.Time
 }
 
@@ -329,7 +387,7 @@ type memTomb struct {
 
 // NewMemoryStore returns an empty in-process store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{pend: map[string]memEntry{}, tomb: map[string]memTomb{}, now: time.Now}
+	return &MemoryStore{pend: map[string]memEntry{}, tomb: map[string]memTomb{}, loss: map[string]time.Time{}, now: time.Now}
 }
 
 func (s *MemoryStore) Open(_ context.Context, tenantID string, calls []Pending, deadline time.Time) ([]OpenResult, error) {
@@ -340,7 +398,7 @@ func (s *MemoryStore) Open(_ context.Context, tenantID string, calls []Pending, 
 		k := member(tenantID, c.ToolCallID)
 		if t, ok := s.tomb[k]; ok {
 			delete(s.tomb, k)
-			if s.now().Before(t.expires) {
+			if s.now().Before(t.expires) && !t.at.Before(c.IssuedAt.Add(-TombstoneSkew)) {
 				at := t.at
 				out[i].EchoedAt = &at
 				continue
@@ -368,9 +426,7 @@ func (s *MemoryStore) close(tenantID string, ids []string, tomb bool, echoAt tim
 			continue
 		}
 		if tomb {
-			if _, exists := s.tomb[k]; !exists {
-				s.tomb[k] = memTomb{at: echoAt, expires: s.now().Add(TombstoneTTL)}
-			}
+			s.tomb[k] = memTomb{at: echoAt, expires: s.now().Add(TombstoneTTL)}
 		}
 	}
 	return out
@@ -400,7 +456,23 @@ func (s *MemoryStore) Expired(_ context.Context, now time.Time, limit int) ([]Pe
 	return out, nil
 }
 
-// Pending reports how many calls are open (tests).
+func (s *MemoryStore) MarkLoss(_ context.Context, tenantID string, at time.Time, _ time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.After(s.loss[tenantID]) {
+		s.loss[tenantID] = at
+	}
+	return nil
+}
+
+func (s *MemoryStore) LastLoss(_ context.Context, tenantID string) (time.Time, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.loss[tenantID]
+	return t, ok, nil
+}
+
+// PendingCount reports how many calls are open (tests).
 func (s *MemoryStore) PendingCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
