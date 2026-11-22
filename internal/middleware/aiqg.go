@@ -50,6 +50,7 @@ import (
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/policy"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/promptcache"
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/tokens"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/toolcalls"
 
 	"github.com/tributary-ai/llm-router-waf/internal/workflow"
 )
@@ -114,6 +115,11 @@ type AIQGConfig struct {
 	// no assignment, no stamping. dry_run/running experiments get stamped on
 	// the event; the routing override (running) is applied separately.
 	Experiments *experiments.Resolver
+
+	// ToolCalls emits gateway tool_call.v1 events (Plan #22 T.5). Nil
+	// disables them. Observe never blocks: it queues for the tracker's own
+	// goroutines, so the request path pays nothing for the store or Kafka.
+	ToolCalls *toolcalls.Tracker
 }
 
 // NewAIQG returns the middleware constructor. The returned handler is a
@@ -367,7 +373,15 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		// running additionally applied the override before Router.Route.
 		expSnap := routing.Snapshot()
 
-		reqEnv, respEnv := events.Build(r, headersView(parsed), routingView(routing), tokenView(resolvedToken), collector.Snapshot(), events.BuildOptions{
+		rv := routingView(routing)
+		tv := tokenView(resolvedToken)
+		// Catalogue rows ride on the response event once per toolset per
+		// tenant per hour; tools_schema_bytes rides on every event.
+		if !cfg.ToolCalls.CatalogueDue(tv.TenantID, rv.ToolsOffered, time.Now()) {
+			rv.ToolsOffered = nil
+		}
+
+		reqEnv, respEnv := events.Build(r, headersView(parsed), rv, tv, collector.Snapshot(), events.BuildOptions{
 			HTTPStatus: sw.status(),
 			// An explicit outcome overrides the status derived from the HTTP
 			// code. Load-bearing for STREAMED failures: the handler writes 200
@@ -394,10 +408,69 @@ func handleAIQG(cfg AIQGConfig, next http.Handler, w http.ResponseWriter, r *htt
 		if err := emitter.Emit(ctx, reqEnv, respEnv); err != nil {
 			cfg.Logger.WithError(err).Warn("AIQG event emission failed")
 		}
+		observeToolCalls(cfg.ToolCalls, routing, respEnv)
 	}()
 	defer instrumentation.StampComplete(ctx)
 
 	next.ServeHTTP(sw, r.WithContext(ctx))
+}
+
+// observeToolCalls hands this request's tool activity to the tracker. The
+// identity is the response event's own, so a call carries exactly the
+// identity of the response that made it (contract §2.2). Queues only.
+func observeToolCalls(t *toolcalls.Tracker, routing *Routing, resp events.ResponseEnvelope) {
+	if t == nil || routing == nil {
+		return
+	}
+	rs := routing.Snapshot()
+	if len(rs.ToolResults) == 0 && len(rs.ServedToolCalls) == 0 {
+		return
+	}
+	d := resp.Data
+	id := toolcalls.Identity{
+		TenantID:  d.TenantID,
+		TokenID:   d.TASAuthTokenID,
+		OwnerSub:  d.TokenOwnerSub,
+		SourceApp: d.SourceApp,
+		StepID:    d.ResponseEventID,
+	}
+	if ac := d.AgentContext; ac != nil {
+		id.UserID, id.AgentID, id.FlowID = ac.UserID, ac.AgentID, ac.FlowID
+		if ac.StepID != "" {
+			id.StepID = ac.StepID
+		}
+	}
+	now := time.Now()
+	echoAt, issuedAt := now, now
+	if ts := d.EventTimestamps.RequestReceivedAt; ts != nil {
+		echoAt = *ts
+	}
+	if ts := d.EventTimestamps.ResponseCompleteAt; ts != nil {
+		issuedAt = *ts
+	}
+	results := rs.ToolResults
+	if len(rs.ToolResultScans) > 0 {
+		results = make([]toolcalls.Result, len(rs.ToolResults))
+		for i, r := range rs.ToolResults {
+			if sc, ok := rs.ToolResultScans[r.ID]; ok {
+				r.FindingsKnown, r.Findings, r.ScanSkipped = true, sc.Findings, sc.Skipped
+			}
+			results[i] = r
+		}
+	}
+	// A failed response made no calls the client could act on.
+	served := rs.ServedToolCalls
+	switch d.Status {
+	case events.StatusVendorError, events.StatusGatewayError, events.StatusTimeout:
+		served = nil
+	}
+	t.Observe(toolcalls.Observation{
+		Identity: id,
+		EchoAt:   echoAt,
+		IssuedAt: issuedAt,
+		Echoed:   results,
+		Served:   served,
+	})
 }
 
 // tokenSource names which native SDK credential slot a recovered gateway
@@ -987,6 +1060,8 @@ func routingView(r *Routing) events.RoutingView {
 		AttemptCount:               s.AttemptCount,
 		FallbackUsed:               s.FallbackUsed,
 		RetrySet:                   s.RetrySet,
+		ToolsOffered:               s.ToolsOffered,
+		ToolsSchemaBytes:           s.ToolsSchemaBytes,
 		Workflow:                   s.Workflow,
 		NISTFindings:               s.NISTFindings,
 		TagFindings:                s.TagFindings,

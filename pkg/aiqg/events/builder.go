@@ -82,9 +82,17 @@ type RoutingView struct {
 	// Efficacy sub-metric applicability (Plan #17a T2 Phase 0a).
 	// ApplicabilitySet=false means the sidecar was never stamped, and both
 	// flags are then omitted from the event rather than emitted as false.
-	SchemaRequested     bool
-	ToolsDeclared       bool
-	ApplicabilitySet    bool
+	SchemaRequested  bool
+	ToolsDeclared    bool
+	ApplicabilitySet bool
+
+	// Offered toolset (Plan #22 T.5). ToolsSchemaBytes is the total size of
+	// the request's tool definitions; ToolsOffered the per-tool rows for
+	// aiqg.tool_catalogue, set only on the first sighting of a toolset per
+	// tenant per hour (the middleware dedupes). Both zero when tool-call
+	// events are off.
+	ToolsOffered        []OfferedTool
+	ToolsSchemaBytes    int
 	AffinityHeld        bool
 	AffinityEpoch       string
 	AffinityReason      string
@@ -776,6 +784,8 @@ func Build(r *http.Request, headers AIQGHeadersView, routing RoutingView, token 
 		ContentChunkCount:          snap.ContentChunkCount,
 		SchemaRequested:            boolPtrIf(routing.ApplicabilitySet, routing.SchemaRequested),
 		ToolsDeclared:              boolPtrIf(routing.ApplicabilitySet, routing.ToolsDeclared),
+		ToolsSchemaBytes:           intPtrIf(routing.ToolsSchemaBytes > 0, routing.ToolsSchemaBytes),
+		ToolsOffered:               routing.ToolsOffered,
 		EventTimestamps:            snap,
 		TokenAccounting:            tokenAcct,
 		Assurance:                  assuranceSummary,
@@ -878,6 +888,13 @@ func clientIP(r *http.Request) string {
 // is the §6.3 "nil is a value" discipline applied to a boolean: an omitted
 // field is unknown, a present false is a measurement.
 func boolPtrIf(observed, v bool) *bool {
+	if !observed {
+		return nil
+	}
+	return &v
+}
+
+func intPtrIf(observed bool, v int) *int {
 	if !observed {
 		return nil
 	}

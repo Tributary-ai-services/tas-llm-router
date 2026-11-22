@@ -140,6 +140,23 @@ type AIQGConfig struct {
 	// Off at both levels by default; a tenant is tagged only when Enabled is
 	// true AND its id is in Tenants.
 	SDLCTag AIQGSDLCTagConfig `yaml:"sdlc_tag"`
+
+	// ToolCallEvents emits com.tas.aiqg.tool_call.v1 (observed_by=gateway)
+	// for every tool call a response makes, and adds the offered toolset to
+	// the response event (Plan #22 T.5). Off by default. Needs the linkage
+	// Redis (AIQG_LINKAGE_REDIS_URL): the pending-call store must be shared
+	// by every replica, so without Redis the feature stays off.
+	ToolCallEvents AIQGToolCallEventsConfig `yaml:"tool_call_events"`
+}
+
+// AIQGToolCallEventsConfig configures gateway tool-call events. Env:
+// AIQG_TOOL_CALL_EVENTS_ENABLED (default false),
+// AIQG_TOOL_CALL_RESULT_TIMEOUT (Go duration, default 1h = the linkage
+// index lifetime: a call whose result has not come back by then is emitted
+// as no_result).
+type AIQGToolCallEventsConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	ResultTimeout time.Duration `yaml:"result_timeout"`
 }
 
 // AIQGSDLCTagConfig configures SDLC mode A. Env: SDLC_TAG_ENABLED (global,
@@ -1348,6 +1365,15 @@ func (c *Config) loadFromEnv() {
 		}
 	}
 	// C4 semantic cache. Shadow defaults ON when enabled (safe first mode).
+	// Tool-call events (Plan #22 T.5). Default off.
+	if v := os.Getenv("AIQG_TOOL_CALL_EVENTS_ENABLED"); v != "" {
+		c.AIQG.ToolCallEvents.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("AIQG_TOOL_CALL_RESULT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.AIQG.ToolCallEvents.ResultTimeout = d
+		}
+	}
 	// SDLC mode A. Both switches default off; see AIQGSDLCTagConfig.
 	if v := os.Getenv("SDLC_TAG_ENABLED"); v != "" {
 		c.AIQG.SDLCTag.Enabled = v == "true" || v == "1"
@@ -1666,6 +1692,10 @@ func (c *Config) ToAIQGServerConfig() *server.AIQGServerConfig {
 			Tenants:    c.AIQG.SDLCTag.Tenants,
 			Budget:     c.AIQG.SDLCTag.Budget,
 			MaxStrikes: c.AIQG.SDLCTag.MaxStrikes,
+		},
+		ToolCallEvents: server.AIQGToolCallEventsConfig{
+			Enabled:       c.AIQG.ToolCallEvents.Enabled,
+			ResultTimeout: c.AIQG.ToolCallEvents.ResultTimeout,
 		},
 	}
 	if len(c.AIQG.Tokens) > 0 {

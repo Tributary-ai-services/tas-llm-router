@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/events"
+	"github.com/tributary-ai/llm-router-waf/pkg/aiqg/toolcalls"
 )
 
 // Routing carries the routing-layer decision (vendor, model, streaming
@@ -115,6 +116,18 @@ type Routing struct {
 	// pkg/aiqg/linkage on response completion.
 	echoedToolCallIDs []string
 	servedToolCallIDs []string
+
+	// tool-call events (Plan #22 T.5). Stamped only when the tracker is on.
+	// servedToolCalls: the calls this response made (id + name).
+	// toolResults: tool results first carried by this request (the tool
+	// messages after its last assistant message) with their byte size.
+	// toolResultScans: what the inbound scan attributed to each result.
+	// toolsOffered / toolsSchemaBytes: the request's toolset.
+	servedToolCalls  []toolcalls.Call
+	toolResults      []toolcalls.Result
+	toolResultScans  map[string]ToolResultScan
+	toolsOffered     []events.OfferedTool
+	toolsSchemaBytes int
 
 	// prefix-chaining tier (§A.2): canonical hash of the conversation state
 	// this request CONTINUES (its message prefix up to the last assistant
@@ -287,6 +300,13 @@ type RoutingSnapshot struct {
 	EchoedToolCallIDs []string
 	ServedToolCallIDs []string
 
+	// tool-call events (Plan #22 T.5); see the Routing fields.
+	ServedToolCalls  []toolcalls.Call
+	ToolResults      []toolcalls.Result
+	ToolResultScans  map[string]ToolResultScan
+	ToolsOffered     []events.OfferedTool
+	ToolsSchemaBytes int
+
 	// prefix-chaining tier (§A.2): resolve key (prefix of the incoming
 	// request) and index key (state left by serving this response). Empty
 	// when not applicable.
@@ -383,6 +403,11 @@ func (r *Routing) Snapshot() RoutingSnapshot {
 		TagFindings:                copyCounts(r.tagFindings),
 		EchoedToolCallIDs:          append([]string(nil), r.echoedToolCallIDs...),
 		ServedToolCallIDs:          append([]string(nil), r.servedToolCallIDs...),
+		ServedToolCalls:            append([]toolcalls.Call(nil), r.servedToolCalls...),
+		ToolResults:                append([]toolcalls.Result(nil), r.toolResults...),
+		ToolResultScans:            r.toolResultScans,
+		ToolsOffered:               append([]events.OfferedTool(nil), r.toolsOffered...),
+		ToolsSchemaBytes:           r.toolsSchemaBytes,
 		PrefixHash:                 r.prefixHash,
 		StateHash:                  r.stateHash,
 		Fingerprint:                r.fingerprint,
@@ -453,6 +478,76 @@ func StampServedToolCalls(ctx context.Context, ids []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.servedToolCallIDs = append(r.servedToolCallIDs, ids...)
+}
+
+// ToolResultScan is what the inbound scan attributed to one tool result:
+// countable findings by pattern id, and whether scan-once skipped it.
+type ToolResultScan struct {
+	Findings map[string]int
+	Skipped  bool
+}
+
+// StampToolCallsMade records the calls (id + name) this response made, for
+// tool-call events. Append semantics. No-op outside AIQG.
+func StampToolCallsMade(ctx context.Context, calls []toolcalls.Call) {
+	if len(calls) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.servedToolCalls = append(r.servedToolCalls, calls...)
+}
+
+// StampToolResults records the tool results this request carried for the
+// first time. Append semantics. No-op outside AIQG.
+func StampToolResults(ctx context.Context, results []toolcalls.Result) {
+	if len(results) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.toolResults = append(r.toolResults, results...)
+}
+
+// StampToolResultScans records the inbound scan's per-tool-result findings,
+// keyed by tool_call_id. Last write wins. No-op outside AIQG.
+func StampToolResultScans(ctx context.Context, scans map[string]ToolResultScan) {
+	if len(scans) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.toolResultScans = scans
+}
+
+// StampToolsOffered records the request's toolset: each tool's name and
+// definition size, and the total. First write wins. No-op outside AIQG.
+func StampToolsOffered(ctx context.Context, tools []events.OfferedTool, totalBytes int) {
+	if len(tools) == 0 {
+		return
+	}
+	r := RoutingFromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.toolsOffered == nil {
+		r.toolsOffered = tools
+		r.toolsSchemaBytes = totalBytes
+	}
 }
 
 // StampPrefixHash records the canonical hash of the conversation state this
